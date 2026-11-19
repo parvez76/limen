@@ -3,8 +3,14 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+/// `parvez` with a hermetic (empty) advisory DB so tests never hit the
+/// network for RustSec data; tests that exercise the gate override it.
 fn parvez() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_parvez"))
+    let empty_db = std::env::temp_dir().join("parvez-it-empty-advisory-db");
+    std::fs::create_dir_all(empty_db.join("crates")).unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_parvez"));
+    c.env("PARVEZ_ADVISORY_DB", empty_db);
+    c
 }
 
 /// Scratch dir per test. Everything except `.parvez_build` (cargo's cache)
@@ -265,6 +271,12 @@ fn service_example_serves_json() {
     assert!(body.starts_with(r#"{"error":"#), "{body}");
     assert_eq!(http(port, "GET", "/nope", ""), (404, r#"{"error":"not found"}"#.into()));
     assert_eq!(http(port, "DELETE", "/health", ""), (405, r#"{"error":"Method Not Allowed"}"#.into()));
+
+    // v0.5: the example survives fuzzing with no crash, hang or leak
+    let out = run_in(&dir, &["fuzz", example.to_str().unwrap()]);
+    let err = text(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("0 failure(s)"), "{err}");
 }
 
 // ---------- v0.4 ----------
@@ -438,4 +450,190 @@ fn mcp_server_tools() {
     let example = std::fs::canonicalize("examples/hello.prvz").unwrap();
     let (err, out) = m.tool(7, "parvez_eject", json!({"path": example, "map": true}));
     assert!(!err && out.contains("struct User {") && out.contains("// @prvz:"), "{out}");
+}
+
+// ---------- v0.5 ----------
+
+#[test]
+fn security_lint_blocks_insecure_code() {
+    let dir = scratch("seclint");
+    std::fs::write(
+        dir.join("bad.prvz"),
+        r#"state:
+    api_key: str = "abc123-not-from-env"
+route GET "/u/{id}" (state, id: str) -> str!:
+    q = "SELECT * FROM users WHERE id = '{id}'"
+    rows = sqlx::query(&q).fetch_all(&db).await?
+    ret std::fs::read_to_string("/srv/{id}")?
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["check", "bad.prvz"]);
+    let err = text(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("bad.prvz:2: security[hardcoded-secret]: `api_key` is assigned a string literal"), "{err}");
+    assert!(err.contains("bad.prvz:5: security[sql-injection]"), "{err}");
+    assert!(err.contains("bad.prvz:6: security[path-traversal]"), "{err}");
+    assert!(err.contains("= fix: never build SQL with interpolation"), "{err}");
+    assert!(err.contains("3 security error(s)"), "{err}");
+
+    // explicit, reasoned opt-out: allowed, but reported on every build
+    std::fs::write(
+        dir.join("ok.prvz"),
+        "@allow_insecure(\"one-off migration script, input is a constant\")\nfn migrate(t: &str):\n    db.execute(\"DROP TABLE {t}\")\nfn main():\n    ret\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["show", "ok.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("ok.prvz:2: security checks disabled by @allow_insecure: one-off migration script"));
+}
+
+fn http_raw(port: u16, req: &[u8]) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let _ = s.write_all(req);
+    let mut resp = Vec::new();
+    let _ = s.read_to_end(&mut resp);
+    String::from_utf8_lossy(&resp).into_owned()
+}
+
+#[test]
+fn hardened_service_no_leaks_limits_shutdown_and_fuzz() {
+    let dir = scratch("hardened");
+    std::fs::write(
+        dir.join("hard.prvz"),
+        r#"@json
+type Msg: text: str
+
+route GET "/boom" -> i32!:
+    n: i32 = "not a number".parse()?
+    ret n
+
+route GET "/panic/{i}" (i: usize) -> i32:
+    v = [10]
+    ret v[i]
+
+route GET "/slow" -> str:
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await
+    ret "late"
+
+route POST "/echo" (body: Msg) -> Msg:
+    ret body
+
+route GET "/leak/{name}" (name: str) -> str!:
+    fail(500, "cannot open /home/app/{name}.db (os error 2)")
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "hard.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+
+    // SBOM next to the binary
+    let sbom: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hard.sbom.json")).unwrap()).unwrap();
+    assert_eq!(sbom["bomFormat"], "CycloneDX");
+    let comps = sbom["components"].as_array().unwrap();
+    let axum = comps.iter().find(|c| c["name"] == "axum").expect("axum in SBOM");
+    assert!(axum["purl"].as_str().unwrap().starts_with("pkg:cargo/axum@0.8."));
+    assert!(axum["licenses"][0]["expression"].as_str().is_some());
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let log = dir.join("server.log");
+    let mut server = KillOnDrop(
+        Command::new(dir.join("hard"))
+            .env("PORT", port.to_string())
+            .env("PARVEZ_TIMEOUT_SECS", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let generic = r#"{"error":"internal server error"}"#.to_string();
+    // internal error: generic body to the client, details only in the server log
+    assert_eq!(http(port, "GET", "/boom", ""), (500, generic.clone()));
+    // a panicking handler is contained; the server keeps serving
+    assert_eq!(http(port, "GET", "/panic/0", ""), (200, "10".into()));
+    assert_eq!(http(port, "GET", "/panic/1", ""), (500, generic.clone()));
+    assert_eq!(http(port, "GET", "/panic/0", ""), (200, "10".into()));
+    // request timeout (PARVEZ_TIMEOUT_SECS=1)
+    assert_eq!(http(port, "GET", "/slow", ""), (503, r#"{"error":"request timed out"}"#.into()));
+    // body limit (2 MB default) -> JSON 413
+    let big = format!("{{\"text\":\"{}\"}}", "a".repeat(3 * 1024 * 1024));
+    let (code, body) = http(port, "POST", "/echo", &big);
+    assert_eq!(code, 413);
+    assert!(body.starts_with(r#"{"error":"#), "{body}");
+    // security headers on every response
+    let raw = http_raw(port, b"GET /panic/0 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").to_lowercase();
+    for h in ["x-content-type-options: nosniff", "x-frame-options: deny", "cache-control: no-store"] {
+        assert!(raw.contains(h), "missing {h} in:\n{raw}");
+    }
+    // graceful shutdown on SIGTERM
+    let pid = server.0.id().to_string();
+    assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(st) = server.0.try_wait().unwrap() {
+            break st;
+        }
+        assert!(std::time::Instant::now() < deadline, "server ignored SIGTERM");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success(), "exit {status}");
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains("parvez: internal error: invalid digit found in string"), "{log}");
+    assert!(log.contains("handler panicked"), "{log}");
+    assert!(log.contains("shutting down gracefully"), "{log}");
+
+    // fuzz: panics and errors are contained (warnings), the deliberate leak fails the run
+    let out = run_in(&dir, &["fuzz", "hard.prvz"]);
+    let err = text(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("FAIL LEAK   GET /leak/{name} [baseline] -> 500: response contains `"), "{err}");
+    assert!(err.contains("5xx    GET /panic/{i} [baseline] -> 500"), "{err}");
+    assert!(!err.contains("CRASH") && !err.contains("DROP"), "{err}");
+    assert!(err.contains("handler panic(s) contained") && !err.contains(" 0 handler panic(s)"), "{err}");
+}
+
+#[test]
+fn advisory_gate_blocks_vulnerable_deps_and_heal_reports() {
+    let dir = scratch("advisory");
+    let db = dir.join("advisory-db");
+    std::fs::create_dir_all(db.join("crates/anyhow")).unwrap();
+    std::fs::write(
+        db.join("crates/anyhow/RUSTSEC-2099-0042.md"),
+        "```toml\n[advisory]\nid = \"RUSTSEC-2099-0042\"\npackage = \"anyhow\"\ntitle = \"Test advisory: remote code execution\"\n\n[versions]\npatched = [\">= 99.0.0\"]\n```\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("app.prvz"), "fn main():\n    print(\"hi\")\n").unwrap();
+    let with_db = |args: &[&str], audit: Option<&str>| {
+        let mut c = parvez();
+        c.args(args).current_dir(&dir).env("PARVEZ_ADVISORY_DB", &db);
+        if let Some(a) = audit {
+            c.env("PARVEZ_AUDIT", a);
+        }
+        c.output().unwrap()
+    };
+
+    let out = with_db(&["build", "app.prvz"], None);
+    let err = text(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("1 known-vulnerable dependency:"), "{err}");
+    assert!(err.contains("RUSTSEC-2099-0042 anyhow@1."), "{err}");
+    assert!(err.contains("run `parvez heal app.prvz`"), "{err}");
+    assert!(!dir.join("app").exists(), "no binary is shipped when the gate fails");
+
+    let out = with_db(&["heal", "app.prvz"], None);
+    let err = text(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("parvez: heal: needs a breaking upgrade: RUSTSEC-2099-0042"), "{err}");
+    assert!(err.contains("[dependencies] anyhow = "), "{err}");
+
+    let out = with_db(&["build", "app.prvz"], Some("warn"));
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("parvez: warning: 1 known-vulnerable dependency"));
+    assert!(dir.join("app").exists() && dir.join("app.sbom.json").exists());
 }

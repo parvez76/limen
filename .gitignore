@@ -3,3 +3,5 @@
 # binaries produced by `parvez build`
 /hello
 /service
+# SBOMs written by `parvez build`
+/*.sbom.json

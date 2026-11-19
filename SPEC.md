@@ -1,4 +1,4 @@
-# PARVEZ v0.4 SPEC (AI system prompt)
+# PARVEZ v0.5 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -137,6 +137,28 @@ label = match code:
 - Casts (`as`) don't exist yet. Use typed literals (`x: u64 = 5`) or `.into()` / `T::from(x)` / `.try_into()?`.
 - Not in v0.3: closures, traits, generics on your own types, macros (`vec!`, `json!`), shared state across routes. If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
 
+## Security (enforced at compile time)
+Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `= fix: ...`). Write the safe form from the start:
+| rule | rejected | write instead |
+|---|---|---|
+| sql-injection | `query("... {x}")`, `query("..." + x)`, or a variable holding either | `sqlx::query("... WHERE id = $1").bind(x)` |
+| command-injection | `Command::new(dynamic)`; `Command::new("sh").arg("-c").arg("{x}")` | `Command::new("tar").arg("czf").arg(x)` (fixed program, input as separate args) |
+| path-traversal | route input (`{path}` params, `body`, `query`, or values derived from them) reaching `fs::*` / `File::open` | `std::fs::read_to_string(safe_join("/srv/data", &name)?)?` |
+| hardcoded-secret | a string literal in a binding named like secret/password/token/api_key/private_key, or a key-like literal (`sk_live_`, `AKIA`, `ghp_`, long random strings) | `env("API_KEY")`, usually in `state:` |
+- `safe_join(base, name)?` rejects `..`, absolute paths, separators and empty names: 400 in routes, an error elsewhere.
+- Taint is tracked inside each route body only, not into other fns. SQL and secret checks apply everywhere.
+- Opt out only deliberately: `@allow_insecure("reason")` on the line before a `fn`, `route`, method or `state:`. Every build prints the reason.
+
+Services are hardened automatically (nothing to write):
+- An unexpected error or panic returns 500 `{"error":"internal server error"}`. Details go to stderr only, and the server keeps running.
+- Limits: body 2 MB (413), timeout 30 s (503), max 512 concurrent requests (then queue, then 503). Change the defaults in `parvez.toml` with `[service] body_limit_bytes`, `timeout_secs` and `max_concurrency`, or at runtime with `PARVEZ_BODY_LIMIT_BYTES`, `PARVEZ_TIMEOUT_SECS` and `PARVEZ_MAX_CONCURRENCY`.
+- Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+- SIGINT and SIGTERM trigger a graceful shutdown: in-flight requests finish, then the process exits 0.
+
+Supply chain (on `parvez build` and `parvez run`):
+- Cargo.lock is checked against the RustSec advisory DB (cached, refreshed daily). A known vulnerability fails the build. Set `PARVEZ_AUDIT=warn|off` or `[security] audit` in parvez.toml to relax this.
+- `<name>.sbom.json` (CycloneDX 1.5: every crate with its version, license and purl) is written next to the binary.
+
 ## Errors (fix loop)
 Syntax and rustc errors both point at `.prvz` lines:
 ```
@@ -152,4 +174,6 @@ app.prvz:6: error[E0308]: mismatched types
 - `parvez run f.prvz [-- args]`: builds and executes.
 - `parvez build f.prvz`: produces `./f`, a release binary.
 - `parvez show f.prvz [-o f.rs] [--map]`: prints or writes the Rust.
+- `parvez heal f.prvz`: updates dependencies to the newest compatible versions, then re-scans and re-checks. It reports advisories that need a major upgrade (pin those in parvez.toml).
+- `parvez fuzz f.prvz`: builds and starts the service, then sends type-aware malformed and edge-case requests (bad types, boundary numbers, 100 KB strings, traversal and SQL payloads, 3 MB and 50k-deep bodies, wrong methods) to every route. It fails on a crash, a hang, or a leak of internals (panic text, `.rs:` paths, OS errors).
 - `parvez mcp`: an MCP server on stdio with tools `parvez_spec`, `parvez_check` (code or path in, mapped errors or `ok` out) and `parvez_eject`. Register it with `claude mcp add parvez -- parvez mcp`.

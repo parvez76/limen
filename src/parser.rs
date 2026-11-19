@@ -17,8 +17,29 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             Tok::Impl => items.push(Item::Impl(p.parse_impl()?)),
             Tok::Use => items.push(Item::Use(p.parse_use()?)),
             Tok::At => {
+                let line = p.line();
                 let attrs = p.parse_attrs()?;
-                match p.peek() {
+                let reason = attrs.allow_insecure.clone();
+                let only_reason = !attrs.json && attrs.derives.is_empty();
+                match p.peek().clone() {
+                    Tok::Fn | Tok::Async if only_reason => {
+                        let mut f = p.parse_fn()?;
+                        f.allow_insecure = reason;
+                        items.push(Item::Fn(f));
+                    }
+                    Tok::Ident(r) if r == "route" && only_reason => {
+                        let mut rt = p.parse_route()?;
+                        rt.allow_insecure = reason;
+                        items.push(Item::Route(rt));
+                    }
+                    Tok::Ident(r) if r == "state" && only_reason => {
+                        let mut st = p.parse_state()?;
+                        st.allow_insecure = reason;
+                        items.push(Item::State(st));
+                    }
+                    Tok::Type | Tok::Enum if reason.is_some() => {
+                        bail!("line {line}: @allow_insecure goes on `fn`, `route` or `state`, not on types")
+                    }
                     Tok::Type => {
                         let mut s = p.parse_struct()?;
                         s.attrs = attrs;
@@ -29,7 +50,11 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                         e.attrs = attrs;
                         items.push(Item::Enum(e));
                     }
-                    t => bail!("line {}: decorators apply to `type` or `enum`, found {:?}", p.line(), t),
+                    t => bail!(
+                        "line {}: @json/@derive apply to `type`/`enum`; @allow_insecure to `fn`/`route`/`state` (found {:?})",
+                        p.line(),
+                        t
+                    ),
                 }
             }
             Tok::Ident(r) if r == "route" => items.push(Item::Route(p.parse_route()?)),
@@ -277,6 +302,15 @@ impl Parser {
                 }
                 Tok::Eof => break,
                 Tok::Fn | Tok::Async => methods.push(self.parse_fn()?),
+                Tok::At => {
+                    let attrs = self.parse_attrs()?;
+                    if attrs.json || !attrs.derives.is_empty() {
+                        bail!("line {}: only @allow_insecure can decorate a method", self.line());
+                    }
+                    let mut f = self.parse_fn()?;
+                    f.allow_insecure = attrs.allow_insecure;
+                    methods.push(f);
+                }
                 t => bail!("line {}: only `fn` is allowed inside `impl`, found {:?}", self.line(), t),
             }
         }
@@ -312,7 +346,7 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
         let fallible = self.eat(&Tok::Bang);
         let body = self.parse_block()?;
-        Ok(FnDef { name, is_async, receiver, params, ret, fallible, body, line })
+        Ok(FnDef { name, is_async, receiver, params, ret, fallible, body, line, allow_insecure: None })
     }
 
     /// `@json` / `@derive(Hash, Eq)` lines before a `type` or `enum`.
@@ -322,6 +356,15 @@ impl Parser {
             let line = self.line();
             match self.ident("decorator name after `@`")?.as_str() {
                 "json" => attrs.json = true,
+                "allow_insecure" => {
+                    self.expect(Tok::LParen, "`(\"reason\")` after @allow_insecure")?;
+                    let reason = match self.next() {
+                        Tok::Str(s) if !s.trim().is_empty() => s,
+                        _ => bail!("line {line}: @allow_insecure needs a non-empty reason string, e.g. @allow_insecure(\"admin-only tool\")"),
+                    };
+                    self.expect(Tok::RParen, "`)`")?;
+                    attrs.allow_insecure = Some(reason);
+                }
                 "derive" => {
                     self.expect(Tok::LParen, "`(` after @derive")?;
                     while !self.eat(&Tok::RParen) {
@@ -336,7 +379,7 @@ impl Parser {
                         }
                     }
                 }
-                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...))"),
+                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @allow_insecure(\"reason\"))"),
             }
             self.expect(Tok::Newline, "newline after decorator")?;
             self.skip_newlines();
@@ -425,7 +468,7 @@ impl Parser {
             }
         }
         let body = self.parse_block()?;
-        Ok(RouteDef { method, path, params, state, ret, fallible, body, line })
+        Ok(RouteDef { method, path, params, state, ret, fallible, body, line, allow_insecure: None })
     }
 
     /// `state:` NEWLINE INDENT (`name: Type = expr` NEWLINE)+ DEDENT
@@ -454,7 +497,7 @@ impl Parser {
         if fields.is_empty() {
             bail!("line {line}: `state:` has no fields");
         }
-        Ok(StateDef { fields, line })
+        Ok(StateDef { fields, line, allow_insecure: None })
     }
 
     /// `&self`, `&~self`, `self`, `~self` as the first parameter.

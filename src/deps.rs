@@ -108,6 +108,40 @@ pub fn load_overrides(prvz: &Path) -> Result<Option<Table>> {
     })
 }
 
+fn load_table(prvz: &Path) -> Result<Option<Table>> {
+    let cfg = prvz.parent().unwrap_or(Path::new(".")).join("parvez.toml");
+    if !cfg.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&cfg).with_context(|| format!("reading {}", cfg.display()))?;
+    Ok(Some(text.parse().with_context(|| format!("parsing {}", cfg.display()))?))
+}
+
+/// `[service]` in parvez.toml: body_limit_bytes, timeout_secs, max_concurrency.
+pub fn service_config(prvz: &Path) -> Result<crate::codegen::ServiceConfig> {
+    let mut cfg = crate::codegen::ServiceConfig::default();
+    if let Some(t) = load_table(prvz)?
+        && let Some(Value::Table(s)) = t.get("service")
+    {
+        let get = |k: &str, d: u64| s.get(k).and_then(|v| v.as_integer()).map(|v| v.max(1) as u64).unwrap_or(d);
+        cfg.body_limit_bytes = get("body_limit_bytes", cfg.body_limit_bytes);
+        cfg.timeout_secs = get("timeout_secs", cfg.timeout_secs);
+        cfg.max_concurrency = get("max_concurrency", cfg.max_concurrency);
+    }
+    Ok(cfg)
+}
+
+/// Advisory policy: `PARVEZ_AUDIT` env, else `[security] audit` in
+/// parvez.toml, else "deny". One of "deny" | "warn" | "off".
+pub fn audit_policy(prvz: &Path) -> Result<String> {
+    if let Ok(v) = std::env::var("PARVEZ_AUDIT") {
+        return Ok(v);
+    }
+    let from_file = load_table(prvz)?
+        .and_then(|t| t.get("security").and_then(|s| s.get("audit")).and_then(|a| a.as_str().map(String::from)));
+    Ok(from_file.unwrap_or_else(|| "deny".into()))
+}
+
 /// Crates resolved to `*` (unknown and not pinned) — worth a warning.
 pub fn unpinned(deps: &Table) -> Vec<String> {
     deps.iter().filter(|(_, v)| v.as_str() == Some("*")).map(|(k, _)| k.clone()).collect()

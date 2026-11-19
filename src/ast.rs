@@ -22,6 +22,8 @@ pub struct StateDef {
     /// (name, type, initializer, line)
     pub fields: Vec<(String, Type, Expr, usize)>,
     pub line: usize,
+    /// `@allow_insecure("reason")`
+    pub allow_insecure: Option<String>,
 }
 
 /// `use serde::{Serialize, Deserialize}` / `use reqwest`
@@ -41,6 +43,8 @@ pub struct RouteDef {
     pub params: Vec<(String, Type)>,
     /// `(state, ...)`: the route receives `state: &AppState`
     pub state: bool,
+    /// `@allow_insecure("reason")`
+    pub allow_insecure: Option<String>,
     pub ret: Option<Type>,
     pub fallible: bool,
     pub body: Block,
@@ -52,6 +56,8 @@ pub struct RouteDef {
 pub struct Attrs {
     pub json: bool,
     pub derives: Vec<String>,
+    /// `@allow_insecure("reason")`: skip security checks for this item
+    pub allow_insecure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +122,8 @@ pub struct FnDef {
     pub fallible: bool,
     pub body: Block,
     pub line: usize,
+    /// `@allow_insecure("reason")`
+    pub allow_insecure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

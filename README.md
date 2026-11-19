@@ -37,6 +37,17 @@ route POST "/events" (body: Event) -> Event!:
 
 `parvez run service.prvz` serves this on `:8080` (or `$PORT`) as a 1.4 MB native binary. Every error, including bad JSON, unknown routes and wrong methods, comes back as `{"error": ...}` with the right status. A `state:` block adds shared resources such as DB pools, clients and in-memory stores, available to any route that takes `state`.
 
+## Secure by default
+
+Parvez generates every line that ships, so security isn't left to each developer:
+
+- **Compile-time security checks.** SQL built by string interpolation, shell commands built from input, request data reaching the filesystem (`safe_join` is the fix), and hard-coded secrets are compile errors pointing at the `.prvz` line, each with the safe alternative. Opting out takes an explicit `@allow_insecure("reason")`.
+- **Hardened services.** Internal errors and panics become a generic 500, with details logged server-side only. Body size limits, timeouts, concurrency backpressure, security headers and graceful SIGTERM shutdown are always on.
+- **Supply chain.** Builds fail on dependencies with known RustSec advisories, `parvez heal` moves to patched versions, and every build writes a CycloneDX SBOM.
+- **`parvez fuzz`** sends hostile, type-aware input to every route and fails on any crash, hang or leak.
+
+Memory safety and data-race freedom come from Rust itself. Logic flaws, such as a missing permission check, are still yours to get right; Parvez removes whole classes of bugs, not all of them.
+
 ## Install
 
 You need the Rust toolchain from [rustup.rs](https://rustup.rs).
@@ -54,6 +65,8 @@ cargo install --path .
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz` | Builds a release binary and writes it to `./app` |
+| `parvez heal app.prvz` | Updates to patched compatible dependency versions; reports advisories needing a major upgrade |
+| `parvez fuzz app.prvz` | Starts the service and fires malformed/edge-case requests at every route; fails on crash, hang or leak |
 | `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec`, `parvez_check`, `parvez_eject` tools (`claude mcp add parvez -- parvez mcp`) |
 | `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
 
@@ -107,6 +120,9 @@ src/codegen.rs  AST -> formatted Rust + source map
 src/diagnostics.rs  rustc JSON errors -> .prvz lines
 src/deps.rs     crate detection -> generated Cargo.toml (+ parvez.toml overrides)
 src/mcp.rs      `parvez mcp`: JSON-RPC stdio server for AI agents
+src/security.rs compile-time security checks (SQLi, command injection, path traversal, secrets)
+src/audit.rs    RustSec advisory gate + CycloneDX SBOM
+src/fuzz.rs     `parvez fuzz`: type-aware HTTP fuzzing of generated services
 src/main.rs     CLI: build / run / show
 examples/       sample .prvz programs
 ```
@@ -115,7 +131,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-This is v0.4. These aren't supported yet: closures, traits, generics on your own types, `as` casts and macros. When you need one of them, run `parvez show` and continue in Rust.
+This is v0.5. These aren't supported yet: closures, traits, generics on your own types, `as` casts and macros. When you need one of them, run `parvez show` and continue in Rust.
 
 ## License
 

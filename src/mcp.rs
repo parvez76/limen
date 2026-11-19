@@ -4,6 +4,7 @@
 //! Register with an MCP client, e.g. Claude Code:
 //! `claude mcp add parvez -- parvez mcp`
 
+use crate::audit::cache_dir;
 use crate::{Mode, Outcome, codegen, compile_at, transpile};
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -90,17 +91,6 @@ fn tools() -> Value {
 
 fn text(t: impl Into<String>, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }], "isError": is_error })
-}
-
-fn cache_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("PARVEZ_CACHE_DIR") {
-        return PathBuf::from(d);
-    }
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("parvez")
 }
 
 /// Resolve the tool's `code` / `path` args to a .prvz file on disk plus the

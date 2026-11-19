@@ -1,12 +1,15 @@
 //! `parvez` — the Parvez (.prvz) compiler: transpiles to Rust, builds with cargo.
 
 mod ast;
+mod audit;
 mod codegen;
 mod deps;
+mod fuzz;
 mod diagnostics;
 mod lexer;
 mod mcp;
 mod parser;
+mod security;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -29,6 +32,10 @@ enum Cmd {
     Check { file: PathBuf },
     /// Run an MCP server on stdio (tools: parvez_spec, parvez_check, parvez_eject).
     Mcp,
+    /// Update dependencies to patched compatible releases; report what still needs a major upgrade.
+    Heal { file: PathBuf },
+    /// Build the service, start it, and fire malformed/edge-case requests at every route.
+    Fuzz { file: PathBuf },
     /// Build, then execute. Arguments after `--` are passed to the program.
     Run {
         file: PathBuf,
@@ -64,6 +71,12 @@ fn real_main() -> Result<()> {
             eprintln!("parvez: ok {}", file.display());
         }
         Cmd::Mcp => mcp::serve()?,
+        Cmd::Heal { file } => heal(&file)?,
+        Cmd::Fuzz { file } => {
+            let (_, prog) = parse_checked(&file)?;
+            let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
+            fuzz::run(&prog, &bin)?;
+        }
         Cmd::Run { file, args } => {
             let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
             let status = Command::new(&bin)
@@ -88,6 +101,12 @@ fn real_main() -> Result<()> {
 
 /// .prvz source -> (source text, Rust source + source map).
 pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
+    let (src, prog) = parse_checked(file)?;
+    Ok((src, codegen::generate_with(&prog, &deps::service_config(file)?)))
+}
+
+/// Read, parse and security-lint a .prvz file.
+pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     if file.extension().and_then(|e| e.to_str()) != Some("prvz") {
         bail!("{}: expected a .prvz file", file.display());
     }
@@ -102,6 +121,19 @@ pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
     };
     let tokens = lexer::lex(&src).map_err(located)?;
     let prog = parser::parse(tokens).map_err(located)?;
+    let report = security::lint(&prog);
+    for (line, why) in &report.allowed {
+        eprintln!("parvez: warning: {}:{line}: security checks disabled by @allow_insecure: {why}", file.display());
+    }
+    if !report.findings.is_empty() {
+        let path = file.display().to_string();
+        let all: Vec<String> = report.findings.iter().map(|f| f.render(&path)).collect();
+        bail!(
+            "{}\n{path}: {} security error(s); fix them or add @allow_insecure(\"reason\") to the fn/route",
+            all.join("\n"),
+            report.findings.len()
+        );
+    }
     let has_main = prog.items.iter().any(|i| match i {
         ast::Item::Fn(f) => f.name == "main",
         ast::Item::Route(_) => true, // routes generate the server's main
@@ -110,7 +142,7 @@ pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
     if !has_main {
         bail!("{}: no `fn main()` (or `route`) found", file.display());
     }
-    Ok((src, codegen::generate_mapped(&prog)))
+    Ok((src, prog))
 }
 
 /// Binary name from the file stem: `my-tool.prvz` -> `my_tool`.
@@ -195,11 +227,118 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     if mode == Mode::Check {
         return Ok(Outcome::Built(None));
     }
+    advisory_gate(file, &proj)?;
     let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let dest = cwd.join(&exe);
-    std::fs::copy(proj.join("target/release").join(&exe), &dest)
-        .with_context(|| format!("copying binary to {}", dest.display()))?;
+    // Copy beside the target, then rename: replacing a running binary in
+    // place fails ("text file busy"); a rename swaps it atomically.
+    let tmp = cwd.join(format!(".{exe}.parvez-tmp"));
+    std::fs::copy(proj.join("target/release").join(&exe), &tmp)
+        .with_context(|| format!("copying binary to {}", tmp.display()))?;
+    std::fs::rename(&tmp, &dest).with_context(|| format!("installing binary at {}", dest.display()))?;
+    let sbom = cwd.join(format!("{name}.sbom.json"));
+    match audit::write_sbom(&proj, &name, &sbom) {
+        Ok(n) => eprintln!("parvez: sbom {} ({n} components)", sbom.display()),
+        Err(e) => eprintln!("parvez: warning: could not write SBOM: {e:#}"),
+    }
     Ok(Outcome::Built(Some(dest)))
+}
+
+/// Fails the build when Cargo.lock has crates with known RustSec advisories
+/// (policy: PARVEZ_AUDIT / parvez.toml `[security] audit` = deny | warn | off).
+fn advisory_gate(file: &Path, proj: &Path) -> Result<()> {
+    let policy = deps::audit_policy(file)?;
+    if policy == "off" {
+        return Ok(());
+    }
+    let db = match audit::advisory_db() {
+        audit::Db::Unavailable(why) => {
+            eprintln!("parvez: warning: dependency advisory check skipped: {why}");
+            return Ok(());
+        }
+        audit::Db::Ready(db, stale) => {
+            if let Some(w) = stale {
+                eprintln!("parvez: warning: {w}");
+            }
+            db
+        }
+    };
+    let (vulns, notes) = audit::scan(&proj.join("Cargo.lock"), &db)?;
+    for n in &notes {
+        eprintln!("parvez: note: {} advisory: {}", n.adv.informational.as_deref().unwrap_or("info"), n.render());
+    }
+    if vulns.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = vulns.iter().map(|v| format!("  {}", v.render())).collect();
+    let msg = format!("{} known-vulnerable dependenc{}:\n{}", vulns.len(), if vulns.len() == 1 { "y" } else { "ies" }, list.join("\n"));
+    if policy == "warn" {
+        eprintln!("parvez: warning: {msg}");
+        return Ok(());
+    }
+    bail!(
+        "{msg}\nrun `parvez heal {}` to move to patched versions (PARVEZ_AUDIT=warn overrides)",
+        file.display()
+    )
+}
+
+/// `parvez heal`: `cargo update` to the newest semver-compatible releases,
+/// re-scan, re-check, and report anything that needs a breaking upgrade.
+fn heal(file: &Path) -> Result<()> {
+    let root = std::env::current_dir()?;
+    if let Outcome::Errors(errors) = compile_at(file, Mode::Check, &root)? {
+        errors.iter().for_each(|e| eprintln!("{e}"));
+        bail!("{}: fix compile errors before healing", file.display());
+    }
+    let proj = root.join(".parvez_build").join(bin_name(file));
+    let db = match audit::advisory_db() {
+        audit::Db::Ready(db, stale) => {
+            if let Some(w) = stale {
+                eprintln!("parvez: warning: {w}");
+            }
+            db
+        }
+        audit::Db::Unavailable(why) => bail!("{why}"),
+    };
+    let lock = proj.join("Cargo.lock");
+    let (before, _) = audit::scan(&lock, &db)?;
+    let out = Command::new("cargo").args(["update"]).current_dir(&proj).output().context("running cargo update")?;
+    if !out.status.success() {
+        std::io::stderr().write_all(&out.stderr)?;
+        bail!("cargo update failed");
+    }
+    let updates: Vec<String> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.contains(" -> "))
+        .map(|l| l.trim().to_string())
+        .collect();
+    let (after, _) = audit::scan(&lock, &db)?;
+    if let Outcome::Errors(errors) = compile_at(file, Mode::Check, &root)? {
+        errors.iter().for_each(|e| eprintln!("{e}"));
+        bail!("updated dependencies no longer compile with {}; see errors above", file.display());
+    }
+    for u in &updates {
+        eprintln!("parvez: heal: {u}");
+    }
+    let fixed = before.iter().filter(|b| !after.iter().any(|a| a.adv.id == b.adv.id && a.package == b.package)).count();
+    eprintln!(
+        "parvez: heal: {} update(s), {fixed} advisor{} fixed, {} remaining",
+        updates.len(),
+        if fixed == 1 { "y" } else { "ies" },
+        after.len()
+    );
+    if after.is_empty() {
+        return Ok(());
+    }
+    for v in &after {
+        eprintln!("parvez: heal: needs a breaking upgrade: {}", v.render());
+        eprintln!(
+            "    pin a patched major in parvez.toml: [dependencies] {} = \"<version matching: {}>\" (if it is a transitive dependency, upgrade the crate that pulls it in)",
+            v.package,
+            v.adv.patched.join(" | ")
+        );
+    }
+    bail!("{} advisor{} need manual major upgrades", after.len(), if after.len() == 1 { "y" } else { "ies" })
 }
 
 /// Avoid touching mtimes so cargo's incremental build cache stays warm.
