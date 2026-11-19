@@ -88,8 +88,12 @@ pub fn lint(prog: &Program) -> Report {
             _ => {}
         }
     }
+    // One finding per (line, rule): e.g. `api_token = "ghp_..."` trips both the
+    // secret-name and key-shape checks. Name checks run first, so the kept
+    // message names the binding to fix. The sort is stable.
     l.findings.sort_by_key(|f| f.line);
-    l.findings.dedup();
+    let mut seen = HashSet::new();
+    l.findings.retain(|f| seen.insert((f.line, f.rule)));
     Report { findings: l.findings, allowed }
 }
 
@@ -131,8 +135,8 @@ impl Linter {
     fn stmt(&mut self, s: &Stmt, line: usize, cx: &mut Cx) {
         match s {
             Stmt::Let { name, value, .. } => {
-                self.expr(value, line, cx);
                 self.secret_binding(name, value, line);
+                self.expr(value, line, cx);
                 if tainted(value, cx) {
                     cx.taint.insert(name.clone());
                 }
@@ -141,11 +145,11 @@ impl Linter {
                 }
             }
             Stmt::Assign { target, value, .. } => {
-                self.expr(target, line, cx);
-                self.expr(value, line, cx);
                 if let Expr::Field(_, f) = target {
                     self.secret_binding(f, value, line);
                 }
+                self.expr(target, line, cx);
+                self.expr(value, line, cx);
                 if let Expr::Ident(n) = target {
                     if tainted(value, cx) {
                         cx.taint.insert(n.clone());
@@ -419,6 +423,21 @@ mod tests {
         assert_eq!(
             rules(src),
             [(2, "hardcoded-secret"), (8, "hardcoded-secret"), (10, "hardcoded-secret"), (11, "hardcoded-secret"), (12, "hardcoded-secret")]
+        );
+    }
+
+    #[test]
+    fn one_finding_per_line_and_rule() {
+        let src = "fn main():\n    api_token = \"ghp_abcdef1234567890abcdef\"\n    cfg = Cfg(secret: \"sk_live_51HxQ2abcdef0123456789\")\n    q = \"SELECT {x}\"\n    db.execute(q).query(\"DELETE {x}\")\n";
+        let r = lint(&parse(lex(src).unwrap()).unwrap());
+        let got: Vec<(usize, &str, &str)> = r.findings.iter().map(|f| (f.line, f.rule, f.msg.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (2, "hardcoded-secret", "`api_token` is assigned a string literal"),
+                (3, "hardcoded-secret", "`secret` is assigned a string literal"),
+                (5, "sql-injection", "`.query(..)` receives a string built from interpolation/concatenation"),
+            ]
         );
     }
 
