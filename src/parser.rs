@@ -1,0 +1,640 @@
+//! Recursive-descent parser: tokens -> AST.
+
+use crate::ast::*;
+use crate::lexer::{Tok, Token, lex_from};
+use anyhow::{Result, bail};
+
+pub fn parse(tokens: Vec<Token>) -> Result<Program> {
+    let mut p = Parser { toks: tokens, pos: 0 };
+    let mut items = Vec::new();
+    loop {
+        p.skip_newlines();
+        match p.peek() {
+            Tok::Eof => break,
+            Tok::Fn => items.push(Item::Fn(p.parse_fn()?)),
+            Tok::Type => items.push(Item::Struct(p.parse_struct()?)),
+            t => bail!("line {}: expected `fn` or `type` at top level, found {:?}", p.line(), t),
+        }
+    }
+    Ok(Program { items })
+}
+
+struct Parser {
+    toks: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> &Tok {
+        &self.toks[self.pos].tok
+    }
+    fn peek_at(&self, n: usize) -> &Tok {
+        let i = (self.pos + n).min(self.toks.len() - 1);
+        &self.toks[i].tok
+    }
+    fn line(&self) -> usize {
+        self.toks[self.pos].line
+    }
+    fn next(&mut self) -> Tok {
+        let t = self.toks[self.pos].tok.clone();
+        if self.pos < self.toks.len() - 1 {
+            self.pos += 1;
+        }
+        t
+    }
+    fn eat(&mut self, t: &Tok) -> bool {
+        if self.peek() == t {
+            self.next();
+            true
+        } else {
+            false
+        }
+    }
+    fn expect(&mut self, t: Tok, what: &str) -> Result<()> {
+        if self.peek() == &t {
+            self.next();
+            Ok(())
+        } else {
+            bail!("line {}: expected {what}, found {:?}", self.line(), self.peek())
+        }
+    }
+    fn ident(&mut self, what: &str) -> Result<String> {
+        match self.peek().clone() {
+            Tok::Ident(s) => {
+                self.next();
+                Ok(s)
+            }
+            t => bail!("line {}: expected {what}, found {:?}", self.line(), t),
+        }
+    }
+    fn skip_newlines(&mut self) {
+        while self.eat(&Tok::Newline) {}
+    }
+    fn end_stmt(&mut self) -> Result<()> {
+        match self.peek() {
+            Tok::Newline => {
+                self.next();
+                Ok(())
+            }
+            Tok::Eof | Tok::Dedent => Ok(()),
+            t => bail!("line {}: expected end of line, found {:?}", self.line(), t),
+        }
+    }
+
+    // ---------- items ----------
+
+    fn parse_struct(&mut self) -> Result<StructDef> {
+        self.expect(Tok::Type, "`type`")?;
+        let name = self.ident("type name")?;
+        self.expect(Tok::Colon, "`:` after type name")?;
+        let mut fields = Vec::new();
+        let block = self.eat(&Tok::Newline);
+        if block {
+            self.skip_newlines();
+            self.expect(Tok::Indent, "indented field list")?;
+        }
+        loop {
+            self.skip_newlines_if(block);
+            if block && self.eat(&Tok::Dedent) {
+                break;
+            }
+            let f = self.ident("field name")?;
+            self.expect(Tok::Colon, "`:` after field name")?;
+            fields.push((f, self.parse_type()?));
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            if !block {
+                self.end_stmt()?;
+                break;
+            }
+            if !matches!(self.peek(), Tok::Dedent) {
+                self.expect(Tok::Newline, "newline or `,` between fields")?;
+            }
+        }
+        if fields.is_empty() {
+            bail!("line {}: type `{name}` has no fields", self.line());
+        }
+        Ok(StructDef { name, fields })
+    }
+
+    fn skip_newlines_if(&mut self, yes: bool) {
+        if yes {
+            self.skip_newlines();
+        }
+    }
+
+    fn parse_fn(&mut self) -> Result<FnDef> {
+        self.expect(Tok::Fn, "`fn`")?;
+        let name = self.ident("function name")?;
+        self.expect(Tok::LParen, "`(`")?;
+        let mut params = Vec::new();
+        while !self.eat(&Tok::RParen) {
+            let p = self.ident("parameter name")?;
+            self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
+            params.push((p, self.parse_type()?));
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::RParen, "`,` or `)`")?;
+                break;
+            }
+        }
+        let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
+        let fallible = self.eat(&Tok::Bang);
+        let body = self.parse_block()?;
+        Ok(FnDef { name, params, ret, fallible, body })
+    }
+
+    fn parse_type(&mut self) -> Result<Type> {
+        let mut ty = match self.peek().clone() {
+            Tok::Amp => {
+                self.next();
+                let m = self.eat(&Tok::Tilde);
+                Type::Ref(Box::new(self.parse_type()?), m)
+            }
+            Tok::LBracket => {
+                self.next();
+                let inner = self.parse_type()?;
+                self.expect(Tok::RBracket, "`]`")?;
+                Type::List(Box::new(inner))
+            }
+            Tok::Ident(_) => {
+                let mut name = self.ident("type")?;
+                while self.eat(&Tok::PathSep) {
+                    name = format!("{name}::{}", self.ident("type path segment")?);
+                }
+                let mut args = Vec::new();
+                if self.eat(&Tok::Lt) {
+                    loop {
+                        args.push(self.parse_type()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::Gt, "`>`")?;
+                }
+                Type::Named(name, args)
+            }
+            t => bail!("line {}: expected a type, found {:?}", self.line(), t),
+        };
+        while self.eat(&Tok::Question) {
+            ty = Type::Opt(Box::new(ty));
+        }
+        Ok(ty)
+    }
+
+    // ---------- statements ----------
+
+    /// `:` followed by either an indented block or a single inline statement.
+    fn parse_block(&mut self) -> Result<Vec<Stmt>> {
+        self.expect(Tok::Colon, "`:` to open a block")?;
+        if !self.eat(&Tok::Newline) {
+            return Ok(vec![self.parse_stmt()?]);
+        }
+        self.skip_newlines();
+        self.expect(Tok::Indent, "an indented block")?;
+        let mut body = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Dedent => {
+                    self.next();
+                    break;
+                }
+                Tok::Eof => break,
+                _ => body.push(self.parse_stmt()?),
+            }
+        }
+        Ok(body)
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt> {
+        match self.peek().clone() {
+            Tok::If => self.parse_if(),
+            Tok::For => {
+                self.next();
+                let var = self.ident("loop variable")?;
+                self.expect(Tok::In, "`in`")?;
+                let iter = self.parse_expr()?;
+                let body = self.parse_block()?;
+                Ok(Stmt::For { var, iter, body })
+            }
+            Tok::While => {
+                self.next();
+                let cond = self.parse_expr()?;
+                let body = self.parse_block()?;
+                Ok(Stmt::While { cond, body })
+            }
+            Tok::Ret => {
+                self.next();
+                let e = if matches!(self.peek(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
+                self.end_stmt()?;
+                Ok(Stmt::Ret(e))
+            }
+            Tok::Break => {
+                self.next();
+                self.end_stmt()?;
+                Ok(Stmt::Break)
+            }
+            Tok::Continue => {
+                self.next();
+                self.end_stmt()?;
+                Ok(Stmt::Continue)
+            }
+            Tok::Tilde => {
+                self.next();
+                let name = self.ident("variable name after `~`")?;
+                let ty = if self.eat(&Tok::Colon) { Some(self.parse_type()?) } else { None };
+                self.expect(Tok::Assign, "`=`")?;
+                let value = self.parse_expr()?;
+                self.end_stmt()?;
+                Ok(Stmt::Let { name, mutable: true, ty, value })
+            }
+            Tok::Ident(name) if self.peek_at(1) == &Tok::Colon => {
+                self.next();
+                self.next();
+                let ty = Some(self.parse_type()?);
+                self.expect(Tok::Assign, "`=`")?;
+                let value = self.parse_expr()?;
+                self.end_stmt()?;
+                Ok(Stmt::Let { name, mutable: false, ty, value })
+            }
+            _ => {
+                let target = self.parse_expr()?;
+                let op = match self.peek() {
+                    Tok::Assign => "=",
+                    Tok::PlusEq => "+=",
+                    Tok::MinusEq => "-=",
+                    Tok::StarEq => "*=",
+                    Tok::SlashEq => "/=",
+                    Tok::PercentEq => "%=",
+                    _ => {
+                        self.end_stmt()?;
+                        return Ok(Stmt::Expr(target));
+                    }
+                };
+                self.next();
+                let value = self.parse_expr()?;
+                self.end_stmt()?;
+                Ok(match target {
+                    Expr::Ident(name) if op == "=" && !name.contains("::") => {
+                        Stmt::Let { name, mutable: false, ty: None, value }
+                    }
+                    Expr::Ident(_) | Expr::Field(..) | Expr::Index(..) | Expr::Unary(..) => {
+                        Stmt::Assign { target, op: op.into(), value }
+                    }
+                    _ => bail!("line {}: invalid assignment target", self.line()),
+                })
+            }
+        }
+    }
+
+    fn parse_if(&mut self) -> Result<Stmt> {
+        self.expect(Tok::If, "`if`")?;
+        let mut branches = vec![(self.parse_expr()?, self.parse_block()?)];
+        let mut els = None;
+        loop {
+            self.skip_newlines();
+            if self.eat(&Tok::Elif) {
+                branches.push((self.parse_expr()?, self.parse_block()?));
+            } else if self.eat(&Tok::Else) {
+                if self.eat(&Tok::If) {
+                    branches.push((self.parse_expr()?, self.parse_block()?));
+                    continue;
+                }
+                els = Some(self.parse_block()?);
+                break;
+            } else {
+                break;
+            }
+        }
+        Ok(Stmt::If { branches, els })
+    }
+
+    // ---------- expressions ----------
+
+    pub fn parse_expr(&mut self) -> Result<Expr> {
+        self.parse_bin(0)
+    }
+
+    fn bin_op(&self) -> Option<(u8, &'static str)> {
+        Some(match self.peek() {
+            Tok::Or => (1, "||"),
+            Tok::And => (2, "&&"),
+            Tok::Eq => (3, "=="),
+            Tok::Ne => (3, "!="),
+            Tok::Lt => (3, "<"),
+            Tok::Gt => (3, ">"),
+            Tok::Le => (3, "<="),
+            Tok::Ge => (3, ">="),
+            Tok::DotDot => (4, ".."),
+            Tok::DotDotEq => (4, "..="),
+            Tok::Plus => (5, "+"),
+            Tok::Minus => (5, "-"),
+            Tok::Star => (6, "*"),
+            Tok::Slash => (6, "/"),
+            Tok::Percent => (6, "%"),
+            _ => return None,
+        })
+    }
+
+    fn parse_bin(&mut self, min: u8) -> Result<Expr> {
+        let mut left = self.parse_unary()?;
+        while let Some((prec, op)) = self.bin_op() {
+            if prec < min {
+                break;
+            }
+            self.next();
+            let right = self.parse_bin(prec + 1)?;
+            left = match op {
+                ".." | "..=" => Expr::Range(Box::new(left), Box::new(right), op == "..="),
+                _ => Expr::Binary(Box::new(left), op.into(), Box::new(right)),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr> {
+        match self.peek() {
+            Tok::Minus => {
+                self.next();
+                Ok(Expr::Unary("-".into(), Box::new(self.parse_unary()?)))
+            }
+            Tok::Not => {
+                self.next();
+                Ok(Expr::Unary("!".into(), Box::new(self.parse_unary()?)))
+            }
+            Tok::Star => {
+                self.next();
+                Ok(Expr::Unary("*".into(), Box::new(self.parse_unary()?)))
+            }
+            Tok::Amp => {
+                self.next();
+                let m = self.eat(&Tok::Tilde);
+                Ok(Expr::Ref(Box::new(self.parse_unary()?), m))
+            }
+            _ => self.parse_postfix(),
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expr> {
+        let mut e = self.parse_primary()?;
+        loop {
+            match self.peek() {
+                Tok::LParen => {
+                    let Expr::Ident(name) = e else {
+                        bail!("line {}: only named functions can be called", self.line());
+                    };
+                    e = self.parse_call(name)?;
+                }
+                Tok::Dot => {
+                    self.next();
+                    let name = match self.next() {
+                        Tok::Ident(s) | Tok::Int(s) => s,
+                        t => bail!("line {}: expected field or method after `.`, found {:?}", self.line(), t),
+                    };
+                    if self.eat(&Tok::LParen) {
+                        let args = self.parse_args()?;
+                        e = Expr::Method(Box::new(e), name, args);
+                    } else {
+                        e = Expr::Field(Box::new(e), name);
+                    }
+                }
+                Tok::LBracket => {
+                    self.next();
+                    let idx = self.parse_expr()?;
+                    self.expect(Tok::RBracket, "`]`")?;
+                    e = Expr::Index(Box::new(e), Box::new(idx));
+                }
+                Tok::Question => {
+                    self.next();
+                    e = Expr::Try(Box::new(e));
+                }
+                _ => return Ok(e),
+            }
+        }
+    }
+
+    fn parse_args(&mut self) -> Result<Vec<Expr>> {
+        let mut args = Vec::new();
+        while !self.eat(&Tok::RParen) {
+            args.push(self.parse_expr()?);
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::RParen, "`,` or `)`")?;
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    /// `f(a, b)` is a call; `User(name: x, age: y)` is a struct literal.
+    fn parse_call(&mut self, name: String) -> Result<Expr> {
+        self.expect(Tok::LParen, "`(`")?;
+        let named = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
+        if !named {
+            return Ok(Expr::Call(name, self.parse_args()?));
+        }
+        let mut fields = Vec::new();
+        while !self.eat(&Tok::RParen) {
+            let f = self.ident("field name (struct literals use `name: value` for every field)")?;
+            self.expect(Tok::Colon, "`:`")?;
+            fields.push((f, self.parse_expr()?));
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::RParen, "`,` or `)`")?;
+                break;
+            }
+        }
+        Ok(Expr::StructLit(name, fields))
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr> {
+        let line = self.line();
+        Ok(match self.next() {
+            Tok::Int(s) => Expr::Int(s),
+            Tok::Float(s) => Expr::Float(s),
+            Tok::True => Expr::Bool(true),
+            Tok::False => Expr::Bool(false),
+            Tok::Str(s) => Expr::Str(parse_str(&s, line)?),
+            Tok::Ident(mut s) => {
+                while self.eat(&Tok::PathSep) {
+                    s = format!("{s}::{}", self.ident("path segment")?);
+                }
+                Expr::Ident(s)
+            }
+            Tok::LParen => {
+                let e = self.parse_expr()?;
+                self.expect(Tok::RParen, "`)`")?;
+                e
+            }
+            Tok::LBracket => {
+                let mut items = Vec::new();
+                while !self.eat(&Tok::RBracket) {
+                    items.push(self.parse_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        self.expect(Tok::RBracket, "`,` or `]`")?;
+                        break;
+                    }
+                }
+                Expr::List(items)
+            }
+            t => bail!("line {line}: expected an expression, found {t:?}"),
+        })
+    }
+}
+
+/// Split a raw string body into literal text and `{expr[:spec]}` holes.
+/// `{{` / `}}` are literal braces.
+fn parse_str(raw: &str, line: usize) -> Result<Vec<StrPart>> {
+    let c: Vec<char> = raw.chars().collect();
+    let mut parts = Vec::new();
+    let mut lit = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '{' if c.get(i + 1) == Some(&'{') => {
+                lit.push('{');
+                i += 2;
+            }
+            '}' if c.get(i + 1) == Some(&'}') => {
+                lit.push('}');
+                i += 2;
+            }
+            '{' => {
+                let mut depth = 1;
+                let mut j = i + 1;
+                while j < c.len() {
+                    match c[j] {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if j >= c.len() {
+                    bail!("line {line}: unclosed `{{` in string (use `{{{{` for a literal brace)");
+                }
+                let inner: String = c[i + 1..j].iter().collect();
+                let (src, spec) = split_spec(&inner);
+                if src.trim().is_empty() {
+                    bail!("line {line}: empty `{{}}` in string; write `{{expr}}`");
+                }
+                let mut p = Parser { toks: lex_from(src, line)?, pos: 0 };
+                let e = p.parse_expr()?;
+                p.skip_newlines();
+                if p.peek() != &Tok::Eof {
+                    bail!("line {line}: invalid expression in string interpolation `{{{inner}}}`");
+                }
+                if !lit.is_empty() {
+                    parts.push(StrPart::Lit(std::mem::take(&mut lit)));
+                }
+                parts.push(StrPart::Interp(e, spec.map(str::to_string)));
+                i = j + 1;
+            }
+            ch => {
+                lit.push(ch);
+                i += 1;
+            }
+        }
+    }
+    if !lit.is_empty() || parts.is_empty() {
+        parts.push(StrPart::Lit(lit));
+    }
+    Ok(parts)
+}
+
+/// `x:?` -> ("x", Some("?")); `a::b` is a path, not a spec.
+fn split_spec(s: &str) -> (&str, Option<&str>) {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b':' {
+            if b.get(i + 1) == Some(&b':') {
+                i += 2;
+                continue;
+            }
+            return (&s[..i], Some(&s[i + 1..]));
+        }
+        i += 1;
+    }
+    (s, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    fn prog(s: &str) -> Program {
+        parse(lex(s).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn struct_inline_and_block() {
+        let p = prog("type A: x: i32, y: str\ntype B:\n    a: [u8]\n    b: i32?\n");
+        let Item::Struct(a) = &p.items[0] else { panic!() };
+        assert_eq!(a.fields.len(), 2);
+        let Item::Struct(b) = &p.items[1] else { panic!() };
+        assert_eq!(b.fields[0].1, Type::List(Box::new(Type::Named("u8".into(), vec![]))));
+        assert_eq!(b.fields[1].1, Type::Opt(Box::new(Type::Named("i32".into(), vec![]))));
+    }
+
+    #[test]
+    fn fn_signature() {
+        let p = prog("fn f(a: i32, b: &str) -> i32!:\n    ret a\nfn main()!:\n    f(1, \"x\")?\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        assert!(f.fallible && f.ret.is_some() && f.params.len() == 2);
+        let Item::Fn(m) = &p.items[1] else { panic!() };
+        assert!(m.fallible && m.ret.is_none());
+        assert!(matches!(m.body[0], Stmt::Expr(Expr::Try(_))));
+    }
+
+    #[test]
+    fn precedence() {
+        let p = prog("fn f():\n    x = 1 + 2 * 3 == 7 and not y\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        let Stmt::Let { value: Expr::Binary(l, op, _), .. } = &f.body[0] else { panic!() };
+        assert_eq!(op, "&&");
+        assert!(matches!(**l, Expr::Binary(_, ref o, _) if o == "=="));
+    }
+
+    #[test]
+    fn if_elif_else_and_inline_block() {
+        let p = prog("fn f(x: i32):\n    if x > 1: ret\n    elif x < 0:\n        ret\n    else: ret\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        let Stmt::If { branches, els } = &f.body[0] else { panic!() };
+        assert_eq!(branches.len(), 2);
+        assert!(els.is_some());
+    }
+
+    #[test]
+    fn interpolation() {
+        let parts = parse_str("hi {u.name}, {n:?} {{x}}", 1).unwrap();
+        assert_eq!(parts.len(), 5);
+        assert!(matches!(&parts[1], StrPart::Interp(Expr::Field(..), None)));
+        assert!(matches!(&parts[3], StrPart::Interp(Expr::Ident(_), Some(s)) if s == "?"));
+        assert_eq!(parts[4], StrPart::Lit(" {x}".into()));
+    }
+
+    #[test]
+    fn struct_literal_vs_call() {
+        let p = prog("fn f():\n    u = User(name: \"a\", age: 1)\n    g(1, 2)\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        assert!(matches!(&f.body[0], Stmt::Let { value: Expr::StructLit(..), .. }));
+        assert!(matches!(&f.body[1], Stmt::Expr(Expr::Call(..))));
+    }
+
+    #[test]
+    fn parse_errors() {
+        assert!(parse(lex("x = 1\n").unwrap()).is_err());
+        assert!(parse(lex("fn f(a):\n    ret\n").unwrap()).is_err());
+        assert!(parse(lex("fn f()\n    ret\n").unwrap()).is_err());
+    }
+}

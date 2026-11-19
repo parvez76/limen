@@ -1,0 +1,50 @@
+# Parvez v0.1 tour: structs, functions, loops, mutability (~), errors (!)
+
+type User: name: str, age: u8
+
+type Report:
+    total: i32
+    adults: i32
+
+fn add(a: i32, b: i32) -> i32:
+    ret a + b
+
+fn describe(u: &User) -> str:
+    if u.age >= 18:
+        ret "{u.name} ({u.age}) is an adult"
+    else:
+        ret "{u.name} ({u.age}) is a minor"
+
+# `!` = may fail -> anyhow::Result<i32>. `?` propagates, `fail` returns an error.
+fn port(raw: &str) -> i32!:
+    p: i32 = raw.trim().parse()?
+    if p < 1 or p > 65535: fail("port {p} out of range")
+    ret p
+
+fn main()!:
+    users = [User(name: "Ada", age: 36), User(name: "Linus", age: 12), User(name: "Grace", age: 85)]
+
+    ~adults = 0
+    for u in &users:
+        print(describe(u))
+        if u.age >= 18: adults += 1
+
+    ~total = 0
+    for i in 1..=10:
+        if i % 2 == 0: continue
+        total += add(i, 1)
+    total = total * 2
+
+    ~countdown = 3
+    while countdown > 0:
+        print("t-minus", countdown)
+        countdown -= 1
+
+    r = Report(total: total, adults: adults)
+    print("report: {r:?}")
+
+    p = port(" 8080 ")?
+    print("listening on :{p}")
+
+    bad = port("99999")
+    if bad.is_err(): eprint("expected error -> {bad.unwrap_err()}")

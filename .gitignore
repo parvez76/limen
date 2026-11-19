@@ -1,0 +1,4 @@
+/target
+/.parvez_build
+# binaries produced by `parvez build`
+/hello
