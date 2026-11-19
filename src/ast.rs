@@ -11,6 +11,36 @@ pub enum Item {
     Struct(StructDef),
     Enum(EnumDef),
     Impl(ImplDef),
+    Use(UseDef),
+    Route(RouteDef),
+}
+
+/// `use serde::{Serialize, Deserialize}` / `use reqwest`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDef {
+    /// Rust path as written, e.g. `serde::{Serialize, Deserialize}`
+    pub path: String,
+    pub line: usize,
+}
+
+/// `route POST "/events/{id}" (id: str, body: Event) -> Event!:`
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteDef {
+    /// GET, POST, PUT, PATCH, DELETE
+    pub method: String,
+    pub path: String,
+    pub params: Vec<(String, Type)>,
+    pub ret: Option<Type>,
+    pub fallible: bool,
+    pub body: Block,
+    pub line: usize,
+}
+
+/// Decorators on `type` / `enum`: `@json`, `@derive(Hash, Eq)`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Attrs {
+    pub json: bool,
+    pub derives: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +48,7 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, Type)>,
     pub line: usize,
+    pub attrs: Attrs,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +56,7 @@ pub struct EnumDef {
     pub name: String,
     pub variants: Vec<Variant>,
     pub line: usize,
+    pub attrs: Attrs,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +97,7 @@ pub enum Receiver {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDef {
     pub name: String,
+    pub is_async: bool,
     pub receiver: Option<Receiver>,
     pub params: Vec<(String, Type)>,
     pub ret: Option<Type>,
@@ -168,11 +201,14 @@ pub enum Expr {
     /// `&e` / `&~e`
     Ref(Box<Expr>, bool),
     Range(Box<Expr>, Box<Expr>, bool),
-    Call(String, Vec<Expr>),
+    /// `f(args)`, `f<T>(args)` (generic args become a turbofish)
+    Call(String, Vec<Type>, Vec<Expr>),
     StructLit(String, Vec<(String, Expr)>),
     Field(Box<Expr>, String),
-    Method(Box<Expr>, String, Vec<Expr>),
+    Method(Box<Expr>, String, Vec<Type>, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Try(Box<Expr>),
+    /// `e.await`
+    Await(Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
 }

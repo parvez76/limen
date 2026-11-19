@@ -11,15 +11,53 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
         p.skip_newlines();
         match p.peek() {
             Tok::Eof => break,
-            Tok::Fn => items.push(Item::Fn(p.parse_fn()?)),
+            Tok::Fn | Tok::Async => items.push(Item::Fn(p.parse_fn()?)),
             Tok::Type => items.push(Item::Struct(p.parse_struct()?)),
             Tok::Enum => items.push(Item::Enum(p.parse_enum()?)),
             Tok::Impl => items.push(Item::Impl(p.parse_impl()?)),
+            Tok::Use => items.push(Item::Use(p.parse_use()?)),
+            Tok::At => {
+                let attrs = p.parse_attrs()?;
+                match p.peek() {
+                    Tok::Type => {
+                        let mut s = p.parse_struct()?;
+                        s.attrs = attrs;
+                        items.push(Item::Struct(s));
+                    }
+                    Tok::Enum => {
+                        let mut e = p.parse_enum()?;
+                        e.attrs = attrs;
+                        items.push(Item::Enum(e));
+                    }
+                    t => bail!("line {}: decorators apply to `type` or `enum`, found {:?}", p.line(), t),
+                }
+            }
+            Tok::Ident(r) if r == "route" => items.push(Item::Route(p.parse_route()?)),
             t => bail!(
-                "line {}: expected `fn`, `type`, `enum` or `impl` at top level, found {:?}",
+                "line {}: expected `fn`, `type`, `enum`, `impl`, `use` or `route` at top level, found {:?}",
                 p.line(),
                 t
             ),
+        }
+    }
+    let routes: Vec<&RouteDef> =
+        items.iter().filter_map(|i| if let Item::Route(r) = i { Some(r) } else { None }).collect();
+    if let Some(r) = routes.first() {
+        for i in &items {
+            if let Item::Fn(f) = i
+                && f.name == "main"
+            {
+                bail!(
+                    "line {}: this file has `route`s (first at line {}), so Parvez generates `main` (the HTTP server); rename or remove `fn main`",
+                    f.line,
+                    r.line
+                );
+            }
+        }
+        for (k, a) in routes.iter().enumerate() {
+            if let Some(b) = routes[..k].iter().find(|b| b.method == a.method && b.path == a.path) {
+                bail!("line {}: duplicate route {} {} (already at line {})", a.line, a.method, a.path, b.line);
+            }
         }
     }
     Ok(Program { items })
@@ -126,7 +164,7 @@ impl Parser {
         if fields.is_empty() {
             bail!("line {}: type `{name}` has no fields", self.line());
         }
-        Ok(StructDef { name, fields, line })
+        Ok(StructDef { name, fields, line, attrs: Attrs::default() })
     }
 
     /// `enum Name: A, B(str)` or an indented list of variants.
@@ -161,7 +199,7 @@ impl Parser {
         if variants.is_empty() {
             bail!("line {line}: enum `{name}` has no variants");
         }
-        Ok(EnumDef { name, variants, line })
+        Ok(EnumDef { name, variants, line, attrs: Attrs::default() })
     }
 
     fn parse_variant(&mut self) -> Result<Variant> {
@@ -207,7 +245,7 @@ impl Parser {
                     break;
                 }
                 Tok::Eof => break,
-                Tok::Fn => methods.push(self.parse_fn()?),
+                Tok::Fn | Tok::Async => methods.push(self.parse_fn()?),
                 t => bail!("line {}: only `fn` is allowed inside `impl`, found {:?}", self.line(), t),
             }
         }
@@ -222,7 +260,8 @@ impl Parser {
 
     fn parse_fn(&mut self) -> Result<FnDef> {
         let line = self.line();
-        self.expect(Tok::Fn, "`fn`")?;
+        let is_async = self.eat(&Tok::Async);
+        self.expect(Tok::Fn, "`fn` (after `async`)")?;
         let name = self.ident("function name")?;
         self.expect(Tok::LParen, "`(`")?;
         let receiver = self.parse_receiver()?;
@@ -242,7 +281,115 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
         let fallible = self.eat(&Tok::Bang);
         let body = self.parse_block()?;
-        Ok(FnDef { name, receiver, params, ret, fallible, body, line })
+        Ok(FnDef { name, is_async, receiver, params, ret, fallible, body, line })
+    }
+
+    /// `@json` / `@derive(Hash, Eq)` lines before a `type` or `enum`.
+    fn parse_attrs(&mut self) -> Result<Attrs> {
+        let mut attrs = Attrs::default();
+        while self.eat(&Tok::At) {
+            let line = self.line();
+            match self.ident("decorator name after `@`")?.as_str() {
+                "json" => attrs.json = true,
+                "derive" => {
+                    self.expect(Tok::LParen, "`(` after @derive")?;
+                    while !self.eat(&Tok::RParen) {
+                        let mut d = self.ident("trait name")?;
+                        while self.eat(&Tok::PathSep) {
+                            d = format!("{d}::{}", self.ident("path segment")?);
+                        }
+                        attrs.derives.push(d);
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(Tok::RParen, "`,` or `)`")?;
+                            break;
+                        }
+                    }
+                }
+                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...))"),
+            }
+            self.expect(Tok::Newline, "newline after decorator")?;
+            self.skip_newlines();
+        }
+        Ok(attrs)
+    }
+
+    /// `use a::b::{C, D}`, `use reqwest`, `use x::*`, `use a::b as c`
+    fn parse_use(&mut self) -> Result<UseDef> {
+        let line = self.line();
+        self.expect(Tok::Use, "`use`")?;
+        let mut path = self.ident("crate or module name after `use`")?;
+        while self.eat(&Tok::PathSep) {
+            match self.next() {
+                Tok::Ident(s) => path = format!("{path}::{s}"),
+                Tok::Star => path.push_str("::*"),
+                Tok::LBrace => {
+                    let mut names = Vec::new();
+                    while !self.eat(&Tok::RBrace) {
+                        let mut n = self.ident("name in `{...}`")?;
+                        while self.eat(&Tok::PathSep) {
+                            n = format!("{n}::{}", self.ident("path segment")?);
+                        }
+                        names.push(n);
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(Tok::RBrace, "`,` or `}`")?;
+                            break;
+                        }
+                    }
+                    path = format!("{path}::{{{}}}", names.join(", "));
+                    break;
+                }
+                t => bail!("line {line}: expected a name, `*` or `{{` after `::`, found {t:?}"),
+            }
+        }
+        if matches!(self.peek(), Tok::Ident(a) if a == "as") {
+            self.next();
+            path = format!("{path} as {}", self.ident("alias after `as`")?);
+        }
+        self.end_stmt()?;
+        Ok(UseDef { path, line })
+    }
+
+    /// `route METHOD "/path/{p}" [(params)] [-> T][!]:` block
+    fn parse_route(&mut self) -> Result<RouteDef> {
+        let line = self.line();
+        self.next(); // `route`
+        let method = self.ident("HTTP method (GET, POST, PUT, PATCH, DELETE)")?;
+        if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method.as_str()) {
+            bail!("line {line}: unknown HTTP method `{method}` (use GET, POST, PUT, PATCH or DELETE)");
+        }
+        let path = match self.next() {
+            Tok::Str(s) if s.starts_with('/') => s,
+            t => bail!("line {line}: expected a path string starting with `/`, found {t:?}"),
+        };
+        let mut params = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while !self.eat(&Tok::RParen) {
+                let p = self.ident("parameter name")?;
+                self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
+                params.push((p, self.parse_type()?));
+                if !self.eat(&Tok::Comma) {
+                    self.expect(Tok::RParen, "`,` or `)`")?;
+                    break;
+                }
+            }
+        }
+        let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
+        let fallible = self.eat(&Tok::Bang);
+        let holes = path_params(&path);
+        for (p, _) in &params {
+            if !holes.contains(p) && p != "body" && p != "query" {
+                bail!(
+                    "line {line}: route param `{p}` must be a path param (`{{{p}}}` in the path), `body` (JSON body) or `query` (query string)"
+                );
+            }
+        }
+        for h in &holes {
+            if !params.iter().any(|(p, _)| p == h) {
+                bail!("line {line}: path param `{{{h}}}` needs a typed parameter, e.g. ({h}: str)");
+            }
+        }
+        let body = self.parse_block()?;
+        Ok(RouteDef { method, path, params, ret, fallible, body, line })
     }
 
     /// `&self`, `&~self`, `self`, `~self` as the first parameter.
@@ -516,7 +663,13 @@ impl Parser {
                     let Expr::Ident(name) = e else {
                         bail!("line {}: only named functions can be called", self.line());
                     };
-                    e = self.parse_call(name)?;
+                    e = self.parse_call(name, Vec::new())?;
+                }
+                // `f<T>(..)` / `f::<T>(..)`
+                Tok::Lt | Tok::PathSep if matches!(e, Expr::Ident(_)) => {
+                    let Some(generics) = self.try_generics() else { return Ok(e) };
+                    let Expr::Ident(name) = e else { unreachable!() };
+                    e = self.parse_call(name, generics)?;
                 }
                 Tok::Dot => {
                     self.next();
@@ -524,9 +677,16 @@ impl Parser {
                         Tok::Ident(s) | Tok::Int(s) => s,
                         t => bail!("line {}: expected field or method after `.`, found {:?}", self.line(), t),
                     };
+                    if name == "await" {
+                        e = Expr::Await(Box::new(e));
+                        continue;
+                    }
+                    let generics = self.try_generics().unwrap_or_default();
                     if self.eat(&Tok::LParen) {
                         let args = self.parse_args()?;
-                        e = Expr::Method(Box::new(e), name, args);
+                        e = Expr::Method(Box::new(e), name, generics, args);
+                    } else if !generics.is_empty() {
+                        bail!("line {}: expected `(` after generic arguments", self.line());
                     } else {
                         e = Expr::Field(Box::new(e), name);
                     }
@@ -546,6 +706,36 @@ impl Parser {
         }
     }
 
+    /// Speculatively parse `<T, U>` (or `::<T>`) followed by `(`; restores on failure.
+    fn try_generics(&mut self) -> Option<Vec<Type>> {
+        let start = self.pos;
+        if self.peek() == &Tok::PathSep && self.peek_at(1) == &Tok::Lt {
+            self.next();
+        }
+        if !self.eat(&Tok::Lt) {
+            self.pos = start;
+            return None;
+        }
+        let mut types = Vec::new();
+        loop {
+            match self.parse_type() {
+                Ok(t) => types.push(t),
+                Err(_) => {
+                    self.pos = start;
+                    return None;
+                }
+            }
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        if !self.eat(&Tok::Gt) || self.peek() != &Tok::LParen {
+            self.pos = start;
+            return None;
+        }
+        Some(types)
+    }
+
     fn parse_args(&mut self) -> Result<Vec<Expr>> {
         let mut args = Vec::new();
         while !self.eat(&Tok::RParen) {
@@ -559,11 +749,11 @@ impl Parser {
     }
 
     /// `f(a, b)` is a call; `User(name: x, age: y)` is a struct literal.
-    fn parse_call(&mut self, name: String) -> Result<Expr> {
+    fn parse_call(&mut self, name: String, generics: Vec<Type>) -> Result<Expr> {
         self.expect(Tok::LParen, "`(`")?;
         let named = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
         if !named {
-            return Ok(Expr::Call(name, self.parse_args()?));
+            return Ok(Expr::Call(name, generics, self.parse_args()?));
         }
         let mut fields = Vec::new();
         while !self.eat(&Tok::RParen) {
@@ -587,7 +777,8 @@ impl Parser {
             Tok::False => Expr::Bool(false),
             Tok::Str(s) => Expr::Str(parse_str(&s, line)?),
             Tok::Ident(mut s) => {
-                while self.eat(&Tok::PathSep) {
+                while self.peek() == &Tok::PathSep && self.peek_at(1) != &Tok::Lt {
+                    self.next();
                     s = format!("{s}::{}", self.ident("path segment")?);
                 }
                 Expr::Ident(s)
@@ -716,6 +907,11 @@ impl Parser {
             t => bail!("line {}: expected a literal in pattern, found {:?}", self.line(), t),
         }
     }
+}
+
+/// `{name}` placeholders in a route path, in order.
+pub fn path_params(path: &str) -> Vec<String> {
+    path.split('{').skip(1).filter_map(|s| s.split_once('}').map(|(n, _)| n.to_string())).collect()
 }
 
 /// Split a raw string body into literal text and `{expr[:spec]}` holes.
@@ -903,6 +1099,46 @@ mod tests {
         assert!(matches!(&arms[2].pat, Pat::Range(_, _, true)));
         assert_eq!((arms[3].pat.clone(), arms[3].body.len(), arms[3].line), (Pat::Wild, 2, 6));
         assert_eq!(f.body[1].line, 9);
+    }
+
+    #[test]
+    fn use_decorators_async() {
+        let p = prog("use serde::{Serialize, Deserialize}\nuse reqwest\nuse std::collections::*\n@json\n@derive(Hash, Eq)\ntype E: id: str\nasync fn f() -> str!:\n    r = reqwest::get(\"u\").await?\n    ret r.text().await?\n");
+        let Item::Use(u) = &p.items[0] else { panic!() };
+        assert_eq!(u.path, "serde::{Serialize, Deserialize}");
+        let Item::Use(u) = &p.items[2] else { panic!() };
+        assert_eq!(u.path, "std::collections::*");
+        let Item::Struct(s) = &p.items[3] else { panic!() };
+        assert!(s.attrs.json && s.attrs.derives == ["Hash", "Eq"]);
+        let Item::Fn(f) = &p.items[4] else { panic!() };
+        assert!(f.is_async && f.fallible);
+        let Stmt::Let { value: Expr::Try(inner), .. } = &f.body[0].stmt else { panic!() };
+        assert!(matches!(&**inner, Expr::Await(c) if matches!(&**c, Expr::Call(n, _, _) if n == "reqwest::get")));
+    }
+
+    #[test]
+    fn generic_calls_vs_comparison() {
+        let p = prog("fn f():\n    e = json_decode<Event>(raw)\n    n = s.parse<i32>()\n    m = s.parse::<u8>()\n    b = a < b\n    c = x < y and y > (z)\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        let val = |i: usize| match &f.body[i].stmt { Stmt::Let { value, .. } => value.clone(), _ => panic!() };
+        assert!(matches!(val(0), Expr::Call(n, g, _) if n == "json_decode" && g.len() == 1));
+        assert!(matches!(val(1), Expr::Method(_, m, g, _) if m == "parse" && g.len() == 1));
+        assert!(matches!(val(2), Expr::Method(_, _, g, _) if g.len() == 1));
+        assert!(matches!(val(3), Expr::Binary(_, ref o, _) if o == "<"));
+        assert!(matches!(val(4), Expr::Binary(_, ref o, _) if o == "&&"));
+    }
+
+    #[test]
+    fn routes() {
+        let p = prog("route GET \"/health\" -> str:\n    ret \"ok\"\nroute POST \"/users/{id}/events\" (id: u64, body: Event) -> Event!:\n    ret body\n");
+        let Item::Route(r) = &p.items[1] else { panic!() };
+        assert_eq!((r.method.as_str(), r.path.as_str(), r.params.len(), r.fallible), ("POST", "/users/{id}/events", 2, true));
+        let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
+        assert!(err("route GET \"/a/{id}\" -> str:\n    ret \"\"\n").contains("needs a typed parameter"));
+        assert!(err("route GET \"/a\" (x: i32):\n    ret\n").contains("must be a path param"));
+        assert!(err("route GET \"/a\":\n    ret\nroute GET \"/a\":\n    ret\n").contains("duplicate route"));
+        assert!(err("route GET \"/a\":\n    ret\nfn main():\n    ret\n").contains("Parvez generates `main`"));
+        assert!(err("route FETCH \"/a\":\n    ret\n").contains("unknown HTTP method"));
     }
 
     #[test]

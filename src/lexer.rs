@@ -30,6 +30,8 @@ pub enum Tok {
     Match,
     Enum,
     Impl,
+    Use,
+    Async,
     // operators / punctuation
     Plus,
     Minus,
@@ -64,6 +66,9 @@ pub enum Tok {
     Tilde,
     Amp,
     Pipe,
+    LBrace,
+    RBrace,
+    At,
     // layout
     Newline,
     Indent,
@@ -98,6 +103,8 @@ fn keyword(s: &str) -> Option<Tok> {
         "match" => Tok::Match,
         "enum" => Tok::Enum,
         "impl" => Tok::Impl,
+        "use" => Tok::Use,
+        "async" => Tok::Async,
         _ => return None,
     })
 }
@@ -272,11 +279,14 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
                     ('~', _) => (Tok::Tilde, 1),
                     ('&', _) => (Tok::Amp, 1),
                     ('|', _) => (Tok::Pipe, 1),
+                    ('{', _) => (Tok::LBrace, 1),
+                    ('}', _) => (Tok::RBrace, 1),
+                    ('@', _) => (Tok::At, 1),
                     _ => bail!("line {line}: unexpected character '{ch}'"),
                 };
                 match tok {
-                    Tok::LParen | Tok::LBracket => open.push(line),
-                    Tok::RParen | Tok::RBracket => {
+                    Tok::LParen | Tok::LBracket | Tok::LBrace => open.push(line),
+                    Tok::RParen | Tok::RBracket | Tok::RBrace => {
                         if open.pop().is_none() {
                             bail!("line {line}: unmatched '{ch}'");
                         }

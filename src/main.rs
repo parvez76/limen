@@ -2,6 +2,7 @@
 
 mod ast;
 mod codegen;
+mod deps;
 mod diagnostics;
 mod lexer;
 mod parser;
@@ -23,6 +24,8 @@ struct Cli {
 enum Cmd {
     /// Transpile + `cargo build --release`; copies the binary to the current directory.
     Build { file: PathBuf },
+    /// Fast type/borrow check (`cargo check`) with .prvz-mapped errors. No binary.
+    Check { file: PathBuf },
     /// Build, then execute. Arguments after `--` are passed to the program.
     Run {
         file: PathBuf,
@@ -50,11 +53,15 @@ fn main() {
 fn real_main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Build { file } => {
-            let bin = build(&file)?;
+            let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
             eprintln!("parvez: built {}", bin.display());
         }
+        Cmd::Check { file } => {
+            compile(&file, Mode::Check)?;
+            eprintln!("parvez: ok {}", file.display());
+        }
         Cmd::Run { file, args } => {
-            let bin = build(&file)?;
+            let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
             let status = Command::new(&bin)
                 .args(&args)
                 .status()
@@ -91,8 +98,13 @@ fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
     };
     let tokens = lexer::lex(&src).map_err(located)?;
     let prog = parser::parse(tokens).map_err(located)?;
-    if !prog.items.iter().any(|i| matches!(i, ast::Item::Fn(f) if f.name == "main")) {
-        bail!("{}: no `fn main()` found", file.display());
+    let has_main = prog.items.iter().any(|i| match i {
+        ast::Item::Fn(f) => f.name == "main",
+        ast::Item::Route(_) => true, // routes generate the server's main
+        _ => false,
+    });
+    if !has_main {
+        bail!("{}: no `fn main()` (or `route`) found", file.display());
     }
     Ok((src, codegen::generate_mapped(&prog)))
 }
@@ -108,8 +120,15 @@ fn bin_name(file: &Path) -> String {
     n
 }
 
-/// Transpile into `.parvez_build/<name>/`, cargo-build it, copy the binary to `./<name>`.
-fn build(file: &Path) -> Result<PathBuf> {
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Release,
+    Check,
+}
+
+/// Transpile into `.parvez_build/<name>/` and run cargo. In `Release` mode
+/// the binary is copied to `./<name>` and its path returned.
+fn compile(file: &Path, mode: Mode) -> Result<Option<PathBuf>> {
     let (src, generated) = transpile(file)?;
     let code = &generated.code;
     let name = bin_name(file);
@@ -117,31 +136,22 @@ fn build(file: &Path) -> Result<PathBuf> {
     let proj = cwd.join(".parvez_build").join(&name);
     std::fs::create_dir_all(proj.join("src"))?;
 
-    let manifest = format!(
-        r#"[package]
-name = "prvz-{name}"
-version = "0.1.0"
-edition = "2024"
-
-[[bin]]
-name = "{name}"
-path = "src/main.rs"
-
-[dependencies]
-anyhow = "1"
-
-[profile.release]
-strip = true
-
-# Standalone: never join a parent workspace.
-[workspace]
-"#
-    );
-    write_if_changed(&proj.join("Cargo.toml"), &manifest)?;
+    let deps = deps::dependencies(&generated.deps, deps::load_overrides(file)?.as_ref());
+    for c in deps::unpinned(&deps) {
+        eprintln!("parvez: note: crate `{c}` is not in the known list; using latest (pin it in parvez.toml)");
+    }
+    write_if_changed(&proj.join("Cargo.toml"), &deps::manifest(&name, deps))?;
     write_if_changed(&proj.join("src/main.rs"), code)?;
+    if !proj.join("target").exists() {
+        eprintln!("parvez: first build of `{name}`: fetching and compiling dependencies...");
+    }
 
+    let args: &[&str] = match mode {
+        Mode::Release => &["build", "--release", "--quiet", "--message-format=json"],
+        Mode::Check => &["check", "--quiet", "--message-format=json"],
+    };
     let out = Command::new("cargo")
-        .args(["build", "--release", "--quiet", "--message-format=json"])
+        .args(args)
         .current_dir(&proj)
         .output()
         .context("failed to run `cargo` — is the Rust toolchain installed? (https://rustup.rs)")?;
@@ -163,11 +173,14 @@ strip = true
         );
     }
 
+    if mode == Mode::Check {
+        return Ok(None);
+    }
     let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let dest = cwd.join(&exe);
     std::fs::copy(proj.join("target/release").join(&exe), &dest)
         .with_context(|| format!("copying binary to {}", dest.display()))?;
-    Ok(dest)
+    Ok(Some(dest))
 }
 
 /// Avoid touching mtimes so cargo's incremental build cache stays warm.

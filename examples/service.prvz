@@ -1,0 +1,22 @@
+# A JSON REST microservice. `parvez run examples/service.prvz` -> http://0.0.0.0:8080 (PORT env overrides)
+
+@json
+type Event:
+    id: str
+    kind: str
+    count: i32
+
+@json
+type Receipt: id: str, score: i32, accepted: bool
+
+route GET "/health" -> str:
+    ret "ok"
+
+route POST "/events" (body: Event) -> Receipt!:
+    if body.count < 0: fail(400, "count must be >= 0, got {body.count}")
+    print("event {body.id} ({body.kind})")
+    ret Receipt(id: body.id, score: body.count * 10, accepted: true)
+
+route GET "/events/{id}" (id: str) -> Event!:
+    if id == "missing": fail(404, "no event {id}")
+    ret Event(id: id, kind: "demo", count: 1)
