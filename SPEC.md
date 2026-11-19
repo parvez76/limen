@@ -55,7 +55,7 @@ break / continue
 - `?` propagates an error. Use it only inside a `!` function.
 
 ## Strings
-- `"text {expr} {expr:?} {x:.2}"` interpolates any expression, with an optional Rust format spec after `:`. Write `{{` and `}}` for literal braces.
+- `"text {expr} {expr:?} {x:.2}"` interpolates any expression, with an optional Rust format spec after `:`. Write `{{` and `}}` for literal braces. A string literal can't appear inside `{...}`; assign it to a variable first.
 - A literal becomes `String` where one is needed (a `str` field, let, return or param) and `&str` where a `&str` param, field or return is declared. Don't add `.to_string()` there.
 - Method args (`x.f(...)`) have no declared type in Parvez: a plain `"lit"` passes as `&str` and an interpolated `"..{x}.."` passes as `String`. Write `"lit".to_string()` or `&"..{x}.."` when the method needs the other kind.
 - `print(a, b, ...)` prints its arguments separated by spaces (`println!`). `eprint(...)` does the same on stderr.
