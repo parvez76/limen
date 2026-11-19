@@ -1,4 +1,6 @@
-# A JSON REST microservice. `parvez run examples/service.prvz` -> http://0.0.0.0:8080 (PORT env overrides)
+# A stateful JSON REST microservice. `parvez run examples/service.prvz` -> :8080 (PORT env overrides)
+use std::sync::Mutex
+use std::sync::atomic::{AtomicU64, Ordering}
 
 @json
 type Event:
@@ -9,14 +11,31 @@ type Event:
 @json
 type Receipt: id: str, score: i32, accepted: bool
 
+@json
+type Stats: received: u64, stored: usize, env: str
+
+state:
+    events: Mutex<[Event]> = Mutex::new([])
+    received: AtomicU64 = AtomicU64::new(0)
+    env: str = env("APP_ENV", "dev")
+
 route GET "/health" -> str:
     ret "ok"
 
-route POST "/events" (body: Event) -> Receipt!:
+route POST "/events" (state, body: Event) -> Receipt!:
+    state.received.fetch_add(1, Ordering::Relaxed)
     if body.count < 0: fail(400, "count must be >= 0, got {body.count}")
     print("event {body.id} ({body.kind})")
-    ret Receipt(id: body.id, score: body.count * 10, accepted: true)
+    r = Receipt(id: body.id.clone(), score: body.count * 10, accepted: true)
+    state.events.lock().unwrap().push(body)
+    ret r
+
+route GET "/events" (state) -> [Event]:
+    ret state.events.lock().unwrap().clone()
 
 route GET "/events/{id}" (id: str) -> Event!:
     if id == "missing": fail(404, "no event {id}")
     ret Event(id: id, kind: "demo", count: 1)
+
+route GET "/stats" (state) -> Stats:
+    ret Stats(received: state.received.load(Ordering::Relaxed), stored: state.events.lock().unwrap().len(), env: state.env.clone())

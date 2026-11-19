@@ -38,7 +38,7 @@ pub fn generate_mapped(prog: &Program) -> Generated {
     let mut routes = Vec::new();
     for item in &prog.items {
         match item {
-            Item::Use(_) => continue,
+            Item::Use(_) | Item::State(_) => continue,
             Item::Route(r) => {
                 routes.push(r);
                 continue;
@@ -50,11 +50,12 @@ pub fn generate_mapped(prog: &Program) -> Generated {
             Item::Enum(e) => g.gen_enum(e),
             Item::Impl(i) => g.gen_impl(i),
             Item::Fn(f) => g.gen_fn(f),
-            Item::Use(_) | Item::Route(_) => unreachable!(),
+            Item::Use(_) | Item::Route(_) | Item::State(_) => unreachable!(),
         }
     }
     if !routes.is_empty() {
-        g.gen_service(&routes);
+        let state = prog.items.iter().find_map(|i| if let Item::State(s) = i { Some(s) } else { None });
+        g.gen_service(&routes, state);
     }
     let mut out = finish(&g.out);
     out.deps = g.deps;
@@ -124,6 +125,21 @@ struct Gen {
     deps: BTreeSet<String>,
 }
 
+/// Rust keywords (2024 edition, incl. reserved) that Parvez allows as names.
+/// `self`, `Self`, `super`, `crate` can't be raw identifiers and stay as-is.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "if", "impl",
+    "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "static", "struct",
+    "trait", "true", "type", "unsafe", "use", "where", "while", "async", "await", "dyn", "abstract",
+    "become", "box", "do", "final", "macro", "override", "priv", "typeof", "unsized", "virtual",
+    "yield", "try", "gen",
+];
+
+/// `gen` -> `r#gen`: names that collide with Rust keywords become raw identifiers.
+pub fn esc(name: &str) -> String {
+    if RUST_KEYWORDS.contains(&name) { format!("r#{name}") } else { name.to_string() }
+}
+
 /// Does a value of this type need an owned String (vs a borrowed `&str`)?
 fn owned(t: &Type) -> bool {
     !matches!(t, Type::Ref(..))
@@ -174,6 +190,12 @@ impl Gen {
                     }
                 }
                 Item::Use(_) | Item::Route(_) => {}
+                Item::State(st) => {
+                    g.structs.insert(
+                        "AppState".into(),
+                        st.fields.iter().map(|(n, t, _, _)| (n.clone(), t.clone())).collect(),
+                    );
+                }
                 Item::Impl(i) => {
                     for m in &i.methods {
                         g.fns.insert(format!("{}::{}", i.ty, m.name), param_types(m));
@@ -234,7 +256,7 @@ impl Gen {
         self.line(&format!("struct {} {{", s.name));
         self.indent += 1;
         for (name, ty) in &s.fields {
-            self.line(&format!("{name}: {},", rust_type(ty)));
+            self.line(&format!("{}: {},", esc(name), rust_type(ty)));
         }
         self.indent -= 1;
         self.line("}");
@@ -254,7 +276,7 @@ impl Gen {
                 }
                 VariantData::Named(fs) => {
                     let f: Vec<String> =
-                        fs.iter().map(|(n, t)| format!("{n}: {}", rust_type(t))).collect();
+                        fs.iter().map(|(n, t)| format!("{}: {}", esc(n), rust_type(t))).collect();
                     format!(" {{ {} }}", f.join(", "))
                 }
             };
@@ -295,7 +317,7 @@ impl Gen {
                 .into(),
             );
         }
-        params.extend(f.params.iter().map(|(n, t)| format!("{n}: {}", rust_type(t))));
+        params.extend(f.params.iter().map(|(n, t)| format!("{}: {}", esc(n), rust_type(t))));
         let ret = match (&f.ret, f.fallible) {
             (None, false) => String::new(),
             (None, true) => " -> anyhow::Result<()>".into(),
@@ -307,7 +329,7 @@ impl Gen {
             self.deps.insert("tokio".into());
             self.line("#[tokio::main]");
         }
-        self.line(&format!("{kw} {}({}){} {{", f.name, params.join(", "), ret));
+        self.line(&format!("{kw} {}({}){} {{", esc(&f.name), params.join(", "), ret));
         self.fallible = f.fallible;
         self.ret_ty = f.ret.clone();
         self.indent += 1;
@@ -393,13 +415,13 @@ impl Gen {
             Stmt::Let { name, mutable, ty, value } => {
                 let v = self.expr_as(value, ty.as_ref().is_none_or(owned));
                 if !mutable && ty.is_none() && self.is_mutable(name) {
-                    self.line(&format!("{name} = {v};"));
+                    self.line(&format!("{} = {v};", esc(name)));
                     return;
                 }
                 self.scopes.last_mut().unwrap().insert(name.clone(), *mutable);
                 let m = if *mutable { "mut " } else { "" };
                 let t = ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default();
-                self.line(&format!("let {m}{name}{t} = {v};"));
+                self.line(&format!("let {m}{}{t} = {v};", esc(name)));
             }
             Stmt::Assign { target, op, value } => {
                 let t = self.expr(target);
@@ -434,7 +456,7 @@ impl Gen {
             }
             Stmt::If { branches, els } => {
                 for (i, (cond, body)) in branches.iter().enumerate() {
-                    let c = self.expr(cond);
+                    let c = self.head(cond);
                     if i == 0 {
                         self.line(&format!("if {c} {{"));
                     } else {
@@ -449,13 +471,13 @@ impl Gen {
                 self.line("}");
             }
             Stmt::For { var, iter, body } => {
-                let it = self.expr(iter);
-                self.line(&format!("for {var} in {it} {{"));
+                let it = self.head(iter);
+                self.line(&format!("for {} in {it} {{", esc(var)));
                 self.block(body, std::slice::from_ref(var));
                 self.line("}");
             }
             Stmt::While { cond, body } => {
-                let c = self.expr(cond);
+                let c = self.head(cond);
                 self.line(&format!("while {c} {{"));
                 self.block(body, &[]);
                 self.line("}");
@@ -469,7 +491,7 @@ impl Gen {
 
     /// Each `route` becomes an async fn (the user's body, normal codegen),
     /// an axum handler wrapping it, and one generated `#[tokio::main]`.
-    fn gen_service(&mut self, routes: &[&RouteDef]) {
+    fn gen_service(&mut self, routes: &[&RouteDef], state: Option<&StateDef>) {
         for d in ["tokio", "axum", "serde", "serde_json"] {
             self.deps.insert(d.into());
         }
@@ -478,18 +500,26 @@ impl Gen {
         for l in SERVICE_PRELUDE.lines() {
             self.line(l);
         }
+        if let Some(st) = state {
+            self.gen_state(st);
+        }
         let mut table: Vec<(String, Vec<(String, String)>)> = Vec::new(); // path -> [(method, handler)]
         for r in routes {
             let mut name = route_fn_name(r);
             while self.fns.contains_key(&name) {
                 name.push('_');
             }
-            self.fns.insert(name.clone(), r.params.iter().map(|(_, t)| t.clone()).collect());
+            let state_ty = Type::Ref(Box::new(Type::Named("AppState".into(), vec![])), false);
+            let mut params = r.params.clone();
+            if r.state {
+                params.insert(0, ("state".into(), state_ty));
+            }
+            self.fns.insert(name.clone(), params.iter().map(|(_, t)| t.clone()).collect());
             let f = FnDef {
                 name: name.clone(),
                 is_async: true,
                 receiver: None,
-                params: r.params.clone(),
+                params,
                 ret: r.ret.clone(),
                 fallible: r.fallible,
                 body: r.body.clone(),
@@ -502,13 +532,21 @@ impl Gen {
             self.cur_line = r.line;
             let ty_of = |n: &str| r.params.iter().find(|(p, _)| p == n).map(|(_, t)| rust_type(t));
             let mut ex = Vec::new();
+            if r.state {
+                ex.push("axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>".to_string());
+            }
             let holes = path_params(&r.path);
             match holes.as_slice() {
                 [] => {}
-                [one] => ex.push(format!("axum::extract::Path({one}): axum::extract::Path<{}>", ty_of(one).unwrap())),
+                [one] => ex.push(format!(
+                    "axum::extract::Path({}): axum::extract::Path<{}>",
+                    esc(one),
+                    ty_of(one).unwrap()
+                )),
                 many => {
                     let ts: Vec<String> = many.iter().map(|h| ty_of(h).unwrap()).collect();
-                    ex.push(format!("axum::extract::Path(({})): axum::extract::Path<({})>", many.join(", "), ts.join(", ")));
+                    let ns: Vec<String> = many.iter().map(|h| esc(h)).collect();
+                    ex.push(format!("axum::extract::Path(({})): axum::extract::Path<({})>", ns.join(", "), ts.join(", ")));
                 }
             }
             if let Some(t) = ty_of("query") {
@@ -517,7 +555,10 @@ impl Gen {
             if let Some(t) = ty_of("body") {
                 ex.push(format!("axum::Json(body): axum::Json<{t}>"));
             }
-            let args: Vec<&str> = r.params.iter().map(|(p, _)| p.as_str()).collect();
+            let mut args: Vec<String> = r.params.iter().map(|(p, _)| esc(p)).collect();
+            if r.state {
+                args.insert(0, "&state".into());
+            }
             let call = format!("{name}({}).await", args.join(", "));
             let text = matches!(&r.ret, Some(Type::Named(n, a)) if n == "str" && a.is_empty());
             let (ret, body) = match (&r.ret, r.fallible) {
@@ -550,11 +591,21 @@ impl Gen {
         self.line("#[tokio::main]");
         self.line("async fn main() -> anyhow::Result<()> {");
         self.indent += 1;
+        if let Some(st) = state {
+            self.cur_line = st.line;
+            self.line("let state = std::sync::Arc::new(init_state().await?);");
+            self.cur_line = routes[0].line;
+        }
         self.line("let app = axum::Router::new()");
         self.indent += 1;
         for (path, methods) in &table {
             let chain: Vec<String> = methods.iter().map(|(m, h)| format!("{m}({h})")).collect();
             self.line(&format!(".route(\"{path}\", axum::routing::{})", chain.join(".")));
+        }
+        self.line(".fallback(not_found)");
+        self.line(".layer(axum::middleware::map_response(json_errors))");
+        if state.is_some() {
+            self.line(".with_state(state)");
         }
         self.indent -= 1;
         self.line(";");
@@ -568,16 +619,52 @@ impl Gen {
         self.line("}");
     }
 
+    /// `struct AppState` + `async fn init_state()` running each initializer in order.
+    fn gen_state(&mut self, st: &StateDef) {
+        self.cur_line = st.line;
+        self.out.push('\n');
+        self.line("/// Shared by every route that asks for `state` (one instance, behind an Arc).");
+        self.line("struct AppState {");
+        self.indent += 1;
+        for (n, t, _, l) in &st.fields {
+            self.cur_line = *l;
+            self.line(&format!("{}: {},", esc(n), rust_type(t)));
+        }
+        self.indent -= 1;
+        self.line("}");
+        let mut body: Block = st
+            .fields
+            .iter()
+            .map(|(n, t, v, l)| Located {
+                line: *l,
+                stmt: Stmt::Let { name: n.clone(), mutable: false, ty: Some(t.clone()), value: v.clone() },
+            })
+            .collect();
+        let fields = st.fields.iter().map(|(n, ..)| (n.clone(), Expr::Ident(n.clone()))).collect();
+        body.push(Located { line: st.line, stmt: Stmt::Ret(Some(Expr::StructLit("AppState".into(), fields))) });
+        self.out.push('\n');
+        self.gen_fn(&FnDef {
+            name: "init_state".into(),
+            is_async: true,
+            receiver: None,
+            params: vec![],
+            ret: Some(Type::Named("AppState".into(), vec![])),
+            fallible: true,
+            body,
+            line: st.line,
+        });
+    }
+
     // ---------- match ----------
 
     /// Emits a (possibly multi-line) `match`. In value position each arm
     /// yields its last expression; in statement position arms are `()`.
     fn gen_match(&mut self, scrut: &Expr, arms: &[Arm], value: bool) -> String {
         let saved_line = self.cur_line;
-        let mut s = self.atom(scrut);
+        let mut s = self.head(scrut);
         if arms.iter().any(|a| has_str_pat(&a.pat)) {
             // `&x[..]` is `&str` for String, &str and &String alike.
-            s = format!("&{s}[..]");
+            s = format!("&{}[..]", self.atom(scrut));
         }
         let saved_out = std::mem::take(&mut self.out);
         let base = self.indent;
@@ -644,7 +731,7 @@ impl Gen {
             Pat::Rest => "..".into(),
             Pat::Bind(n) => {
                 binds.push(n.clone());
-                n.clone()
+                esc(n)
             }
             Pat::Lit(e) => self.expr_as(e, false),
             Pat::Range(lo, hi, inc) => {
@@ -684,8 +771,8 @@ impl Gen {
                     }
                     let fname = f.clone().or_else(|| fields.as_ref().and_then(|fs| fs.get(i).cloned()));
                     match fname {
-                        Some(fname) if pat == fname => parts.push(fname),
-                        Some(fname) => parts.push(format!("{fname}: {pat}")),
+                        Some(fname) if pat == esc(&fname) => parts.push(pat),
+                        Some(fname) => parts.push(format!("{}: {pat}", esc(&fname))),
                         None => parts.push(pat),
                     }
                 }
@@ -746,6 +833,13 @@ impl Gen {
         (fmt, vals)
     }
 
+    /// Expression in an `if`/`while`/`for`/`match` header: Rust forbids bare
+    /// struct literals there (`match S { .. } {`), so parenthesize them.
+    fn head(&mut self, e: &Expr) -> String {
+        let s = self.expr_loose(e);
+        if s.contains(" { ") && !s.starts_with('(') { format!("({s})") } else { s }
+    }
+
     fn atom(&mut self, e: &Expr) -> String {
         let s = self.expr_loose(e);
         match e {
@@ -802,8 +896,8 @@ impl Gen {
         let f: Vec<String> = fields
             .iter()
             .map(|(n, v)| match v {
-                Expr::Ident(x) if x == n => n.clone(),
-                _ => format!("{n}: {}", self.expr_as(v, types.get(n).is_none_or(owned))),
+                Expr::Ident(x) if x == n => esc(n),
+                _ => format!("{}: {}", esc(n), self.expr_as(v, types.get(n).is_none_or(owned))),
             })
             .collect();
         f.join(", ")
@@ -812,13 +906,14 @@ impl Gen {
     fn expr(&mut self, e: &Expr) -> String {
         match e {
             Expr::Int(s) | Expr::Float(s) => s.clone(),
-            Expr::Ident(s) if crate_of(s, true).is_some() => {
+            Expr::Ident(s) if s.contains("::") && crate_of(s, true).is_some() => {
                 self.deps.extend(crate_of(s, true));
                 s.clone()
             }
             Expr::Ident(s) => match self.variant(s) {
                 Some((path, VariantData::Unit)) if !self.is_local(s) => path,
-                _ => s.clone(),
+                _ if s.contains("::") => s.clone(),
+                _ => esc(s),
             },
             Expr::Bool(b) => b.to_string(),
             Expr::Str(parts) => match parts.as_slice() {
@@ -868,6 +963,16 @@ impl Gen {
                     };
                     format!("serde_json::{f}({a})")
                 }
+                "env" if (1..=2).contains(&args.len()) => {
+                    let var = self.expr_as(&args[0], false);
+                    match args.get(1) {
+                        None => format!("std::env::var({var}).unwrap_or_default()"),
+                        Some(d) => {
+                            let d = self.expr_as(d, true);
+                            format!("std::env::var({var}).unwrap_or_else(|_| {d})")
+                        }
+                    }
+                }
                 "json_decode" if args.len() == 1 => {
                     self.deps.insert("serde_json".into());
                     let a = match &args[0] {
@@ -894,8 +999,11 @@ impl Gen {
                             _ => name.clone(),
                         };
                         let params = self.fns.get(&key).cloned().unwrap_or_default();
-                        self.deps.extend(crate_of(name, true));
-                        format!("{name}{}({})", turbofish(generics), self.args_for(args, &params).join(", "))
+                        if name.contains("::") {
+                            self.deps.extend(crate_of(name, true));
+                        }
+                        let callee = if name.contains("::") { name.clone() } else { esc(name) };
+                        format!("{callee}{}({})", turbofish(generics), self.args_for(args, &params).join(", "))
                     }
                 },
             },
@@ -911,14 +1019,14 @@ impl Gen {
                 let types = self.structs.get(&sname).cloned().unwrap_or_default();
                 format!("{name} {{ {} }}", self.field_inits(fields, &types))
             }
-            Expr::Field(x, f) => format!("{}.{f}", self.atom(x)),
+            Expr::Field(x, f) => format!("{}.{}", self.atom(x), esc(f)),
             Expr::Method(x, m, generics, args) => {
                 let recv = self.atom(x);
                 let a = match self.methods.get(m).cloned().flatten() {
                     Some(params) => self.args_for(args, &params),
                     None => args.iter().map(|x| self.expr_loose(x)).collect(),
                 };
-                format!("{recv}.{m}{}({})", turbofish(generics), a.join(", "))
+                format!("{recv}.{}{}({})", esc(m), turbofish(generics), a.join(", "))
             }
             Expr::Await(x) => format!("{}.await", self.atom(x)),
             Expr::Index(x, i) => format!("{}[{}]", self.atom(x), self.expr(i)),
@@ -1002,6 +1110,32 @@ impl axum::response::IntoResponse for AppError {
             .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
     }
+}
+
+/// Unknown routes -> 404 JSON.
+async fn not_found() -> AppError {
+    HttpError(404, String::from("not found")).into()
+}
+
+/// Uniform JSON errors: axum's plain-text rejections (malformed JSON 422,
+/// bad query/path 400, 405, ...) become {"error": ...} with the same status.
+async fn json_errors(res: axum::response::Response) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let status = res.status();
+    let is_json = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if is_json || !(status.is_client_error() || status.is_server_error()) {
+        return res;
+    }
+    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap_or_default();
+    let mut msg = String::from_utf8_lossy(&bytes).trim().to_string();
+    if msg.is_empty() {
+        msg = status.canonical_reason().unwrap_or("error").to_string();
+    }
+    (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }"#;
 
 fn has_str_pat(p: &Pat) -> bool {
@@ -1195,6 +1329,49 @@ mod tests {
         // handler + server lines map back to the route
         let i = c.lines().position(|l| l.contains("async fn post_ev_id_http")).unwrap();
         assert_eq!(g.map[i], 5);
+    }
+
+    // ---------- v0.4 ----------
+
+    #[test]
+    fn keyword_escaping() {
+        let out = rs("@json\ntype Ev: type: str, gen: i32\nfn loop(move: i32) -> i32:\n    gen = move + 1\n    ~try = 0\n    try += gen\n    ret try\nfn main():\n    e = Ev(type: \"a\", gen: 1)\n    gen = e.gen\n    print(e.type, loop(gen))\n    for box in [1]: print(box)\n");
+        assert!(out.contains("struct Ev {\n    r#type: String,\n    r#gen: i32,\n}"), "{out}");
+        assert!(out.contains("fn r#loop(r#move: i32) -> i32 {\n    let r#gen = r#move + 1;\n    let mut r#try = 0;\n    r#try += r#gen;\n    r#try\n}"), "{out}");
+        assert!(out.contains("let e = Ev { r#type: String::from(\"a\"), r#gen: 1 };"), "{out}");
+        assert!(out.contains("let r#gen = e.r#gen;"), "{out}");
+        assert!(out.contains("println!(\"{} {}\", e.r#type, r#loop(r#gen));"), "{out}");
+        assert!(out.contains("for r#box in vec![1] {"), "{out}");
+        assert_eq!(esc("self"), "self");
+    }
+
+    #[test]
+    fn state_and_service_extras() {
+        let g = mapped("use std::sync::atomic::{AtomicU64, Ordering}\nstate:\n    hits: AtomicU64 = AtomicU64::new(0)\n    name: str = env(\"APP\", \"dev\")\n    key: str = env(\"KEY\")\nroute GET \"/hit/{id}\" (state, id: u64) -> u64:\n    ret state.hits.fetch_add(id, Ordering::Relaxed)\nroute GET \"/plain\" -> str:\n    ret \"x\"\n");
+        let c = &g.code;
+        assert!(c.contains("struct AppState {\n    hits: AtomicU64,\n    name: String,\n    key: String,\n}"), "{c}");
+        assert!(c.contains("async fn init_state() -> anyhow::Result<AppState> {\n    let hits: AtomicU64 = AtomicU64::new(0);\n    let name: String = std::env::var(\"APP\").unwrap_or_else(|_| String::from(\"dev\"));\n    let key: String = std::env::var(\"KEY\").unwrap_or_default();\n    Ok(AppState { hits, name, key })\n}"), "{c}");
+        assert!(c.contains("async fn get_hit_id(state: &AppState, id: u64) -> u64 {"), "{c}");
+        assert!(c.contains("async fn get_hit_id_http(axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>, axum::extract::Path(id): axum::extract::Path<u64>) -> axum::Json<u64> {\n    axum::Json(get_hit_id(&state, id).await)\n}"), "{c}");
+        assert!(c.contains("let state = std::sync::Arc::new(init_state().await?);"), "{c}");
+        assert!(c.contains(".fallback(not_found)\n        .layer(axum::middleware::map_response(json_errors))\n        .with_state(state)\n    ;"), "{c}");
+        // init lines map to their state lines
+        let i = c.lines().position(|l| l.contains("let name: String")).unwrap();
+        assert_eq!(g.map[i], 4);
+    }
+
+    #[test]
+    fn struct_literals_in_headers_are_parenthesized() {
+        let out = rs("type P: x: i32\nenum Op:\n    B(r: i32)\nfn main():\n    match B(r: 5):\n        B(r: v) -> print(v)\n    if P(x: 1) == p: print(1)\n    for q in [P(x: 1)]: print(q.x)\n");
+        assert!(out.contains("match (Op::B { r: 5 }) {"), "{out}");
+        assert!(out.contains("if (P { x: 1 } == p) {"), "{out}");
+        assert!(out.contains("for q in (vec![P { x: 1 }]) {"), "{out}");
+    }
+
+    #[test]
+    fn crate_named_variables_are_not_dependencies() {
+        let g = mapped("fn main():\n    uuid = 1\n    regex = uuid + 1\n    print(regex)\n");
+        assert_eq!(g.deps, ["anyhow"].map(String::from).into());
     }
 
     #[test]

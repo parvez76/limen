@@ -5,6 +5,7 @@ mod codegen;
 mod deps;
 mod diagnostics;
 mod lexer;
+mod mcp;
 mod parser;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -26,6 +27,8 @@ enum Cmd {
     Build { file: PathBuf },
     /// Fast type/borrow check (`cargo check`) with .prvz-mapped errors. No binary.
     Check { file: PathBuf },
+    /// Run an MCP server on stdio (tools: parvez_spec, parvez_check, parvez_eject).
+    Mcp,
     /// Build, then execute. Arguments after `--` are passed to the program.
     Run {
         file: PathBuf,
@@ -60,6 +63,7 @@ fn real_main() -> Result<()> {
             compile(&file, Mode::Check)?;
             eprintln!("parvez: ok {}", file.display());
         }
+        Cmd::Mcp => mcp::serve()?,
         Cmd::Run { file, args } => {
             let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
             let status = Command::new(&bin)
@@ -83,7 +87,7 @@ fn real_main() -> Result<()> {
 }
 
 /// .prvz source -> (source text, Rust source + source map).
-fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
+pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
     if file.extension().and_then(|e| e.to_str()) != Some("prvz") {
         bail!("{}: expected a .prvz file", file.display());
     }
@@ -121,18 +125,39 @@ fn bin_name(file: &Path) -> String {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
+pub(crate) enum Mode {
     Release,
     Check,
 }
 
-/// Transpile into `.parvez_build/<name>/` and run cargo. In `Release` mode
-/// the binary is copied to `./<name>` and its path returned.
+pub(crate) enum Outcome {
+    /// Success; the binary path in `Release` mode.
+    Built(Option<PathBuf>),
+    /// rustc errors, already mapped to .prvz lines.
+    Errors(Vec<String>),
+}
+
+/// CLI wrapper: prints mapped errors and fails if there are any.
 fn compile(file: &Path, mode: Mode) -> Result<Option<PathBuf>> {
+    match compile_at(file, mode, &std::env::current_dir()?)? {
+        Outcome::Built(bin) => Ok(bin),
+        Outcome::Errors(errors) => {
+            for e in &errors {
+                eprintln!("{e}");
+            }
+            let path = file.display();
+            bail!("{path}: {} error(s). Generated Rust: `parvez show --map {path}`", errors.len())
+        }
+    }
+}
+
+/// Transpile into `<root>/.parvez_build/<name>/` and run cargo. In `Release`
+/// mode the binary is copied to `<root>/<name>`.
+pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome> {
     let (src, generated) = transpile(file)?;
     let code = &generated.code;
     let name = bin_name(file);
-    let cwd = std::env::current_dir()?;
+    let cwd = root.to_path_buf();
     let proj = cwd.join(".parvez_build").join(&name);
     std::fs::create_dir_all(proj.join("src"))?;
 
@@ -164,23 +189,17 @@ fn compile(file: &Path, mode: Mode) -> Result<Option<PathBuf>> {
             std::io::stderr().write_all(&out.stderr)?;
             bail!("cargo build failed for {path}");
         }
-        for e in &errors {
-            eprintln!("{e}");
-        }
-        bail!(
-            "{path}: {} error(s). Generated Rust: `parvez show --map {path}`",
-            errors.len()
-        );
+        return Ok(Outcome::Errors(errors));
     }
 
     if mode == Mode::Check {
-        return Ok(None);
+        return Ok(Outcome::Built(None));
     }
     let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let dest = cwd.join(&exe);
     std::fs::copy(proj.join("target/release").join(&exe), &dest)
         .with_context(|| format!("copying binary to {}", dest.display()))?;
-    Ok(Some(dest))
+    Ok(Outcome::Built(Some(dest)))
 }
 
 /// Avoid touching mtimes so cargo's incremental build cache stays warm.

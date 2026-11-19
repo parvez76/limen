@@ -252,4 +252,190 @@ fn service_example_serves_json() {
         (200, r#"{"id":"abc","kind":"demo","count":1}"#.into())
     );
     assert_eq!(http(port, "GET", "/events/missing", ""), (404, r#"{"error":"no event missing"}"#.into()));
+
+    // v0.4: shared state across requests (e1 stored; e2 counted but rejected; e3 never reached the handler)
+    assert_eq!(http(port, "GET", "/events", ""), (200, r#"[{"id":"e1","kind":"click","count":4}]"#.into()));
+    assert_eq!(http(port, "GET", "/stats", ""), (200, r#"{"received":2,"stored":1,"env":"dev"}"#.into()));
+    // v0.4: every rejection is JSON with its status
+    let (code, body) = http(port, "POST", "/events", r#"{"id":"e3"}"#);
+    assert_eq!(code, 422);
+    assert!(body.starts_with(r#"{"error":"Failed to deserialize the JSON body"#), "{body}");
+    let (code, body) = http(port, "POST", "/events", r#"{"id":"#);
+    assert_eq!(code, 400);
+    assert!(body.starts_with(r#"{"error":"#), "{body}");
+    assert_eq!(http(port, "GET", "/nope", ""), (404, r#"{"error":"not found"}"#.into()));
+    assert_eq!(http(port, "DELETE", "/health", ""), (405, r#"{"error":"Method Not Allowed"}"#.into()));
+}
+
+// ---------- v0.4 ----------
+
+#[test]
+fn stateful_counter_and_store_across_requests() {
+    let dir = scratch("state");
+    std::fs::write(
+        dir.join("counter.prvz"),
+        r#"use std::sync::Mutex
+use std::sync::atomic::{AtomicU64, Ordering}
+
+@json
+type Note: text: str
+
+state:
+    hits: AtomicU64 = AtomicU64::new(0)
+    notes: Mutex<[str]> = Mutex::new([])
+    prefix: str = env("NOTE_PREFIX", "note")
+
+route POST "/hit" (state) -> u64:
+    ret state.hits.fetch_add(1, Ordering::SeqCst) + 1
+
+route POST "/notes" (state, body: Note) -> usize:
+    ~notes = state.notes.lock().unwrap()
+    notes.push("{state.prefix}: {body.text}")
+    ret notes.len()
+
+route GET "/notes" (state) -> [str]:
+    ret state.notes.lock().unwrap().clone()
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "counter.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("counter"))
+            .env("PORT", port.to_string())
+            .env("NOTE_PREFIX", "n")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // concurrent hits all land on the same counter
+    let threads: Vec<_> = (0..8).map(|_| std::thread::spawn(move || http(port, "POST", "/hit", "").0)).collect();
+    assert!(threads.into_iter().all(|t| t.join().unwrap() == 200));
+    assert_eq!(http(port, "POST", "/hit", ""), (200, "9".into()));
+    assert_eq!(http(port, "POST", "/notes", r#"{"text":"a"}"#), (200, "1".into()));
+    assert_eq!(http(port, "POST", "/notes", r#"{"text":"b"}"#), (200, "2".into()));
+    assert_eq!(http(port, "GET", "/notes", ""), (200, r#"["n: a","n: b"]"#.into()));
+    assert_eq!(http(port, "POST", "/notes", r#"{"txt":"x"}"#).0, 422);
+}
+
+#[test]
+fn rust_keywords_are_escaped() {
+    let dir = scratch("keywords");
+    std::fs::write(
+        dir.join("kw.prvz"),
+        r#"@json
+type Item: type: str, gen: i32, move: bool
+
+enum Op:
+    Box(ref: i32)
+    Yield
+
+fn loop(try: i32) -> i32:
+    ~gen = try
+    gen += 1
+    ret gen
+
+fn main()!:
+    i = Item(type: "widget", gen: loop(1), move: true)
+    for box in [i.gen]:
+        print(i.type, box, i.move)
+    print(json_encode(&i)?)
+    back: Item = json_decode("{{\"type\":\"x\",\"gen\":7,\"move\":false}}")?
+    print(back.type, back.gen)
+    match Box(ref: 5):
+        Box(ref: r) -> print("ref", r)
+        Yield -> print("yield")
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["run", "kw.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "widget 2 true\n{\"type\":\"widget\",\"gen\":2,\"move\":true}\nx 7\nref 5\n"
+    );
+}
+
+/// Talks newline-delimited JSON-RPC to `parvez mcp`.
+struct Mcp {
+    child: std::process::Child,
+    out: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Mcp {
+    fn start(cache: &PathBuf) -> Self {
+        let mut child = parvez()
+            .arg("mcp")
+            .env("PARVEZ_CACHE_DIR", cache)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        Mcp { child, out }
+    }
+    fn send(&mut self, msg: serde_json::Value) {
+        use std::io::Write;
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
+    }
+    fn call(&mut self, msg: serde_json::Value) -> serde_json::Value {
+        use std::io::BufRead;
+        self.send(msg);
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    fn tool(&mut self, id: u32, name: &str, args: serde_json::Value) -> (bool, String) {
+        let r = self.call(serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}}));
+        let res = &r["result"];
+        (res["isError"].as_bool().unwrap(), res["content"][0]["text"].as_str().unwrap().to_string())
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn mcp_server_tools() {
+    use serde_json::json;
+    let cache = scratch("mcp");
+    let mut m = Mcp::start(&cache);
+    let r = m.call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}));
+    assert_eq!(r["result"]["serverInfo"]["name"], "parvez");
+    m.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let r = m.call(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 3);
+
+    let (err, spec) = m.tool(3, "parvez_spec", json!({}));
+    assert!(!err && spec.contains("## HTTP services"));
+
+    let (err, out) = m.tool(4, "parvez_check", json!({"code": "fn size(s: &str) -> i32:\n    ret s.len()\n\nfn main():\n    print(size(\"x\"))\n"}));
+    assert!(err, "{out}");
+    assert!(out.starts_with("snippet.prvz:2: error[E0308]: mismatched types"), "{out}");
+    assert!(out.contains("expected `i32`, found `usize`"), "{out}");
+    assert!(!out.contains(&cache.display().to_string()), "no cache paths leak: {out}");
+
+    let (err, out) = m.tool(5, "parvez_check", json!({"code": "fn main():\n    print(\"hi\")\n"}));
+    assert!(!err, "{out}");
+    assert_eq!(out, "ok: snippet.prvz has no errors");
+
+    let (err, out) = m.tool(6, "parvez_check", json!({"code": "fn main(:\n"}));
+    assert!(err && out.starts_with("snippet.prvz:1:"), "{out}");
+
+    let example = std::fs::canonicalize("examples/hello.prvz").unwrap();
+    let (err, out) = m.tool(7, "parvez_eject", json!({"path": example, "map": true}));
+    assert!(!err && out.contains("struct User {") && out.contains("// @prvz:"), "{out}");
 }

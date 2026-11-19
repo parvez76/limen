@@ -13,6 +13,15 @@ pub enum Item {
     Impl(ImplDef),
     Use(UseDef),
     Route(RouteDef),
+    State(StateDef),
+}
+
+/// `state:` block: shared resources built once at server start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateDef {
+    /// (name, type, initializer, line)
+    pub fields: Vec<(String, Type, Expr, usize)>,
+    pub line: usize,
 }
 
 /// `use serde::{Serialize, Deserialize}` / `use reqwest`
@@ -30,6 +39,8 @@ pub struct RouteDef {
     pub method: String,
     pub path: String,
     pub params: Vec<(String, Type)>,
+    /// `(state, ...)`: the route receives `state: &AppState`
+    pub state: bool,
     pub ret: Option<Type>,
     pub fallible: bool,
     pub body: Block,

@@ -109,6 +109,34 @@ fn keyword(s: &str) -> Option<Tok> {
     })
 }
 
+/// Spelling of a keyword token (keywords may be used as field names).
+pub fn keyword_text(t: &Tok) -> Option<&'static str> {
+    Some(match t {
+        Tok::Fn => "fn",
+        Tok::Type => "type",
+        Tok::If => "if",
+        Tok::Elif => "elif",
+        Tok::Else => "else",
+        Tok::For => "for",
+        Tok::In => "in",
+        Tok::While => "while",
+        Tok::Ret => "ret",
+        Tok::Break => "break",
+        Tok::Continue => "continue",
+        Tok::True => "true",
+        Tok::False => "false",
+        Tok::And => "and",
+        Tok::Or => "or",
+        Tok::Not => "not",
+        Tok::Match => "match",
+        Tok::Enum => "enum",
+        Tok::Impl => "impl",
+        Tok::Use => "use",
+        Tok::Async => "async",
+        _ => return None,
+    })
+}
+
 pub fn lex(src: &str) -> Result<Vec<Token>> {
     lex_from(src, 1)
 }

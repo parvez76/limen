@@ -1,7 +1,7 @@
 //! Recursive-descent parser: tokens -> AST.
 
 use crate::ast::*;
-use crate::lexer::{Tok, Token, lex_from};
+use crate::lexer::{Tok, Token, keyword_text, lex_from};
 use anyhow::{Result, bail};
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program> {
@@ -33,6 +33,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                 }
             }
             Tok::Ident(r) if r == "route" => items.push(Item::Route(p.parse_route()?)),
+            Tok::Ident(r) if r == "state" && p.peek_at(1) == &Tok::Colon => items.push(Item::State(p.parse_state()?)),
             t => bail!(
                 "line {}: expected `fn`, `type`, `enum`, `impl`, `use` or `route` at top level, found {:?}",
                 p.line(),
@@ -42,6 +43,21 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
     }
     let routes: Vec<&RouteDef> =
         items.iter().filter_map(|i| if let Item::Route(r) = i { Some(r) } else { None }).collect();
+    let states: Vec<&StateDef> =
+        items.iter().filter_map(|i| if let Item::State(s) = i { Some(s) } else { None }).collect();
+    if let [_, second, ..] = states.as_slice() {
+        bail!("line {}: only one `state:` block is allowed", second.line);
+    }
+    if let Some(s) = states.first()
+        && routes.is_empty()
+    {
+        bail!("line {}: `state:` is shared by `route`s, but this file has none", s.line);
+    }
+    if states.is_empty()
+        && let Some(r) = routes.iter().find(|r| r.state)
+    {
+        bail!("line {}: route uses `state` but there is no `state:` block", r.line);
+    }
     if let Some(r) = routes.first() {
         for i in &items {
             if let Item::Fn(f) = i
@@ -111,6 +127,21 @@ impl Parser {
             t => bail!("line {}: expected {what}, found {:?}", self.line(), t),
         }
     }
+    /// An identifier, or a keyword used as a field name (`e.type`, `Event(type: ..)`).
+    fn field_name(&mut self, what: &str) -> Result<String> {
+        if let Some(k) = keyword_text(self.peek()) {
+            self.next();
+            return Ok(k.to_string());
+        }
+        self.ident(what)
+    }
+
+    /// `name:` (identifier or keyword followed by a colon) starts here.
+    fn at_named(&self) -> bool {
+        (matches!(self.peek(), Tok::Ident(_)) || keyword_text(self.peek()).is_some())
+            && self.peek_at(1) == &Tok::Colon
+    }
+
     fn skip_newlines(&mut self) {
         while self.eat(&Tok::Newline) {}
     }
@@ -147,7 +178,7 @@ impl Parser {
             if block && self.eat(&Tok::Dedent) {
                 break;
             }
-            let f = self.ident("field name")?;
+            let f = self.field_name("field name")?;
             self.expect(Tok::Colon, "`:` after field name")?;
             fields.push((f, self.parse_type()?));
             if self.eat(&Tok::Comma) {
@@ -207,12 +238,12 @@ impl Parser {
         if !self.eat(&Tok::LParen) {
             return Ok(Variant { name, data: VariantData::Unit });
         }
-        let named = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
+        let named = self.at_named();
         let mut types = Vec::new();
         let mut fields = Vec::new();
         while !self.eat(&Tok::RParen) {
             if named {
-                let f = self.ident("field name (use `name: type` for every field)")?;
+                let f = self.field_name("field name (use `name: type` for every field)")?;
                 self.expect(Tok::Colon, "`:`")?;
                 fields.push((f, self.parse_type()?));
             } else {
@@ -362,11 +393,16 @@ impl Parser {
             t => bail!("line {line}: expected a path string starting with `/`, found {t:?}"),
         };
         let mut params = Vec::new();
+        let mut state = false;
         if self.eat(&Tok::LParen) {
             while !self.eat(&Tok::RParen) {
                 let p = self.ident("parameter name")?;
-                self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
-                params.push((p, self.parse_type()?));
+                if p == "state" && self.peek() != &Tok::Colon {
+                    state = true;
+                } else {
+                    self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
+                    params.push((p, self.parse_type()?));
+                }
                 if !self.eat(&Tok::Comma) {
                     self.expect(Tok::RParen, "`,` or `)`")?;
                     break;
@@ -379,7 +415,7 @@ impl Parser {
         for (p, _) in &params {
             if !holes.contains(p) && p != "body" && p != "query" {
                 bail!(
-                    "line {line}: route param `{p}` must be a path param (`{{{p}}}` in the path), `body` (JSON body) or `query` (query string)"
+                    "line {line}: route param `{p}` must be a path param (`{{{p}}}` in the path), `body` (JSON body), `query` (query string) or `state`"
                 );
             }
         }
@@ -389,7 +425,36 @@ impl Parser {
             }
         }
         let body = self.parse_block()?;
-        Ok(RouteDef { method, path, params, ret, fallible, body, line })
+        Ok(RouteDef { method, path, params, state, ret, fallible, body, line })
+    }
+
+    /// `state:` NEWLINE INDENT (`name: Type = expr` NEWLINE)+ DEDENT
+    fn parse_state(&mut self) -> Result<StateDef> {
+        let line = self.line();
+        self.next(); // `state`
+        self.expect(Tok::Colon, "`:` after state")?;
+        self.expect(Tok::Newline, "newline after `state:`")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented `name: Type = value` lines")?;
+        let mut fields = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.eat(&Tok::Dedent) || self.peek() == &Tok::Eof {
+                break;
+            }
+            let fline = self.line();
+            let name = self.field_name("state field name")?;
+            self.expect(Tok::Colon, "`:` and a type (state fields need `name: Type = value`)")?;
+            let ty = self.parse_type()?;
+            self.expect(Tok::Assign, "`=` and an initial value")?;
+            let value = self.parse_expr()?;
+            self.end_stmt()?;
+            fields.push((name, ty, value, fline));
+        }
+        if fields.is_empty() {
+            bail!("line {line}: `state:` has no fields");
+        }
+        Ok(StateDef { fields, line })
     }
 
     /// `&self`, `&~self`, `self`, `~self` as the first parameter.
@@ -675,6 +740,7 @@ impl Parser {
                     self.next();
                     let name = match self.next() {
                         Tok::Ident(s) | Tok::Int(s) => s,
+                        t if keyword_text(&t).is_some() => keyword_text(&t).unwrap().to_string(),
                         t => bail!("line {}: expected field or method after `.`, found {:?}", self.line(), t),
                     };
                     if name == "await" {
@@ -751,13 +817,12 @@ impl Parser {
     /// `f(a, b)` is a call; `User(name: x, age: y)` is a struct literal.
     fn parse_call(&mut self, name: String, generics: Vec<Type>) -> Result<Expr> {
         self.expect(Tok::LParen, "`(`")?;
-        let named = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
-        if !named {
+        if !self.at_named() {
             return Ok(Expr::Call(name, generics, self.parse_args()?));
         }
         let mut fields = Vec::new();
         while !self.eat(&Tok::RParen) {
-            let f = self.ident("field name (struct literals use `name: value` for every field)")?;
+            let f = self.field_name("field name (struct literals use `name: value` for every field)")?;
             self.expect(Tok::Colon, "`:`")?;
             fields.push((f, self.parse_expr()?));
             if !self.eat(&Tok::Comma) {
@@ -862,8 +927,8 @@ impl Parser {
                 if self.eat(&Tok::LParen) {
                     let mut subs = Vec::new();
                     while !self.eat(&Tok::RParen) {
-                        let field = if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
-                            let f = self.ident("field name")?;
+                        let field = if self.at_named() {
+                            let f = self.field_name("field name")?;
                             self.next();
                             Some(f)
                         } else {
@@ -1139,6 +1204,29 @@ mod tests {
         assert!(err("route GET \"/a\":\n    ret\nroute GET \"/a\":\n    ret\n").contains("duplicate route"));
         assert!(err("route GET \"/a\":\n    ret\nfn main():\n    ret\n").contains("Parvez generates `main`"));
         assert!(err("route FETCH \"/a\":\n    ret\n").contains("unknown HTTP method"));
+    }
+
+    #[test]
+    fn state_block_and_state_param() {
+        let p = prog("state:\n    hits: AtomicU64 = AtomicU64::new(0)\n    env: str = env(\"APP\", \"dev\")\nroute GET \"/a/{id}\" (state, id: str) -> str:\n    ret state.env.clone()\n");
+        let Item::State(s) = &p.items[0] else { panic!() };
+        assert_eq!((s.fields.len(), s.fields[1].0.as_str(), s.fields[1].3), (2, "env", 3));
+        let Item::Route(r) = &p.items[1] else { panic!() };
+        assert!(r.state && r.params.len() == 1);
+        let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
+        assert!(err("route GET \"/a\" (state) -> str:\n    ret \"\"\n").contains("no `state:` block"));
+        assert!(err("state:\n    a: i32 = 1\nfn main():\n    ret\n").contains("has none"));
+        assert!(err("state:\n    a: i32 = 1\nstate:\n    b: i32 = 1\nroute GET \"/\":\n    ret\n").contains("only one"));
+    }
+
+    #[test]
+    fn keywords_as_field_names() {
+        let p = prog("@json\ntype E: type: str, match: i32\nenum V:\n    K(in: i32)\nfn f(e: E):\n    x = e.type\n    y = E(type: \"a\", match: 1)\n    match v:\n        K(in: n) -> print(n)\n");
+        let Item::Struct(s) = &p.items[0] else { panic!() };
+        assert_eq!(s.fields[0].0, "type");
+        let Item::Fn(f) = &p.items[2] else { panic!() };
+        assert!(matches!(&f.body[0].stmt, Stmt::Let { value: Expr::Field(_, n), .. } if n == "type"));
+        assert!(matches!(&f.body[1].stmt, Stmt::Let { value: Expr::StructLit(_, fs), .. } if fs[1].0 == "match"));
     }
 
     #[test]

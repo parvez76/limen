@@ -1,14 +1,14 @@
-# PARVEZ v0.3 SPEC (AI system prompt)
+# PARVEZ v0.4 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
 ## Lexical
 - Indent with spaces only (tabs are an error). A block opens with `:` and either a NEWLINE plus an indented body or one statement on the same line: `if x: ret 1`.
 - `#` starts a comment. Newlines inside `()` and `[]` are ignored, so lists and calls can span lines.
-- Keywords: `fn type enum impl match use async if elif else for in while ret break continue true false and or not` (`route` is a keyword only at the start of a top-level line).
-- Rust keywords (`gen move loop ref mod let mut pub where struct`...) can't be used as names.
+- Keywords: `fn type enum impl match use async if elif else for in while ret break continue true false and or not` (`route` and `state` are keywords only at the start of a top-level line).
+- Keywords can be field names (`e.type`, `Event(type: "x")`, `type E: type: str`). Rust keywords such as `gen`, `move` and `loop` work as any name; Parvez escapes them (`r#gen`), and JSON still sees `"type"`.
 
-## Top level (`use`, `fn`, `type`, `enum`, `impl`, `route`; needs `fn main` or at least one `route`)
+## Top level (`use`, `fn`, `type`, `enum`, `impl`, `state`, `route`; needs `fn main` or at least one `route`)
 ```
 type User: name: str, age: u8          # one line; block form = one field per line
 enum Status:                           # or one line: enum Color: Red, Green, Blue
@@ -50,8 +50,28 @@ route POST "/events" (body: Event) -> Event!:     # `body` = JSON request body
 route GET "/events/{id}" (id: str) -> Event!:     # {name} in path = param of the same name
     fail(404, "no event {id}")
 ```
-- Params are path params (`{x}` in the path), `body` (JSON body) or `query` (a `@json` type built from the query string). Methods: GET POST PUT PATCH DELETE.
-- Route bodies are async (`.await` works). In a `!` route, `fail("msg")` and `?` errors return 500 `{"error": ...}`. A malformed JSON body returns 422 automatically.
+- Params are path params (`{x}` in the path), `body` (JSON body), `query` (a `@json` type built from the query string) or `state` (no type). Methods: GET POST PUT PATCH DELETE.
+- Route bodies are async (`.await` works). In a `!` route, `fail("msg")` and `?` errors return 500 `{"error": ...}`.
+- Every error is JSON `{"error": ...}`: a missing field is 422, broken JSON 400, wrong content-type 415, an unknown route 404, a wrong method 405.
+
+### Shared state
+One `state:` block, initialized once at startup (async and fallible: `.await` and `?` work, and earlier fields are in scope). A route takes it with the untyped param `state`, which arrives as `&AppState`:
+```
+use std::sync::Mutex
+use std::sync::atomic::{AtomicU64, Ordering}
+state:
+    hits: AtomicU64 = AtomicU64::new(0)
+    events: Mutex<[Event]> = Mutex::new([])
+    env: str = env("APP_ENV", "dev")
+    db: PgPool = PgPool::connect(&env("DATABASE_URL")).await?   # any pool/client; needs `use sqlx::PgPool`
+route POST "/events" (state, body: Event) -> usize:
+    state.hits.fetch_add(1, Ordering::Relaxed)
+    ~ev = state.events.lock().unwrap()
+    ev.push(body)
+    ret ev.len()
+```
+- State is shared, not copied, so mutate it through `Mutex`/`RwLock` (`.lock().unwrap()`) or atomics. Don't hold a lock across `.await`.
+- `env("NAME")` returns the env var or `""`. `env("NAME", "default")` returns it or the default. Both work anywhere.
 
 ## Types
 | Parvez | Rust |
@@ -132,3 +152,4 @@ app.prvz:6: error[E0308]: mismatched types
 - `parvez run f.prvz [-- args]`: builds and executes.
 - `parvez build f.prvz`: produces `./f`, a release binary.
 - `parvez show f.prvz [-o f.rs] [--map]`: prints or writes the Rust.
+- `parvez mcp`: an MCP server on stdio with tools `parvez_spec`, `parvez_check` (code or path in, mapped errors or `ok` out) and `parvez_eject`. Register it with `claude mcp add parvez -- parvez mcp`.

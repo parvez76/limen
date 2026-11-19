@@ -35,7 +35,7 @@ route POST "/events" (body: Event) -> Event!:
     ret body
 ```
 
-`parvez run service.prvz` serves this on `:8080` (or `$PORT`) as a 1.4 MB native binary. Invalid input gets proper 400/404/422 JSON errors.
+`parvez run service.prvz` serves this on `:8080` (or `$PORT`) as a 1.4 MB native binary. Every error, including bad JSON, unknown routes and wrong methods, comes back as `{"error": ...}` with the right status. A `state:` block adds shared resources such as DB pools, clients and in-memory stores, available to any route that takes `state`.
 
 ## Install
 
@@ -54,6 +54,7 @@ cargo install --path .
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz` | Builds a release binary and writes it to `./app` |
+| `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec`, `parvez_check`, `parvez_eject` tools (`claude mcp add parvez -- parvez mcp`) |
 | `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
 
 Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reuses that cache between builds.
@@ -79,6 +80,7 @@ Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reu
 | `json_decode<Event>(raw)?` / `json_encode(e)?` | `serde_json::from_str::<Event>(&raw)?` / `serde_json::to_string(&e)?` |
 | `use serde::{Serialize}` / `use reqwest` | `use` + automatic Cargo.toml dependencies (pin in `parvez.toml`) |
 | `route POST "/x/{id}" (id: u64, body: T) -> T!:` | axum handler + router + `#[tokio::main]` server |
+| `state:` / `hits: AtomicU64 = AtomicU64::new(0)` / `(state)` | `Arc<AppState>` built at startup, injected via axum `State` |
 
 There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue`.
 
@@ -104,6 +106,7 @@ src/parser.rs   recursive descent -> AST (src/ast.rs)
 src/codegen.rs  AST -> formatted Rust + source map
 src/diagnostics.rs  rustc JSON errors -> .prvz lines
 src/deps.rs     crate detection -> generated Cargo.toml (+ parvez.toml overrides)
+src/mcp.rs      `parvez mcp`: JSON-RPC stdio server for AI agents
 src/main.rs     CLI: build / run / show
 examples/       sample .prvz programs
 ```
@@ -112,7 +115,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-This is v0.3. These aren't supported yet: closures, traits, generics on your own types, `as` casts, macros, and shared state across routes. When you need one of them, run `parvez show` and continue in Rust.
+This is v0.4. These aren't supported yet: closures, traits, generics on your own types, `as` casts and macros. When you need one of them, run `parvez show` and continue in Rust.
 
 ## License
 
