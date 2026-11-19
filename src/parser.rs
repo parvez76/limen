@@ -13,7 +13,13 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             Tok::Eof => break,
             Tok::Fn => items.push(Item::Fn(p.parse_fn()?)),
             Tok::Type => items.push(Item::Struct(p.parse_struct()?)),
-            t => bail!("line {}: expected `fn` or `type` at top level, found {:?}", p.line(), t),
+            Tok::Enum => items.push(Item::Enum(p.parse_enum()?)),
+            Tok::Impl => items.push(Item::Impl(p.parse_impl()?)),
+            t => bail!(
+                "line {}: expected `fn`, `type`, `enum` or `impl` at top level, found {:?}",
+                p.line(),
+                t
+            ),
         }
     }
     Ok(Program { items })
@@ -71,6 +77,10 @@ impl Parser {
         while self.eat(&Tok::Newline) {}
     }
     fn end_stmt(&mut self) -> Result<()> {
+        // A `match` expression ends with its own DEDENT.
+        if self.pos > 0 && self.toks[self.pos - 1].tok == Tok::Dedent {
+            return Ok(());
+        }
         match self.peek() {
             Tok::Newline => {
                 self.next();
@@ -84,6 +94,7 @@ impl Parser {
     // ---------- items ----------
 
     fn parse_struct(&mut self) -> Result<StructDef> {
+        let line = self.line();
         self.expect(Tok::Type, "`type`")?;
         let name = self.ident("type name")?;
         self.expect(Tok::Colon, "`:` after type name")?;
@@ -115,7 +126,92 @@ impl Parser {
         if fields.is_empty() {
             bail!("line {}: type `{name}` has no fields", self.line());
         }
-        Ok(StructDef { name, fields })
+        Ok(StructDef { name, fields, line })
+    }
+
+    /// `enum Name: A, B(str)` or an indented list of variants.
+    fn parse_enum(&mut self) -> Result<EnumDef> {
+        let line = self.line();
+        self.expect(Tok::Enum, "`enum`")?;
+        let name = self.ident("enum name")?;
+        self.expect(Tok::Colon, "`:` after enum name")?;
+        let block = self.eat(&Tok::Newline);
+        if block {
+            self.skip_newlines();
+            self.expect(Tok::Indent, "indented variant list")?;
+        }
+        let mut variants = Vec::new();
+        loop {
+            self.skip_newlines_if(block);
+            if block && self.eat(&Tok::Dedent) {
+                break;
+            }
+            variants.push(self.parse_variant()?);
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            if !block {
+                self.end_stmt()?;
+                break;
+            }
+            if !matches!(self.peek(), Tok::Dedent) {
+                self.expect(Tok::Newline, "newline or `,` between variants")?;
+            }
+        }
+        if variants.is_empty() {
+            bail!("line {line}: enum `{name}` has no variants");
+        }
+        Ok(EnumDef { name, variants, line })
+    }
+
+    fn parse_variant(&mut self) -> Result<Variant> {
+        let name = self.ident("variant name")?;
+        if !self.eat(&Tok::LParen) {
+            return Ok(Variant { name, data: VariantData::Unit });
+        }
+        let named = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
+        let mut types = Vec::new();
+        let mut fields = Vec::new();
+        while !self.eat(&Tok::RParen) {
+            if named {
+                let f = self.ident("field name (use `name: type` for every field)")?;
+                self.expect(Tok::Colon, "`:`")?;
+                fields.push((f, self.parse_type()?));
+            } else {
+                types.push(self.parse_type()?);
+            }
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::RParen, "`,` or `)`")?;
+                break;
+            }
+        }
+        let data = if named { VariantData::Named(fields) } else { VariantData::Tuple(types) };
+        Ok(Variant { name, data })
+    }
+
+    /// `impl Type:` followed by an indented list of `fn`s.
+    fn parse_impl(&mut self) -> Result<ImplDef> {
+        let line = self.line();
+        self.expect(Tok::Impl, "`impl`")?;
+        let ty = self.ident("type name after `impl`")?;
+        self.expect(Tok::Colon, "`:` after impl type")?;
+        self.expect(Tok::Newline, "newline after `impl Type:`")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented `fn` definitions")?;
+        let mut methods = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Dedent => {
+                    self.next();
+                    break;
+                }
+                Tok::Eof => break,
+                Tok::Fn => methods.push(self.parse_fn()?),
+                t => bail!("line {}: only `fn` is allowed inside `impl`, found {:?}", self.line(), t),
+            }
+        }
+        Ok(ImplDef { ty, methods, line })
     }
 
     fn skip_newlines_if(&mut self, yes: bool) {
@@ -125,9 +221,14 @@ impl Parser {
     }
 
     fn parse_fn(&mut self) -> Result<FnDef> {
+        let line = self.line();
         self.expect(Tok::Fn, "`fn`")?;
         let name = self.ident("function name")?;
         self.expect(Tok::LParen, "`(`")?;
+        let receiver = self.parse_receiver()?;
+        if receiver.is_some() && !self.eat(&Tok::Comma) && self.peek() != &Tok::RParen {
+            bail!("line {}: expected `,` or `)` after self", self.line());
+        }
         let mut params = Vec::new();
         while !self.eat(&Tok::RParen) {
             let p = self.ident("parameter name")?;
@@ -141,7 +242,23 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
         let fallible = self.eat(&Tok::Bang);
         let body = self.parse_block()?;
-        Ok(FnDef { name, params, ret, fallible, body })
+        Ok(FnDef { name, receiver, params, ret, fallible, body, line })
+    }
+
+    /// `&self`, `&~self`, `self`, `~self` as the first parameter.
+    fn parse_receiver(&mut self) -> Result<Option<Receiver>> {
+        let is_self = |t: &Tok| matches!(t, Tok::Ident(s) if s == "self");
+        let (r, n) = match (self.peek(), self.peek_at(1), self.peek_at(2)) {
+            (Tok::Amp, Tok::Tilde, t) if is_self(t) => (Receiver::RefMut, 3),
+            (Tok::Amp, t, _) if is_self(t) => (Receiver::Ref, 2),
+            (Tok::Tilde, t, _) if is_self(t) => (Receiver::MutValue, 2),
+            (t, next, _) if is_self(t) && next != &Tok::Colon => (Receiver::Value, 1),
+            _ => return Ok(None),
+        };
+        for _ in 0..n {
+            self.next();
+        }
+        Ok(Some(r))
     }
 
     fn parse_type(&mut self) -> Result<Type> {
@@ -185,8 +302,13 @@ impl Parser {
     // ---------- statements ----------
 
     /// `:` followed by either an indented block or a single inline statement.
-    fn parse_block(&mut self) -> Result<Vec<Stmt>> {
+    fn parse_block(&mut self) -> Result<Block> {
         self.expect(Tok::Colon, "`:` to open a block")?;
+        self.parse_body()
+    }
+
+    /// An indented block (after NEWLINE) or a single inline statement.
+    fn parse_body(&mut self) -> Result<Block> {
         if !self.eat(&Tok::Newline) {
             return Ok(vec![self.parse_stmt()?]);
         }
@@ -207,7 +329,13 @@ impl Parser {
         Ok(body)
     }
 
-    fn parse_stmt(&mut self) -> Result<Stmt> {
+    fn parse_stmt(&mut self) -> Result<Located> {
+        let line = self.line();
+        let stmt = self.parse_stmt_kind()?;
+        Ok(Located { line, stmt })
+    }
+
+    fn parse_stmt_kind(&mut self) -> Result<Stmt> {
         match self.peek().clone() {
             Tok::If => self.parse_if(),
             Tok::For => {
@@ -469,6 +597,7 @@ impl Parser {
                 self.expect(Tok::RParen, "`)`")?;
                 e
             }
+            Tok::Match => self.parse_match(line)?,
             Tok::LBracket => {
                 let mut items = Vec::new();
                 while !self.eat(&Tok::RBracket) {
@@ -482,6 +611,110 @@ impl Parser {
             }
             t => bail!("line {line}: expected an expression, found {t:?}"),
         })
+    }
+}
+
+impl Parser {
+    /// `match e:` NEWLINE INDENT (`pat [if guard] -> stmt | block`)+ DEDENT
+    fn parse_match(&mut self, line: usize) -> Result<Expr> {
+        let scrut = self.parse_expr()?;
+        self.expect(Tok::Colon, "`:` after match expression")?;
+        self.expect(Tok::Newline, "newline after `match ...:` (arms go on indented lines)")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented match arms")?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Dedent => {
+                    self.next();
+                    break;
+                }
+                Tok::Eof => break,
+                _ => {}
+            }
+            let line = self.line();
+            let pat = self.parse_pat()?;
+            let guard = if self.eat(&Tok::If) { Some(self.parse_expr()?) } else { None };
+            self.expect(Tok::Arrow, "`->` after match pattern")?;
+            let body = self.parse_body()?;
+            arms.push(Arm { pat, guard, body, line });
+        }
+        if arms.is_empty() {
+            bail!("line {line}: `match` has no arms");
+        }
+        Ok(Expr::Match(Box::new(scrut), arms))
+    }
+
+    fn parse_pat(&mut self) -> Result<Pat> {
+        let first = self.parse_pat1()?;
+        if self.peek() != &Tok::Pipe {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.eat(&Tok::Pipe) {
+            alts.push(self.parse_pat1()?);
+        }
+        Ok(Pat::Or(alts))
+    }
+
+    fn parse_pat1(&mut self) -> Result<Pat> {
+        match self.peek().clone() {
+            Tok::Ident(mut name) => {
+                self.next();
+                while self.eat(&Tok::PathSep) {
+                    name = format!("{name}::{}", self.ident("path segment")?);
+                }
+                if name == "_" {
+                    return Ok(Pat::Wild);
+                }
+                if self.eat(&Tok::LParen) {
+                    let mut subs = Vec::new();
+                    while !self.eat(&Tok::RParen) {
+                        let field = if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
+                            let f = self.ident("field name")?;
+                            self.next();
+                            Some(f)
+                        } else {
+                            None
+                        };
+                        subs.push((field, self.parse_pat()?));
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(Tok::RParen, "`,` or `)` in pattern")?;
+                            break;
+                        }
+                    }
+                    return Ok(Pat::Variant(name, Some(subs)));
+                }
+                let upper = name.starts_with(|c: char| c.is_uppercase());
+                Ok(if upper || name.contains("::") { Pat::Variant(name, None) } else { Pat::Bind(name) })
+            }
+            Tok::DotDot => {
+                self.next();
+                Ok(Pat::Rest)
+            }
+            Tok::Minus | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::True | Tok::False => {
+                let lo = self.pat_lit()?;
+                let inc = match self.peek() {
+                    Tok::DotDot => false,
+                    Tok::DotDotEq => true,
+                    _ => return Ok(Pat::Lit(lo)),
+                };
+                self.next();
+                Ok(Pat::Range(lo, self.pat_lit()?, inc))
+            }
+            t => bail!("line {}: expected a pattern, found {:?}", self.line(), t),
+        }
+    }
+
+    fn pat_lit(&mut self) -> Result<Expr> {
+        if self.eat(&Tok::Minus) {
+            return Ok(Expr::Unary("-".into(), Box::new(self.pat_lit()?)));
+        }
+        match self.peek() {
+            Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::True | Tok::False => self.parse_primary(),
+            t => bail!("line {}: expected a literal in pattern, found {:?}", self.line(), t),
+        }
     }
 }
 
@@ -593,14 +826,14 @@ mod tests {
         assert!(f.fallible && f.ret.is_some() && f.params.len() == 2);
         let Item::Fn(m) = &p.items[1] else { panic!() };
         assert!(m.fallible && m.ret.is_none());
-        assert!(matches!(m.body[0], Stmt::Expr(Expr::Try(_))));
+        assert!(matches!(m.body[0].stmt, Stmt::Expr(Expr::Try(_))));
     }
 
     #[test]
     fn precedence() {
         let p = prog("fn f():\n    x = 1 + 2 * 3 == 7 and not y\n");
         let Item::Fn(f) = &p.items[0] else { panic!() };
-        let Stmt::Let { value: Expr::Binary(l, op, _), .. } = &f.body[0] else { panic!() };
+        let Stmt::Let { value: Expr::Binary(l, op, _), .. } = &f.body[0].stmt else { panic!() };
         assert_eq!(op, "&&");
         assert!(matches!(**l, Expr::Binary(_, ref o, _) if o == "=="));
     }
@@ -609,7 +842,7 @@ mod tests {
     fn if_elif_else_and_inline_block() {
         let p = prog("fn f(x: i32):\n    if x > 1: ret\n    elif x < 0:\n        ret\n    else: ret\n");
         let Item::Fn(f) = &p.items[0] else { panic!() };
-        let Stmt::If { branches, els } = &f.body[0] else { panic!() };
+        let Stmt::If { branches, els } = &f.body[0].stmt else { panic!() };
         assert_eq!(branches.len(), 2);
         assert!(els.is_some());
     }
@@ -627,8 +860,49 @@ mod tests {
     fn struct_literal_vs_call() {
         let p = prog("fn f():\n    u = User(name: \"a\", age: 1)\n    g(1, 2)\n");
         let Item::Fn(f) = &p.items[0] else { panic!() };
-        assert!(matches!(&f.body[0], Stmt::Let { value: Expr::StructLit(..), .. }));
-        assert!(matches!(&f.body[1], Stmt::Expr(Expr::Call(..))));
+        assert!(matches!(&f.body[0].stmt, Stmt::Let { value: Expr::StructLit(..), .. }));
+        assert!(matches!(&f.body[1].stmt, Stmt::Expr(Expr::Call(..))));
+    }
+
+    #[test]
+    fn statement_lines() {
+        let p = prog("fn f():\n    a = 1\n\n    # c\n    b = 2\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        assert_eq!((f.line, f.body[0].line, f.body[1].line), (1, 2, 5));
+    }
+
+    #[test]
+    fn enums() {
+        let p = prog("enum S:\n    Active\n    Pending(str)\n    Failed(code: i32, reason: str)\nenum C: R, G, B\n");
+        let Item::Enum(e) = &p.items[0] else { panic!() };
+        assert_eq!(e.variants[0].data, VariantData::Unit);
+        assert!(matches!(&e.variants[1].data, VariantData::Tuple(t) if t.len() == 1));
+        assert!(matches!(&e.variants[2].data, VariantData::Named(f) if f[1].0 == "reason"));
+        let Item::Enum(c) = &p.items[1] else { panic!() };
+        assert_eq!(c.variants.len(), 3);
+    }
+
+    #[test]
+    fn impl_receivers() {
+        let p = prog("impl U:\n    fn a(&self) -> str:\n        ret self.n\n    fn b(&~self, x: i32):\n        self.v += x\n    fn c(self):\n        ret\n    fn new() -> Self:\n        ret Self(v: 0)\n");
+        let Item::Impl(i) = &p.items[0] else { panic!() };
+        let r: Vec<_> = i.methods.iter().map(|m| m.receiver).collect();
+        assert_eq!(r, [Some(Receiver::Ref), Some(Receiver::RefMut), Some(Receiver::Value), None]);
+        assert_eq!(i.methods[1].params.len(), 1);
+    }
+
+    #[test]
+    fn match_arms_and_patterns() {
+        let p = prog("fn f():\n    x = match s:\n        Active | Idle -> 1\n        Failed(c, reason: r) if c > 0 -> 2\n        1..=9 -> 3\n        _ ->\n            print(\"x\")\n            4\n    y = 5\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        let Stmt::Let { value: Expr::Match(_, arms), .. } = &f.body[0].stmt else { panic!() };
+        assert_eq!(arms.len(), 4);
+        assert!(matches!(&arms[0].pat, Pat::Or(a) if a.len() == 2));
+        assert!(arms[1].guard.is_some());
+        assert!(matches!(&arms[1].pat, Pat::Variant(n, Some(s)) if n == "Failed" && s[1].0.as_deref() == Some("reason")));
+        assert!(matches!(&arms[2].pat, Pat::Range(_, _, true)));
+        assert_eq!((arms[3].pat.clone(), arms[3].body.len(), arms[3].line), (Pat::Wild, 2, 6));
+        assert_eq!(f.body[1].line, 9);
     }
 
     #[test]

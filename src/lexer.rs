@@ -27,6 +27,9 @@ pub enum Tok {
     And,
     Or,
     Not,
+    Match,
+    Enum,
+    Impl,
     // operators / punctuation
     Plus,
     Minus,
@@ -60,6 +63,7 @@ pub enum Tok {
     Bang,
     Tilde,
     Amp,
+    Pipe,
     // layout
     Newline,
     Indent,
@@ -91,6 +95,9 @@ fn keyword(s: &str) -> Option<Tok> {
         "and" => Tok::And,
         "or" => Tok::Or,
         "not" => Tok::Not,
+        "match" => Tok::Match,
+        "enum" => Tok::Enum,
+        "impl" => Tok::Impl,
         _ => return None,
     })
 }
@@ -107,7 +114,7 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
     let mut line = start_line;
     let mut out: Vec<Token> = Vec::new();
     let mut indents = vec![0usize];
-    let mut depth = 0usize; // () / [] nesting
+    let mut open: Vec<usize> = Vec::new(); // lines of unclosed ( / [
     let mut at_start = true;
 
     macro_rules! push {
@@ -117,7 +124,7 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
     }
 
     while i < n {
-        if at_start && depth == 0 {
+        if at_start && open.is_empty() {
             let mut col = 0;
             while i < n && c[i] == ' ' {
                 col += 1;
@@ -168,7 +175,7 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
             ' ' | '\t' | '\r' => i += 1,
             '\n' => {
                 i += 1;
-                if depth == 0 {
+                if open.is_empty() {
                     push!(Tok::Newline);
                     at_start = true;
                 }
@@ -264,15 +271,15 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
                     ('!', _) => (Tok::Bang, 1),
                     ('~', _) => (Tok::Tilde, 1),
                     ('&', _) => (Tok::Amp, 1),
+                    ('|', _) => (Tok::Pipe, 1),
                     _ => bail!("line {line}: unexpected character '{ch}'"),
                 };
                 match tok {
-                    Tok::LParen | Tok::LBracket => depth += 1,
+                    Tok::LParen | Tok::LBracket => open.push(line),
                     Tok::RParen | Tok::RBracket => {
-                        if depth == 0 {
+                        if open.pop().is_none() {
                             bail!("line {line}: unmatched '{ch}'");
                         }
-                        depth -= 1;
                     }
                     _ => {}
                 }
@@ -281,8 +288,8 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
             }
         }
     }
-    if depth != 0 {
-        bail!("line {line}: unclosed '(' or '['");
+    if let Some(l) = open.last() {
+        bail!("line {l}: unclosed '(' or '['");
     }
     if !matches!(out.last().map(|t| &t.tok), None | Some(Tok::Newline)) {
         push!(Tok::Newline);
@@ -361,5 +368,7 @@ mod tests {
         assert!(lex("x = \"abc\n").is_err());
         assert!(lex("fn f():\n\tx = 1\n").is_err());
         assert!(lex("if a:\n        x\n    y\n").is_err());
+        let e = lex("fn f():\n    x = (1 +\n\n").unwrap_err().to_string();
+        assert!(e.starts_with("line 2:"), "{e}");
     }
 }

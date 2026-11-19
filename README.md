@@ -37,7 +37,7 @@ cargo install --path .
 |---|---|
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz` | Builds a release binary and writes it to `./app` |
-| `parvez show app.prvz [-o app.rs]` | Prints the generated Rust, or writes it with `-o` |
+| `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
 
 Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reuses that cache between builds.
 
@@ -54,8 +54,23 @@ Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reu
 | `print("hi {name}")` | `println!("hi {}", name)` |
 | `fail("bad {x}")` | `anyhow::bail!("bad {}", x)` |
 | `and` `or` `not` | `&&` `\|\|` `!` |
+| `enum S: A, B(str), C(code: i32)` | `#[derive(Debug, Clone, PartialEq)] enum S { A, B(String), C { code: i32 } }` |
+| `match s:` / `B(msg) -> print(msg)` | `match s { S::B(msg) => println!(..), .. }` |
+| `impl User:` / `fn greet(&self)`, `fn bump(&~self)` | `impl User { fn greet(&self) .. fn bump(&mut self) .. }` |
 
 There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue`.
+
+## Errors point at your `.prvz` file
+
+rustc's errors are mapped back through a source map, so humans and AI agents can fix the right line without reading the generated Rust:
+
+```
+app.prvz:6: error[E0308]: mismatched types
+   6 |     ret raw.len()
+     = expected `i32`, found `usize`
+     = line 5: expected `i32` because of return type
+     = rust: raw.len()
+```
 
 The full spec is in [SPEC.md](SPEC.md). It's written as a compact system prompt, so you can paste it into an AI agent and it will write valid Parvez.
 
@@ -64,16 +79,17 @@ The full spec is in [SPEC.md](SPEC.md). It's written as a compact system prompt,
 ```
 src/lexer.rs    tokens, INDENT/DEDENT
 src/parser.rs   recursive descent -> AST (src/ast.rs)
-src/codegen.rs  AST -> formatted Rust
+src/codegen.rs  AST -> formatted Rust + source map
+src/diagnostics.rs  rustc JSON errors -> .prvz lines
 src/main.rs     CLI: build / run / show
 examples/       sample .prvz programs
 ```
 
-Run the tests with `cargo test`.
+Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real programs with rustc.
 
 ## Status
 
-This is v0.1, an MVP. These aren't supported yet: `match`, enums, `impl` blocks, closures, imports and crates, and `async`. When you need one of them, run `parvez show` and continue in Rust.
+This is v0.2. These aren't supported yet: closures, traits, generics on your own types, imports and crates, and `async`. When you need one of them, run `parvez show` and continue in Rust.
 
 ## License
 

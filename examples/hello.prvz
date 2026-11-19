@@ -1,16 +1,41 @@
-# Parvez v0.1 tour: structs, functions, loops, mutability (~), errors (!)
+# Parvez v0.2 tour: structs, enums, match, impl, loops, ~mutability, ! errors
 
 type User: name: str, age: u8
+
+enum Status:
+    Active
+    Pending(str)
+    Failed(code: i32, reason: str)
 
 type Report:
     total: i32
     adults: i32
 
+impl User:
+    fn new(name: str, age: u8) -> Self:
+        ret Self(name: name, age: age)
+
+    fn greet(&self) -> str:
+        ret "Hi {self.name}"
+
+    fn birthday(&~self):
+        self.age += 1
+
+    fn is_adult(&self) -> bool:
+        ret self.age >= 18
+
+impl Status:
+    fn label(&self) -> str:
+        match self:
+            Active -> "active"
+            Pending(_) -> "pending"
+            Failed(..) -> "failed"
+
 fn add(a: i32, b: i32) -> i32:
     ret a + b
 
 fn describe(u: &User) -> str:
-    if u.age >= 18:
+    if u.is_adult():
         ret "{u.name} ({u.age}) is an adult"
     else:
         ret "{u.name} ({u.age}) is a minor"
@@ -21,13 +46,30 @@ fn port(raw: &str) -> i32!:
     if p < 1 or p > 65535: fail("port {p} out of range")
     ret p
 
+fn check(s: &Status)!:
+    match s:
+        Active -> print("ok")
+        Pending(msg) -> print("wait: {msg}")
+        Failed(code, reason) -> fail("{code}: {reason}")
+
+fn http_class(code: i32) -> str:
+    ret match code:
+        200..=299 -> "success"
+        301 | 302 -> "redirect"
+        c if c >= 500 -> "server error {c}"
+        _ -> "other"
+
 fn main()!:
-    users = [User(name: "Ada", age: 36), User(name: "Linus", age: 12), User(name: "Grace", age: 85)]
+    users = [User::new("Ada", 36), User::new("Linus", 12), User::new("Grace", 85)]
 
     ~adults = 0
     for u in &users:
         print(describe(u))
-        if u.age >= 18: adults += 1
+        if u.is_adult(): adults += 1
+
+    ~linus = users[1].clone()
+    linus.birthday()
+    print(linus.greet(), "- now", linus.age)
 
     ~total = 0
     for i in 1..=10:
@@ -46,5 +88,10 @@ fn main()!:
     p = port(" 8080 ")?
     print("listening on :{p}")
 
-    bad = port("99999")
-    if bad.is_err(): eprint("expected error -> {bad.unwrap_err()}")
+    for code in [200, 302, 503, 404]:
+        print(code, http_class(code))
+
+    jobs = [Active, Pending("db migration"), Failed(code: 503, reason: "upstream down")]
+    for job in &jobs:
+        res = check(job)
+        if res.is_err(): eprint("[{job.label()}] {res.unwrap_err()}")
