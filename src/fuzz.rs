@@ -41,6 +41,85 @@ pub struct Case {
     pub content_type: Option<&'static str>,
     pub body: Vec<u8>,
     pub label: String,
+    /// skip `[headers]` and request signing (tests the auth rejection path)
+    pub unauthenticated: bool,
+}
+
+/// `fuzz.toml` beside the .prvz file: realistic values so requests get past
+/// validation and auth into the handlers.
+///
+/// ```toml
+/// [params]            # path params and query fields, by name
+/// device_id = "11111111-1111-4111-8111-111111111111"
+/// [body]              # JSON body fields, by name (any TOML value)
+/// [headers]           # sent with every request
+/// [sign]              # run per request; env FUZZ_METHOD/FUZZ_PATH/FUZZ_QUERY,
+/// command = ["python3", "sign.py"]   # body on stdin; prints `Header: value` lines
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct FuzzConfig {
+    pub params: std::collections::HashMap<String, String>,
+    pub body: serde_json::Map<String, Value>,
+    pub headers: Vec<(String, String)>,
+    pub sign: Option<Vec<String>>,
+}
+
+impl FuzzConfig {
+    pub fn load(prvz: &Path) -> Result<FuzzConfig> {
+        let file = prvz.parent().unwrap_or(Path::new(".")).join("fuzz.toml");
+        let mut cfg = FuzzConfig::default();
+        if !file.exists() {
+            return Ok(cfg);
+        }
+        let t: toml::Table = std::fs::read_to_string(&file)?.parse().with_context(|| format!("parsing {}", file.display()))?;
+        let as_str = |v: &toml::Value| v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
+        if let Some(p) = t.get("params").and_then(|v| v.as_table()) {
+            cfg.params = p.iter().map(|(k, v)| (k.clone(), as_str(v))).collect();
+        }
+        if let Some(b) = t.get("body").and_then(|v| v.as_table()) {
+            cfg.body = serde_json::to_value(b)?.as_object().cloned().unwrap_or_default();
+        }
+        if let Some(h) = t.get("headers").and_then(|v| v.as_table()) {
+            cfg.headers = h.iter().map(|(k, v)| (k.clone(), as_str(v))).collect();
+        }
+        if let Some(cmd) = t.get("sign").and_then(|s| s.get("command")).and_then(|c| c.as_array()) {
+            cfg.sign = Some(cmd.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+        }
+        Ok(cfg)
+    }
+}
+
+/// `T` from the first `json_decode<T>(...)` call in a route body, if any.
+fn decoded_body_type(b: &Block) -> Option<Type> {
+    let mut found = None;
+    visit_exprs(b, &mut |e| {
+        if found.is_none()
+            && let Expr::Call(n, g, _) = e
+            && n == "json_decode"
+            && g.len() == 1
+        {
+            found = Some(g[0].clone());
+        }
+    });
+    found
+}
+
+/// The JSON key of field `i` (its `@rename`, else its name).
+fn json_name(s: &StructDef, i: usize) -> String {
+    s.field_attrs.get(i).and_then(|a| a.rename.clone()).unwrap_or_else(|| s.fields[i].0.clone())
+}
+
+const SAMPLE_UUID: &str = "00000000-0000-4000-8000-000000000000";
+const SAMPLE_TIME: &str = "2026-01-01T00:00:00Z";
+
+fn is_int(n: &str) -> bool {
+    matches!(n, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize")
+}
+fn is_uuid(n: &str) -> bool {
+    n == "Uuid" || n.ends_with("::Uuid")
+}
+fn is_time(n: &str) -> bool {
+    n.starts_with("DateTime") || n.ends_with("::DateTime") || n.contains("DateTime")
 }
 
 struct Ctx<'a> {
@@ -64,6 +143,8 @@ impl Ctx<'_> {
     /// A valid JSON value for a Parvez type.
     fn sample(&self, t: &Type, depth: usize) -> Value {
         match t {
+            Type::Named(n, _) if is_uuid(n) => json!(SAMPLE_UUID),
+            Type::Named(n, _) if is_time(n) => json!(SAMPLE_TIME),
             Type::Named(n, args) => match n.as_str() {
                 "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => json!(1),
                 "f32" | "f64" => json!(1.5),
@@ -74,8 +155,8 @@ impl Ctx<'_> {
                 other if depth < 4 => {
                     if let Some(s) = self.struct_def(other) {
                         let mut m = serde_json::Map::new();
-                        for (f, ft) in &s.fields {
-                            m.insert(f.clone(), self.sample(ft, depth + 1));
+                        for (i, (_, ft)) in s.fields.iter().enumerate() {
+                            m.insert(json_name(s, i), self.sample(ft, depth + 1));
                         }
                         Value::Object(m)
                     } else if let Some(e) = self.enum_def(other) {
@@ -92,6 +173,7 @@ impl Ctx<'_> {
             Type::List(e) => json!([self.sample(e, depth + 1)]),
             Type::Opt(_) => Value::Null,
             Type::Ref(inner, _) => self.sample(inner, depth),
+            Type::Tuple(_) | Type::Fn(..) => Value::Null,
         }
     }
 
@@ -99,7 +181,9 @@ impl Ctx<'_> {
     fn edges(&self, t: &Type) -> Vec<(&'static str, Value)> {
         let mut v = vec![("null", Value::Null), ("wrong-type-object", json!({"$": 1}))];
         match t {
-            Type::Named(n, _) if n.starts_with('i') || n.starts_with('u') => v.extend([
+            Type::Named(n, _) if is_uuid(n) => v.extend([("not-a-uuid", json!("abc")), ("nil-uuid", json!("00000000-0000-0000-0000-000000000000"))]),
+            Type::Named(n, _) if is_time(n) => v.extend([("not-a-time", json!("yesterday")), ("year-0", json!("0000-01-01T00:00:00Z")), ("far-future", json!("9999-12-31T23:59:59Z"))]),
+            Type::Named(n, _) if is_int(n) => v.extend([
                 ("zero", json!(0)),
                 ("negative", json!(-1)),
                 ("i64-max", json!(i64::MAX)),
@@ -143,7 +227,8 @@ const PATH_EDGES: &[(&str, &str)] = &[
 
 fn path_value(t: Option<&Type>) -> &'static str {
     match t {
-        Some(Type::Named(n, _)) if n.starts_with('i') || n.starts_with('u') => "1",
+        Some(Type::Named(n, _)) if is_uuid(n) => SAMPLE_UUID,
+        Some(Type::Named(n, _)) if is_int(n) => "1",
         Some(Type::Named(n, _)) if n == "bool" => "true",
         _ => "x",
     }
@@ -169,7 +254,20 @@ fn query_string(obj: &Value) -> String {
 }
 
 /// Every fuzz request for every route.
+#[cfg(test)]
 pub fn cases(prog: &Program) -> Vec<Case> {
+    cases_with(prog, &FuzzConfig::default())
+}
+
+pub fn cases_with(prog: &Program, cfg: &FuzzConfig) -> Vec<Case> {
+    let mut out = build_cases(prog, cfg);
+    for c in &mut out {
+        c.unauthenticated = c.label == "no-auth";
+    }
+    out
+}
+
+fn build_cases(prog: &Program, cfg: &FuzzConfig) -> Vec<Case> {
     let cx = Ctx { prog };
     let mut out = Vec::new();
     for item in &prog.items {
@@ -182,21 +280,37 @@ pub fn cases(prog: &Program) -> Vec<Case> {
             for h in &holes {
                 let v = match over {
                     Some((name, val)) if name == h => val.to_string(),
-                    _ => path_value(ty(h)).to_string(),
+                    _ => cfg.params.get(h).cloned().unwrap_or_else(|| path_value(ty(h)).to_string()),
                 };
                 p = p.replace(&format!("{{{h}}}"), &v);
             }
             p
         };
-        let base_query = ty("query").map(|t| cx.sample(t, 0)).unwrap_or(Value::Null);
+        let mut base_query = ty("query").map(|t| cx.sample(t, 0)).unwrap_or(Value::Null);
+        if let Value::Object(m) = &mut base_query {
+            for (k, v) in m.iter_mut() {
+                if let Some(p) = cfg.params.get(k) {
+                    *v = json!(p);
+                }
+            }
+        }
         let with_query = |path: String, q: &Value| {
             let qs = query_string(q);
             if qs.is_empty() { path } else { format!("{path}?{qs}") }
         };
-        let base_body = ty("body").map(|t| cx.sample(t, 0));
+        // A route without a `body` param that decodes `json_decode<T>(..req..)`
+        // itself (e.g. to control the error contract) still gets T-shaped bodies.
+        let inferred = if ty("body").is_none() && r.req { decoded_body_type(&r.body) } else { None };
+        let body_ty: Option<&Type> = ty("body").or(inferred.as_ref());
+        let mut base_body = body_ty.map(|t| cx.sample(t, 0));
+        if let Some(Value::Object(m)) = &mut base_body {
+            for (k, v) in &cfg.body {
+                m.insert(k.clone(), v.clone());
+            }
+        }
         let base_path = with_query(fill(None), &base_query);
         let mut push = |method: &str, path: String, ct: Option<&'static str>, body: Vec<u8>, label: String| {
-            out.push(Case { route: route.clone(), method: method.into(), path, content_type: ct, body, label });
+            out.push(Case { route: route.clone(), method: method.into(), path, content_type: ct, body, label, unauthenticated: false });
         };
         let json_ct = Some("application/json");
         let body_bytes = |v: &Value| serde_json::to_vec(v).unwrap();
@@ -204,6 +318,9 @@ pub fn cases(prog: &Program) -> Vec<Case> {
         let default_ct = if base_body.is_some() { json_ct } else { None };
 
         push(&r.method, base_path.clone(), default_ct, default_body.clone(), "baseline".into());
+        if !cfg.headers.is_empty() || cfg.sign.is_some() {
+            push(&r.method, base_path.clone(), default_ct, default_body.clone(), "no-auth".into());
+        }
         let other = if r.method == "PATCH" { "PUT" } else { "PATCH" };
         push(other, base_path.clone(), default_ct, default_body.clone(), "wrong-method".into());
 
@@ -234,11 +351,12 @@ pub fn cases(prog: &Program) -> Vec<Case> {
             }
         }
 
-        if let (Some(bt), Some(base)) = (ty("body"), &base_body) {
+        if let (Some(bt), Some(base)) = (body_ty, &base_body) {
             if let (Value::Object(m), Type::Named(n, _)) = (base, bt)
                 && let Some(s) = cx.struct_def(n)
             {
-                for (f, ft) in &s.fields {
+                for (i, (_, ft)) in s.fields.iter().enumerate() {
+                    let f = &json_name(s, i);
                     let mut missing = m.clone();
                     missing.remove(f);
                     push(&r.method, base_path.clone(), json_ct, body_bytes(&Value::Object(missing)), format!("body missing {f}"));
@@ -272,14 +390,38 @@ pub fn cases(prog: &Program) -> Vec<Case> {
     out
 }
 
-/// Sends one request; returns (status, body).
-fn send(port: u16, c: &Case) -> std::io::Result<(u16, String)> {
+/// Runs the `[sign]` command for a request; returns its `Header: value` lines.
+fn sign(cmd: &[String], c: &Case) -> Result<Vec<(String, String)>> {
+    let (path, query) = c.path.split_once('?').unwrap_or((&c.path, ""));
+    let mut child = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .env("FUZZ_METHOD", &c.method)
+        .env("FUZZ_PATH", path)
+        .env("FUZZ_QUERY", query)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running fuzz.toml [sign] command {cmd:?}"))?;
+    child.stdin.take().unwrap().write_all(&c.body)?;
+    let out = child.wait_with_output()?;
+    anyhow::ensure!(out.status.success(), "fuzz.toml [sign] command failed ({})", out.status);
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+        .collect())
+}
+
+/// Sends one request; returns (status, body, rejected-before-handler).
+fn send(port: u16, c: &Case, extra: &[(String, String)]) -> std::io::Result<(u16, String, bool)> {
     let mut s = TcpStream::connect(("127.0.0.1", port))?;
     s.set_read_timeout(Some(Duration::from_secs(40)))?;
     s.set_write_timeout(Some(Duration::from_secs(10)))?;
     let mut head = format!("{} {} HTTP/1.1\r\nHost: fuzz\r\nConnection: close\r\n", c.method, c.path);
     if let Some(ct) = c.content_type {
         head.push_str(&format!("Content-Type: {ct}\r\n"));
+    }
+    for (k, v) in extra {
+        head.push_str(&format!("{k}: {v}\r\n"));
     }
     head.push_str(&format!("Content-Length: {}\r\n\r\n", c.body.len()));
     s.write_all(head.as_bytes())?;
@@ -289,7 +431,9 @@ fn send(port: u16, c: &Case) -> std::io::Result<(u16, String)> {
     s.read_to_end(&mut raw)?;
     let text = String::from_utf8_lossy(&raw).to_string();
     let status = text.get(9..12).and_then(|x| x.parse().ok()).ok_or_else(|| std::io::Error::other("no HTTP status line"))?;
-    Ok((status, text.split_once("\r\n\r\n").map(|x| x.1.to_string()).unwrap_or_default()))
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let rejected = head.to_ascii_lowercase().contains("\r\nx-parvez-rejected:");
+    Ok((status, body.to_string(), rejected))
 }
 
 struct Server(Child);
@@ -302,8 +446,8 @@ impl Drop for Server {
 
 /// Fuzzes the built service binary. Returns Ok(()) when nothing crashed,
 /// hung, or leaked.
-pub fn run(prog: &Program, bin: &Path) -> Result<()> {
-    let cases = cases(prog);
+pub fn run(prog: &Program, bin: &Path, cfg: &FuzzConfig) -> Result<()> {
+    let cases = cases_with(prog, cfg);
     if cases.is_empty() {
         bail!("no `route`s to fuzz");
     }
@@ -312,6 +456,7 @@ pub fn run(prog: &Program, bin: &Path) -> Result<()> {
     let mut server = Server(
         Command::new(bin)
             .env("PORT", port.to_string())
+            .env("PARVEZ_FUZZ", "1")
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log)?)
             .spawn()
@@ -327,11 +472,25 @@ pub fn run(prog: &Program, bin: &Path) -> Result<()> {
     }
 
     let (mut ok, mut warns, mut fails) = (0usize, Vec::new(), Vec::new());
+    // route -> (requests, reached a handler)
+    let mut reach: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
     let routes: std::collections::BTreeSet<&str> = cases.iter().map(|c| c.route.as_str()).collect();
     for c in &cases {
         let what = format!("{} {} [{}]", c.method, c.route.split_once(' ').map(|x| x.1).unwrap_or(""), c.label);
-        match send(port, c) {
-            Ok((status, body)) => {
+        let mut extra = Vec::new();
+        if !c.unauthenticated {
+            extra.extend(cfg.headers.iter().cloned());
+            if let Some(cmd) = &cfg.sign {
+                extra.extend(sign(cmd, c)?);
+            }
+        }
+        match send(port, c, &extra) {
+            Ok((status, body, rejected)) => {
+                let e = reach.entry(c.route.as_str()).or_default();
+                e.0 += 1;
+                if !rejected {
+                    e.1 += 1;
+                }
                 if let Some(p) = leak(&body) {
                     let shown: String = body.chars().take(160).collect();
                     fails.push(format!("LEAK   {what} -> {status}: response contains `{p}`: {shown}"));
@@ -366,6 +525,14 @@ pub fn run(prog: &Program, bin: &Path) -> Result<()> {
     for f in &fails {
         eprintln!("parvez: fuzz: FAIL {f}");
     }
+    for (route, (n, hit)) in &reach {
+        eprintln!("parvez: fuzz: coverage: {route}: {hit}/{n} request(s) got past validation into the handler");
+        if *hit == 0 {
+            eprintln!(
+                "parvez: fuzz: warning: {route} was never reached; add realistic values in fuzz.toml ([params], [body], [headers], [sign])"
+            );
+        }
+    }
     eprintln!(
         "parvez: fuzz: {} requests across {} route(s): {ok} ok, {} 5xx (no leak), {} failure(s); {panics} handler panic(s) contained",
         cases.len(),
@@ -383,6 +550,19 @@ pub fn run(prog: &Program, bin: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{lexer::lex, parser::parse};
+
+    #[test]
+    fn config_and_inferred_body_types() {
+        let src = "@json\ntype Hb:\n    @rename(\"v\")\n    version: str\n    id: Uuid\nroute POST \"/hb/{dev}\" (req, dev: Uuid):\n    b = match json_decode<Hb>(&req.text_body()):\n        Ok(b) -> b\n        Err(_) -> fail(400, \"bad\")\n";
+        let prog = parse(lex(src).unwrap()).unwrap();
+        let cfg = FuzzConfig { params: [("dev".to_string(), "abc".to_string())].into(), headers: vec![("x-k".into(), "1".into())], ..Default::default() };
+        let cs = cases_with(&prog, &cfg);
+        assert_eq!(cs[0].path, "/hb/abc", "fuzz.toml [params] fills path params");
+        let body: Value = serde_json::from_slice(&cs[0].body).unwrap();
+        assert_eq!(body, json!({"v": "x", "id": SAMPLE_UUID}), "body inferred from json_decode<Hb>, @rename honoured");
+        assert!(cs.iter().any(|c| c.label == "no-auth" && c.unauthenticated));
+        assert!(cs.iter().any(|c| c.label == "body id=not-a-uuid"));
+    }
 
     #[test]
     fn leak_detection() {

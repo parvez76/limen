@@ -93,6 +93,9 @@ Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reu
 | `json_decode<Event>(raw)?` / `json_encode(e)?` | `serde_json::from_str::<Event>(&raw)?` / `serde_json::to_string(&e)?` |
 | `use serde::{Serialize}` / `use reqwest` | `use` + automatic Cargo.toml dependencies (pin in `parvez.toml`) |
 | `route POST "/x/{id}" (id: u64, body: T) -> T!:` | axum handler + router + `#[tokio::main]` server |
+| `@guard(verify)` + `(req, auth)` / `req.header("x")` / `req.client_ip()` | Pre-handler auth with raw request access |
+| `status(204)` / `fail(401, code: "X", "msg")` | Any status / `{"error", "code"}` contracts |
+| `\|x\| x * 2` / `loop:` / `spawn work()` / `"""SQL"""` / `(a, b)` | closures / `loop` / `tokio::spawn` / dedented multi-line string / tuples |
 | `state:` / `hits: AtomicU64 = AtomicU64::new(0)` / `(state)` | `Arc<AppState>` built at startup, injected via axum `State` |
 
 There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue`.
@@ -131,7 +134,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-This is v0.5. These aren't supported yet: closures, traits, generics on your own types, `as` casts and macros. When you need one of them, run `parvez show` and continue in Rust.
+This is v0.6. These aren't supported yet: traits, generics on your own types, `as` casts, macros, tuple destructuring in `let`, and multi-file programs. When you need one of them, run `parvez show` and continue in Rust.
 
 ## License
 

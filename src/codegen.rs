@@ -162,6 +162,10 @@ struct Gen {
     /// file has routes (helpers return HTTP errors)
     service: bool,
     cfg: ServiceConfig,
+    /// top-level fns by name (guards: return type, async, params)
+    fn_defs: HashMap<String, FnDef>,
+    /// some code calls `status(..)`: route wrappers run in status mode
+    uses_status: bool,
 }
 
 /// Rust keywords (2024 edition, incl. reserved) that Parvez allows as names.
@@ -205,7 +209,72 @@ pub fn rust_type(t: &Type) -> String {
         }
         Type::List(e) => format!("Vec<{}>", rust_type(e)),
         Type::Opt(e) => format!("Option<{}>", rust_type(e)),
+        Type::Tuple(ts) => match ts.as_slice() {
+            [one] => format!("({},)", rust_type(one)),
+            _ => format!("({})", ts.iter().map(rust_type).collect::<Vec<_>>().join(", ")),
+        },
+        Type::Fn(args, ret) => {
+            let a: Vec<String> = args.iter().map(rust_type).collect();
+            match ret {
+                Some(r) => format!("impl Fn({}) -> {}", a.join(", "), rust_type(r)),
+                None => format!("impl Fn({})", a.join(", ")),
+            }
+        }
     }
+}
+
+/// Does any statement in `b` (recursively) call `name(..)`?
+fn block_calls(b: &Block, name: &str) -> bool {
+    b.iter().any(|s| stmt_calls(&s.stmt, name))
+}
+
+fn stmt_calls(s: &Stmt, name: &str) -> bool {
+    match s {
+        Stmt::Let { value, .. } => expr_calls(value, name),
+        Stmt::Assign { target, value, .. } => expr_calls(target, name) || expr_calls(value, name),
+        Stmt::Expr(e) | Stmt::Ret(Some(e)) => expr_calls(e, name),
+        Stmt::Ret(None) | Stmt::Break | Stmt::Continue => false,
+        Stmt::If { branches, els } => {
+            branches.iter().any(|(c, b)| expr_calls(c, name) || block_calls(b, name))
+                || els.as_ref().is_some_and(|b| block_calls(b, name))
+        }
+        Stmt::For { iter, body, .. } => expr_calls(iter, name) || block_calls(body, name),
+        Stmt::While { cond, body } => expr_calls(cond, name) || block_calls(body, name),
+        Stmt::Loop(body) => block_calls(body, name),
+    }
+}
+
+fn expr_calls(e: &Expr, name: &str) -> bool {
+    let body = |b: &ClosureBody| match b {
+        ClosureBody::Expr(x) => expr_calls(x, name),
+        ClosureBody::Block(b) => block_calls(b, name),
+    };
+    match e {
+        Expr::Call(n, _, args) => n == name || args.iter().any(|a| expr_calls(a, name)),
+        Expr::Method(x, _, _, args) => expr_calls(x, name) || args.iter().any(|a| expr_calls(a, name)),
+        Expr::Str(parts) => parts.iter().any(|p| matches!(p, StrPart::Interp(x, _) if expr_calls(x, name))),
+        Expr::List(xs) | Expr::Tuple(xs) => xs.iter().any(|x| expr_calls(x, name)),
+        Expr::StructLit(_, fs) => fs.iter().any(|(_, v)| expr_calls(v, name)),
+        Expr::Binary(a, _, b) | Expr::Range(a, b, _) | Expr::Index(a, b) => expr_calls(a, name) || expr_calls(b, name),
+        Expr::Unary(_, x) | Expr::Ref(x, _) | Expr::Field(x, _) | Expr::Try(x) | Expr::Await(x) | Expr::Named(_, x) => {
+            expr_calls(x, name)
+        }
+        Expr::Match(x, arms) => {
+            expr_calls(x, name)
+                || arms.iter().any(|a| a.guard.as_ref().is_some_and(|g| expr_calls(g, name)) || block_calls(&a.body, name))
+        }
+        Expr::Closure { body: b, .. } | Expr::Spawn(b) => body(b),
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => false,
+    }
+}
+
+/// Constructors that should receive owned values (`Some("x")` -> `Some(String::from("x"))`).
+fn owned_ctor(name: &str) -> bool {
+    let seg = name.rsplit("::").next().unwrap_or(name);
+    matches!(seg, "Some" | "Ok" | "Err")
+        || ["Box::new", "Rc::new", "Arc::new", "Mutex::new", "RwLock::new", "Cell::new", "RefCell::new", "String::from"]
+            .iter()
+            .any(|c| name == *c || name.ends_with(&format!("::{c}")))
 }
 
 impl Gen {
@@ -216,7 +285,10 @@ impl Gen {
             match item {
                 Item::Fn(f) => {
                     g.fns.insert(f.name.clone(), param_types(f));
+                    g.fn_defs.insert(f.name.clone(), f.clone());
+                    g.uses_status |= block_calls(&f.body, "status");
                 }
+                Item::Route(r) => g.uses_status |= block_calls(&r.body, "status"),
                 Item::Struct(s) => {
                     g.structs.insert(s.name.clone(), s.fields.iter().cloned().collect());
                 }
@@ -228,7 +300,7 @@ impl Gen {
                             .push((e.name.clone(), v.data.clone()));
                     }
                 }
-                Item::Use(_) | Item::Route(_) => {}
+                Item::Use(_) => {}
                 Item::State(st) => {
                     g.structs.insert(
                         "AppState".into(),
@@ -294,7 +366,18 @@ impl Gen {
         self.line(&d);
         self.line(&format!("struct {} {{", s.name));
         self.indent += 1;
-        for (name, ty) in &s.fields {
+        for (i, (name, ty)) in s.fields.iter().enumerate() {
+            if let Some(fa) = s.field_attrs.get(i) {
+                if let Some(r) = &fa.rename {
+                    self.line(&format!("#[serde(rename = \"{r}\")]"));
+                }
+                if fa.default {
+                    self.line("#[serde(default)]");
+                }
+                if fa.omit_none {
+                    self.line("#[serde(skip_serializing_if = \"Option::is_none\")]");
+                }
+            }
             self.line(&format!("{}: {},", esc(name), rust_type(ty)));
         }
         self.indent -= 1;
@@ -511,8 +594,20 @@ impl Gen {
             }
             Stmt::For { var, iter, body } => {
                 let it = self.head(iter);
-                self.line(&format!("for {} in {it} {{", esc(var)));
-                self.block(body, std::slice::from_ref(var));
+                if let Some(inner) = var.strip_prefix('(').and_then(|v| v.strip_suffix(')')) {
+                    let names: Vec<String> = inner.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
+                    let pat: Vec<String> = names.iter().map(|n| esc(n)).collect();
+                    self.line(&format!("for ({}) in {it} {{", pat.join(", ")));
+                    self.block(body, &names);
+                } else {
+                    self.line(&format!("for {} in {it} {{", esc(var)));
+                    self.block(body, std::slice::from_ref(var));
+                }
+                self.line("}");
+            }
+            Stmt::Loop(body) => {
+                self.line("loop {");
+                self.block(body, &[]);
                 self.line("}");
             }
             Stmt::While { cond, body } => {
@@ -536,9 +631,17 @@ impl Gen {
         }
         self.cur_line = 0;
         self.out.push('\n');
-        let prelude = SERVICE_PRELUDE
+        let mut prelude = SERVICE_PRELUDE.to_string();
+        if routes.iter().any(|r| r.req || !r.guards.is_empty()) {
+            prelude.push_str(REQ_PRELUDE);
+        }
+        if self.uses_status {
+            prelude.push_str(STATUS_PRELUDE);
+        }
+        let prelude = prelude
             .replace("__TIMEOUT__", &self.cfg.timeout_secs.to_string())
-            .replace("__CONCURRENCY__", &self.cfg.max_concurrency.to_string());
+            .replace("__CONCURRENCY__", &self.cfg.max_concurrency.to_string())
+            .replace("__BODY_LIMIT__", &self.cfg.body_limit_bytes.to_string());
         for l in prelude.lines() {
             self.line(l);
         }
@@ -552,10 +655,22 @@ impl Gen {
                 name.push('_');
             }
             let state_ty = Type::Ref(Box::new(Type::Named("AppState".into(), vec![])), false);
+            let req_ty = Type::Ref(Box::new(Type::Named("Req".into(), vec![])), false);
+            let guard_defs: Vec<FnDef> = r.guards.iter().filter_map(|g| self.fn_defs.get(g).cloned()).collect();
+            let auth_ty = guard_defs.last().and_then(|g| g.ret.clone()).unwrap_or(Type::Tuple(vec![]));
             let mut params = r.params.clone();
+            if r.auth {
+                params.insert(0, ("auth".into(), auth_ty));
+            }
+            if r.req {
+                params.insert(0, ("req".into(), req_ty));
+            }
             if r.state {
                 params.insert(0, ("state".into(), state_ty));
             }
+            let guard_state = guard_defs.iter().any(|g| g.params.iter().any(|(p, _)| p == "state"));
+            let needs_req = r.req || !guard_defs.is_empty();
+            let extended = needs_req || self.uses_status;
             self.fns.insert(name.clone(), params.iter().map(|(_, t)| t.clone()).collect());
             let f = FnDef {
                 name: name.clone(),
@@ -575,7 +690,7 @@ impl Gen {
             self.cur_line = r.line;
             let ty_of = |n: &str| r.params.iter().find(|(p, _)| p == n).map(|(_, t)| rust_type(t));
             let mut ex = Vec::new();
-            if r.state {
+            if r.state || guard_state {
                 ex.push("axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>".to_string());
             }
             let holes = path_params(&r.path);
@@ -595,14 +710,77 @@ impl Gen {
             if let Some(t) = ty_of("query") {
                 ex.push(format!("axum::extract::Query(query): axum::extract::Query<{t}>"));
             }
-            if let Some(t) = ty_of("body") {
+            if needs_req {
+                ex.push("request: axum::extract::Request".to_string());
+            } else if let Some(t) = ty_of("body") {
                 ex.push(format!("axum::Json(body): axum::Json<{t}>"));
             }
             let mut args: Vec<String> = r.params.iter().map(|(p, _)| esc(p)).collect();
+            if r.auth {
+                args.insert(0, "auth".into());
+            }
+            if r.req {
+                args.insert(0, "&req".into());
+            }
             if r.state {
                 args.insert(0, "&state".into());
             }
             let call = format!("{name}({}).await", args.join(", "));
+            if extended {
+                let handler = format!("{name}_http");
+                self.out.push('\n');
+                self.line(&format!("/// {} {}", r.method, r.path));
+                self.line(&format!("async fn {handler}({}) -> axum::response::Response {{", ex.join(", ")));
+                self.indent += 1;
+                self.line("use axum::response::IntoResponse;");
+                // Steps before the handler: failures are marked `rejected` (fuzz coverage).
+                if needs_req {
+                    self.line("let req = match Req::read(request).await { Ok(v) => v, Err(e) => return rejected(e) };");
+                    if let Some(t) = ty_of("body") {
+                        self.line(&format!("let body: {t} = match req.json() {{ Ok(v) => v, Err(e) => return rejected(e) }};"));
+                    }
+                }
+                let n = guard_defs.len();
+                for (k, g) in guard_defs.iter().enumerate() {
+                    let gargs: Vec<&str> =
+                        g.params.iter().map(|(p, _)| if p == "state" { "&state" } else { "&req" }).collect();
+                    let aw = if g.is_async { ".await" } else { "" };
+                    let bind = if k + 1 == n && r.auth { "let auth = " } else { "let _ = " };
+                    let call = format!("{}({}){aw}", esc(&g.name), gargs.join(", "));
+                    if g.fallible {
+                        self.line(&format!("{bind}match {call} {{ Ok(v) => v, Err(e) => return rejected(e.into()) }};"));
+                    } else {
+                        self.line(&format!("{bind}{call};"));
+                    }
+                }
+                let text = matches!(&r.ret, Some(Type::Named(n, a)) if n == "str" && a.is_empty());
+                let wrap = match &r.ret {
+                    None => "out.into_response()".to_string(),
+                    Some(_) if text => "out.into_response()".to_string(),
+                    Some(_) => "axum::Json(out).into_response()".to_string(),
+                };
+                let unwrap_out = |g: &mut Self| {
+                    if r.fallible {
+                        g.line("let out = match out { Ok(v) => v, Err(e) => return AppError::from(e).into_response() };");
+                    }
+                };
+                if self.uses_status {
+                    self.line(&format!("let (code, out) = with_status(async {{ {call} }}).await;"));
+                    unwrap_out(self);
+                    self.line(&format!("with_code(code, {wrap})"));
+                } else {
+                    self.line(&format!("let out = {call};"));
+                    unwrap_out(self);
+                    self.line(&wrap);
+                }
+                self.indent -= 1;
+                self.line("}");
+                match table.iter_mut().find(|(p, _)| *p == r.path) {
+                    Some((_, v)) => v.push((r.method.to_lowercase(), handler)),
+                    None => table.push((r.path.clone(), vec![(r.method.to_lowercase(), handler)])),
+                }
+                continue;
+            }
             let text = matches!(&r.ret, Some(Type::Named(n, a)) if n == "str" && a.is_empty());
             let (ret, body) = match (&r.ret, r.fallible) {
                 (None, false) => (String::new(), format!("{call};")),
@@ -661,6 +839,7 @@ impl Gen {
         self.line("let addr = format!(\"0.0.0.0:{port}\");");
         self.line("let listener = tokio::net::TcpListener::bind(&addr).await?;");
         self.line("println!(\"listening on http://{addr}\");");
+        self.line("let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();");
         self.line("axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;");
         self.line("Ok(())");
         self.indent -= 1;
@@ -688,6 +867,9 @@ impl Gen {
                 stmt: Stmt::Let { name: n.clone(), mutable: false, ty: Some(t.clone()), value: v.clone() },
             })
             .collect();
+        for (task, line) in &st.tasks {
+            body.push(Located { line: *line, stmt: Stmt::Expr(task.clone()) });
+        }
         let fields = st.fields.iter().map(|(n, ..)| (n.clone(), Expr::Ident(n.clone()))).collect();
         body.push(Located { line: st.line, stmt: Stmt::Ret(Some(Expr::StructLit("AppState".into(), fields))) });
         self.out.push('\n');
@@ -759,6 +941,42 @@ impl Gen {
         let arms_src = std::mem::replace(&mut self.out, saved_out);
         self.cur_line = saved_line;
         format!("match {s} {{\n{arms_src}{}}}", "    ".repeat(base))
+    }
+
+    /// A `{ ... }` block rendered into a string (closure / spawn bodies). With
+    /// `tail`, a final expression statement is the block's value. `ret`
+    /// statements return from the closure, not the enclosing fn.
+    fn sub_block(&mut self, b: &Block, binds: &[String], ret: Option<Type>, tail: bool) -> String {
+        let saved = (self.cur_line, self.fallible, self.ret_ty.clone());
+        self.fallible = false;
+        self.ret_ty = ret;
+        let saved_out = std::mem::take(&mut self.out);
+        let base = self.indent;
+        self.indent += 1;
+        self.scopes.push(binds.iter().map(|n| (n.clone(), false)).collect());
+        if let Some((last, init)) = b.split_last() {
+            for st in init {
+                self.gen_stmt(st);
+            }
+            match &last.stmt {
+                Stmt::Expr(e) if tail => {
+                    self.cur_line = last.line;
+                    let v = self.expr(e);
+                    self.line(&v);
+                }
+                Stmt::Ret(Some(e)) if tail => {
+                    self.cur_line = last.line;
+                    let v = self.expr(e);
+                    self.line(&v);
+                }
+                _ => self.gen_stmt(last),
+            }
+        }
+        self.scopes.pop();
+        self.indent = base;
+        let body = std::mem::replace(&mut self.out, saved_out);
+        (self.cur_line, self.fallible, self.ret_ty) = saved;
+        format!("{{\n{body}{}}}", "    ".repeat(base))
     }
 
     /// Resolve a variant name to its qualified path and shape.
@@ -996,6 +1214,24 @@ impl Gen {
             Expr::Call(name, generics, args) => match name.as_str() {
                 "print" => format!("println!({})", self.fmt_args(args)),
                 "eprint" => format!("eprintln!({})", self.fmt_args(args)),
+                "fail" if args.iter().any(|a| matches!(a, Expr::Named(n, _) if n == "code")) => {
+                    // fail(401, code: "X", "msg") -> {"error": msg, "code": "X"}
+                    let status = match args.first() {
+                        Some(Expr::Int(c)) => c.clone(),
+                        _ => "500".into(),
+                    };
+                    let tag = args
+                        .iter()
+                        .find_map(|a| match a {
+                            Expr::Named(n, v) if n == "code" => Some(v.as_ref().clone()),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let tag = self.expr(&tag);
+                    let rest: Vec<Expr> =
+                        args.iter().filter(|a| !matches!(a, Expr::Int(_) | Expr::Named(..))).cloned().collect();
+                    format!("anyhow::bail!(ApiError({status}, {tag}, format!({})))", self.fmt_args(&rest))
+                }
                 "fail" => match args.split_first() {
                     // fail(404, "msg") -> HTTP status in routes
                     Some((Expr::Int(code), rest)) if !rest.is_empty() => {
@@ -1003,6 +1239,7 @@ impl Gen {
                     }
                     _ => format!("anyhow::bail!({})", self.fmt_args(args)),
                 },
+                "status" if args.len() == 1 => format!("set_status({})", self.expr(&args[0])),
                 "json_encode" | "json_pretty" if args.len() == 1 => {
                     self.deps.insert("serde_json".into());
                     let f = if name == "json_encode" { "to_string" } else { "to_string_pretty" };
@@ -1058,12 +1295,19 @@ impl Gen {
                             (Some(m), Some(t)) => format!("{t}::{m}"),
                             _ => name.clone(),
                         };
-                        let params = self.fns.get(&key).cloned().unwrap_or_default();
                         if name.contains("::") {
                             self.deps.extend(crate_of(name, true));
                         }
+                        // Parvez fns: coerce against declared params. Constructors
+                        // (`Some`, `Arc::new`, ..) take owned values. Other external
+                        // fns: literals stay `&'static str` (fits &str, Into<String>, AsRef).
+                        let a = match self.fns.get(&key).cloned() {
+                            Some(params) => self.args_for(args, &params),
+                            None if owned_ctor(name) => self.args_for(args, &[]),
+                            None => args.iter().map(|x| self.expr_loose(x)).collect(),
+                        };
                         let callee = if name.contains("::") { name.clone() } else { esc(name) };
-                        format!("{callee}{}({})", turbofish(generics), self.args_for(args, &params).join(", "))
+                        format!("{callee}{}({})", turbofish(generics), a.join(", "))
                     }
                 },
             },
@@ -1092,6 +1336,48 @@ impl Gen {
             Expr::Index(x, i) => format!("{}[{}]", self.atom(x), self.expr(i)),
             Expr::Try(x) => format!("{}?", self.atom(x)),
             Expr::Match(s, arms) => self.gen_match(s, arms, true),
+            Expr::Tuple(xs) => {
+                let v: Vec<String> = xs.iter().map(|x| self.expr(x)).collect();
+                match v.as_slice() {
+                    [one] => format!("({one},)"),
+                    _ => format!("({})", v.join(", ")),
+                }
+            }
+            Expr::Named(_, v) => self.expr(v),
+            Expr::Closure { params, ret, body, is_move } => {
+                let ps: Vec<String> = params
+                    .iter()
+                    .map(|(n, t)| match t {
+                        Some(t) => format!("{}: {}", esc(n), rust_type(t)),
+                        None => esc(n),
+                    })
+                    .collect();
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                let head = format!("{}|{}|", if *is_move { "move " } else { "" }, ps.join(", "));
+                match body.as_ref() {
+                    ClosureBody::Expr(x) => {
+                        self.scopes.push(names.iter().map(|n| (n.clone(), false)).collect());
+                        let v = self.expr(x);
+                        self.scopes.pop();
+                        format!("{head} {v}")
+                    }
+                    ClosureBody::Block(b) => {
+                        let r = ret.as_ref().map(|t| format!(" -> {}", rust_type(t))).unwrap_or_default();
+                        let inner = self.sub_block(b, &names, ret.clone(), true);
+                        format!("{head}{r} {inner}")
+                    }
+                }
+            }
+            Expr::Spawn(body) => {
+                self.deps.insert("tokio".into());
+                match body.as_ref() {
+                    ClosureBody::Expr(x) => format!("tokio::spawn({})", self.expr(x)),
+                    ClosureBody::Block(b) => {
+                        let inner = self.sub_block(b, &[], None, false);
+                        format!("tokio::spawn(async move {inner})")
+                    }
+                }
+            }
         }
     }
 }
@@ -1152,6 +1438,128 @@ fn safe_join(base: impl AsRef<std::path::Path>, name: impl AsRef<str>) -> anyhow
     Ok(base.as_ref().join(p))
 }"#;
 
+/// Request context for routes and guards that take `req`.
+const REQ_PRELUDE: &str = r#"
+
+/// What a route or guard sees of the HTTP request when it takes `req`.
+struct Req {
+    method: String,
+    path: String,
+    query: String,
+    headers: axum::http::HeaderMap,
+    ip: String,
+    body: Vec<u8>,
+}
+
+impl Req {
+    async fn read(request: axum::extract::Request) -> Result<Req, AppError> {
+        let (parts, body) = request.into_parts();
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip().to_string())
+            .unwrap_or_default();
+        // Behind a reverse proxy set PARVEZ_TRUST_PROXY=1 to use X-Real-IP / X-Forwarded-For.
+        let forwarded = parts
+            .headers
+            .get("x-real-ip")
+            .or_else(|| parts.headers.get("x-forwarded-for"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().to_string());
+        let ip = match forwarded {
+            Some(f) if limit("PARVEZ_TRUST_PROXY", 0) == 1 && !f.is_empty() => f,
+            _ => peer,
+        };
+        let max = limit("PARVEZ_BODY_LIMIT_BYTES", __BODY_LIMIT__) as usize;
+        let body = axum::body::to_bytes(body, max)
+            .await
+            .map_err(|_| AppError::from(HttpError(413, String::from("request body too large"))))?
+            .to_vec();
+        Ok(Req {
+            method: parts.method.to_string(),
+            path: parts.uri.path().to_string(),
+            query: parts.uri.query().unwrap_or("").to_string(),
+            headers: parts.headers,
+            ip,
+            body,
+        })
+    }
+
+    /// A header's value (name is case-insensitive), if present and valid UTF-8.
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers.get(name).and_then(|v| v.to_str().ok()).map(String::from)
+    }
+
+    fn raw_body(&self) -> &[u8] {
+        &self.body
+    }
+
+    fn text_body(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    fn client_ip(&self) -> String {
+        self.ip.clone()
+    }
+
+    fn method(&self) -> String {
+        self.method.clone()
+    }
+
+    fn path(&self) -> String {
+        self.path.clone()
+    }
+
+    fn query_string(&self) -> String {
+        self.query.clone()
+    }
+
+    fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, AppError> {
+        serde_json::from_slice(&self.body).map_err(|e| HttpError(422, format!("invalid JSON body: {e}")).into())
+    }
+}
+
+/// An error response from before the handler ran (bad request, guard refused).
+fn rejected(e: AppError) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut r = e.into_response();
+    if std::env::var_os("PARVEZ_FUZZ").is_some() {
+        r.headers_mut().insert("x-parvez-rejected", axum::http::HeaderValue::from_static("1"));
+    }
+    r
+}"#;
+
+/// `status(204)` support: a per-request slot the route (or anything it calls) sets.
+const STATUS_PRELUDE: &str = r#"
+
+tokio::task_local! {
+    static STATUS: std::cell::Cell<Option<u16>>;
+}
+
+/// `status(204)`: the success status for the current request.
+fn set_status(code: u16) {
+    let _ = STATUS.try_with(|s| s.set(Some(code)));
+}
+
+async fn with_status<F: std::future::Future>(f: F) -> (Option<u16>, F::Output) {
+    STATUS
+        .scope(std::cell::Cell::new(None), async move {
+            let out = f.await;
+            (STATUS.with(|s| s.get()), out)
+        })
+        .await
+}
+
+fn with_code(code: Option<u16>, mut res: axum::response::Response) -> axum::response::Response {
+    if let Some(c) = code.and_then(|c| axum::http::StatusCode::from_u16(c).ok())
+        && res.status().is_success()
+    {
+        *res.status_mut() = c;
+    }
+    res
+}"#;
+
 /// Error plumbing emitted once per service: route `!` errors -> JSON responses.
 const SERVICE_PRELUDE: &str = r#"/// `fail(status, "msg")` inside a route -> that HTTP status + {"error": msg}.
 #[derive(Debug)]
@@ -1165,6 +1573,18 @@ impl std::fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
+/// `fail(status, code: "X", "msg")` -> that status + {"error": msg, "code": "X"}.
+#[derive(Debug)]
+struct ApiError(u16, String, String);
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.2)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 /// Any route error -> JSON body. Unexpected errors are logged to stderr and
 /// returned as a generic 500 so internal details (DB, paths, ...) never leak.
 struct AppError(anyhow::Error);
@@ -1177,6 +1597,11 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        if let Some(ApiError(code, tag, msg)) = self.0.downcast_ref::<ApiError>() {
+            let status = axum::http::StatusCode::from_u16(*code)
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            return (status, axum::Json(serde_json::json!({ "error": msg, "code": tag }))).into_response();
+        }
         let (code, msg) = match self.0.downcast_ref::<HttpError>() {
             Some(HttpError(code, msg)) => (*code, msg.clone()),
             None => {
@@ -1217,7 +1642,12 @@ async fn json_errors(res: axum::response::Response) -> axum::response::Response 
         } else if msg.is_empty() {
             msg = status.canonical_reason().unwrap_or("error").to_string();
         }
-        (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+        let mut r = (status, axum::Json(serde_json::json!({ "error": msg }))).into_response();
+        if std::env::var_os("PARVEZ_FUZZ").is_some() {
+            // `parvez fuzz` coverage: this request was rejected before any handler ran
+            r.headers_mut().insert("x-parvez-rejected", axum::http::HeaderValue::from_static("1"));
+        }
+        r
     };
     let h = res.headers_mut();
     h.insert("x-content-type-options", axum::http::HeaderValue::from_static("nosniff"));
@@ -1543,6 +1973,41 @@ mod tests {
         let cli = rs("fn main()!:\n    p = safe_join(\"/srv\", name)?\n");
         assert!(cli.contains("let p = safe_join(\"/srv\", &name)?;"), "{cli}");
         assert!(cli.contains("anyhow::bail!(\"invalid path: {name:?}\");"));
+    }
+
+    // ---------- v0.6 ----------
+
+    #[test]
+    fn closures_loop_tuples_spawn() {
+        let out = rs("async fn main()!:\n    a = xs.iter().map(|x| x * 2)\n    big = |x: i32| -> str:\n        if x > 2: ret \"big\"\n        ret \"small\"\n    loop:\n        break\n    for (k, v) in &m: print(k)\n    t: (i32, str) = (1, \"a\")\n    h = spawn work(1)\n    j = spawn:\n        print(1)\n");
+        assert!(out.contains("let a = xs.iter().map(|x| x * 2);"), "{out}");
+        assert!(out.contains("let big = |x: i32| -> String {\n        if x > 2 {\n            return String::from(\"big\");\n        }\n        String::from(\"small\")\n    };"), "{out}");
+        assert!(out.contains("    loop {\n        break;\n    }"), "{out}");
+        assert!(out.contains("for (k, v) in &m {"), "{out}");
+        assert!(out.contains("let t: (i32, String) = (1, String::from(\"a\"));"), "{out}");
+        assert!(out.contains("let h = tokio::spawn(work(1));"), "{out}");
+        assert!(out.contains("let j = tokio::spawn(async move {\n        println!(\"{}\", 1);\n    });"), "{out}");
+    }
+
+    #[test]
+    fn external_literals_ctors_and_field_attrs() {
+        let out = rs("@json\ntype E:\n    @rename(\"type\")\n    kind: str\n    @default\n    n: i32\n    @omit_none\n    note: str?\nfn main():\n    q = sqlx::query(\"SELECT 1\")\n    o: str? = Some(\"x\")\n    a = Arc::new(\"y\")\n    s = \"\"\"\n        a\n        b\n        \"\"\"\n");
+        assert!(out.contains("let q = sqlx::query(\"SELECT 1\");"), "{out}");
+        assert!(out.contains("let o: Option<String> = Some(String::from(\"x\"));"), "{out}");
+        assert!(out.contains("let a = Arc::new(String::from(\"y\"));"), "{out}");
+        assert!(out.contains("let s = String::from(\"a\\nb\");"), "{out}");
+        assert!(out.contains("    #[serde(rename = \"type\")]\n    kind: String,\n    #[serde(default)]\n    n: i32,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    note: Option<String>,"), "{out}");
+    }
+
+    #[test]
+    fn req_guards_auth_status_and_error_codes() {
+        let c = rs("fn key(req) -> str!:\n    fail(401, code: \"NO_KEY\", \"missing {1}\")\n@guard(key)\nroute GET \"/w/{id}\" (req, auth, id: u64) -> str:\n    status(201)\n    ret auth\nroute GET \"/plain\" -> str:\n    ret \"x\"\n");
+        assert!(c.contains("fn key(req: &Req) -> anyhow::Result<String> {\n    anyhow::bail!(ApiError(401, String::from(\"NO_KEY\"), format!(\"missing {}\", 1)));\n}"), "{c}");
+        assert!(c.contains("async fn get_w_id(req: &Req, auth: String, id: u64) -> String {\n    set_status(201);"), "{c}");
+        assert!(c.contains("async fn get_w_id_http(axum::extract::Path(id): axum::extract::Path<u64>, request: axum::extract::Request) -> axum::response::Response {\n    use axum::response::IntoResponse;\n    let req = match Req::read(request).await { Ok(v) => v, Err(e) => return rejected(e) };\n    let auth = match key(&req) { Ok(v) => v, Err(e) => return rejected(e.into()) };\n    let (code, out) = with_status(async { get_w_id(&req, auth, id).await }).await;\n    with_code(code, out.into_response())\n}"), "{c}");
+        assert!(c.contains("struct Req {") && c.contains("tokio::task_local!"));
+        assert!(c.contains("into_make_service_with_connect_info::<std::net::SocketAddr>()"));
+        assert!(c.contains("\"code\": tag"), "ApiError body carries the code");
     }
 
     #[test]

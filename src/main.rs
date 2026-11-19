@@ -75,7 +75,7 @@ fn real_main() -> Result<()> {
         Cmd::Fuzz { file } => {
             let (_, prog) = parse_checked(&file)?;
             let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
-            fuzz::run(&prog, &bin)?;
+            fuzz::run(&prog, &bin, &fuzz::FuzzConfig::load(&file)?)?;
         }
         Cmd::Run { file, args } => {
             let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
@@ -263,7 +263,8 @@ fn advisory_gate(file: &Path, proj: &Path) -> Result<()> {
             db
         }
     };
-    let (vulns, notes) = audit::scan(&proj.join("Cargo.lock"), &db)?;
+    let compiled = audit::compiled_packages(proj)?;
+    let (vulns, notes) = audit::scan_filtered(&proj.join("Cargo.lock"), &db, Some(&compiled))?;
     for n in &notes {
         eprintln!("parvez: note: {} advisory: {}", n.adv.informational.as_deref().unwrap_or("info"), n.render());
     }
@@ -301,7 +302,7 @@ fn heal(file: &Path) -> Result<()> {
         audit::Db::Unavailable(why) => bail!("{why}"),
     };
     let lock = proj.join("Cargo.lock");
-    let (before, _) = audit::scan(&lock, &db)?;
+    let (before, _) = audit::scan_filtered(&lock, &db, Some(&audit::compiled_packages(&proj)?))?;
     let out = Command::new("cargo").args(["update"]).current_dir(&proj).output().context("running cargo update")?;
     if !out.status.success() {
         std::io::stderr().write_all(&out.stderr)?;
@@ -312,7 +313,7 @@ fn heal(file: &Path) -> Result<()> {
         .filter(|l| l.contains(" -> "))
         .map(|l| l.trim().to_string())
         .collect();
-    let (after, _) = audit::scan(&lock, &db)?;
+    let (after, _) = audit::scan_filtered(&lock, &db, Some(&audit::compiled_packages(&proj)?))?;
     if let Outcome::Errors(errors) = compile_at(file, Mode::Check, &root)? {
         errors.iter().for_each(|e| eprintln!("{e}"));
         bail!("updated dependencies no longer compile with {}; see errors above", file.display());

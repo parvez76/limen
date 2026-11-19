@@ -1,11 +1,12 @@
-# PARVEZ v0.5 SPEC (AI system prompt)
+# PARVEZ v0.6 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
 ## Lexical
 - Indent with spaces only (tabs are an error). A block opens with `:` and either a NEWLINE plus an indented body or one statement on the same line: `if x: ret 1`.
-- `#` starts a comment. Newlines inside `()` and `[]` are ignored, so lists and calls can span lines.
-- Keywords: `fn type enum impl match use async if elif else for in while ret break continue true false and or not` (`route` and `state` are keywords only at the start of a top-level line).
+- `#` starts a comment. Newlines inside `()` and `[]` are ignored, so lists and calls can span lines. A long method chain can wrap inside `( ... )`.
+- `"""` starts a multi-line string, ideal for SQL and templates. Common indentation and the first and last blank lines are removed, `"` needs no escaping, and `{x}` still interpolates.
+- Keywords: `fn type enum impl match use async if elif else for in while ret break continue true false and or not` (`route`, `state`, `loop`, `spawn` and `move` act as keywords only in their positions, so they still work as names).
 - Keywords can be field names (`e.type`, `Event(type: "x")`, `type E: type: str`). Rust keywords such as `gen`, `move` and `loop` work as any name; Parvez escapes them (`r#gen`), and JSON still sees `"type"`.
 
 ## Top level (`use`, `fn`, `type`, `enum`, `impl`, `state`, `route`; needs `fn main` or at least one `route`)
@@ -28,9 +29,10 @@ fn main()!:                            # -> anyhow::Result<()>
 async fn fetch(u: &str) -> str!:       # async; `async fn main` runs on tokio
 ```
 Every `type` and `enum` derives `Debug, Clone, PartialEq`. Decorators go on the line(s) above: `@json` adds serde `Serialize, Deserialize`; `@derive(Hash, Eq)` adds more derives.
+Field decorators on a `@json` type (block form, on the line above the field): `@rename("type")` sets the JSON name, `@default` makes a missing field take its default, and `@omit_none` leaves out a `T?` field that is `None`.
 
 ## Crates
-`use serde::{Serialize, Deserialize}`, `use std::collections::HashMap`, `use reqwest` (declares the dependency only). Dependencies are detected from `use` lines and from known crate paths such as `reqwest::get(u)` or `tokio::time::sleep(d)`, and written into Cargo.toml automatically. Known crates: tokio axum serde serde_json reqwest chrono uuid regex rand tracing tracing_subscriber tower_http futures clap base64 sha2 thiserror sqlx. Other crates resolve to the latest version. To pin a crate or add features, put them in `parvez.toml` next to the `.prvz` file:
+`use serde::{Serialize, Deserialize}`, `use std::collections::HashMap`, `use reqwest` (declares the dependency only). Dependencies are detected from `use` lines and from known crate paths such as `reqwest::get(u)` or `tokio::time::sleep(d)`, and written into Cargo.toml automatically. Known crates: tokio axum serde serde_json reqwest chrono uuid regex rand tracing tracing_subscriber tower_http futures clap base64 sha2 hmac hex ed25519_dalek subtle jsonwebtoken redis thiserror sqlx (postgres + chrono/uuid/json/derive/migrate). Other crates resolve to the latest version. To pin a crate or add features, put them in `parvez.toml` next to the `.prvz` file:
 ```
 [dependencies]
 chrono = "=0.4.38"
@@ -50,8 +52,25 @@ route POST "/events" (body: Event) -> Event!:     # `body` = JSON request body
 route GET "/events/{id}" (id: str) -> Event!:     # {name} in path = param of the same name
     fail(404, "no event {id}")
 ```
-- Params are path params (`{x}` in the path), `body` (JSON body), `query` (a `@json` type built from the query string) or `state` (no type). Methods: GET POST PUT PATCH DELETE.
+- Params are path params (`{x}` in the path), `body` (JSON body), `query` (a `@json` type built from the query string), and the untyped `state`, `req` and `auth`. Methods: GET POST PUT PATCH DELETE.
 - Route bodies are async (`.await` works). In a `!` route, `fail("msg")` and `?` errors return 500 `{"error": ...}`.
+- `fail(401, code: "INVALID_SIG", "bad signature")` returns `{"error": "bad signature", "code": "INVALID_SIG"}` with that status.
+- `status(204)` in a route (or any fn it calls) sets the success status. An empty route plus `status(204)` gives No Content; use `status(201)` before `ret value` for Created.
+
+### Request access and guards
+```
+fn verify(state, req) -> Uuid!:                    # a guard: untyped `state` and/or `req` params only
+    id = req.header("x-device-id")                 # -> str? (case-insensitive)
+    if id.is_none(): fail(401, code: "unauthenticated", "missing x-device-id")
+    ret id.unwrap().parse<Uuid>()?
+@guard(verify)                                      # runs before the handler; several run in order
+route POST "/hb" (state, req, auth, body: Beat)!:  # auth = the last guard's return value
+    print("{auth} from {req.client_ip()}")
+    status(204)
+```
+- `req` methods: `header(name) -> str?`, `raw_body() -> &[u8]` (exact bytes, e.g. for signatures), `text_body() -> str`, `client_ip() -> str`, `method()`, `path()`, `query_string()`.
+- Set `PARVEZ_TRUST_PROXY=1` behind a reverse proxy so `client_ip()` uses `X-Real-IP` / `X-Forwarded-For`.
+- A route with `req` still accepts `body: T`: it's parsed from the raw bytes, and invalid JSON gives 422.
 - Every error is JSON `{"error": ...}`: a missing field is 422, broken JSON 400, wrong content-type 415, an unknown route 404, a wrong method 405.
 
 ### Shared state
@@ -73,6 +92,14 @@ route POST "/events" (state, body: Event) -> usize:
 - State is shared, not copied, so mutate it through `Mutex`/`RwLock` (`.lock().unwrap()`) or atomics. Don't hold a lock across `.await`.
 - `env("NAME")` returns the env var or `""`. `env("NAME", "default")` returns it or the default. Both work anywhere.
 
+### Background tasks
+`spawn fut` (e.g. `spawn cleanup(db.clone())`) or a `spawn:` block runs in the background (`tokio::spawn`) and returns a handle you can `.await`. A `spawn ...` line inside `state:` starts a worker at startup, once all fields exist:
+```
+state:
+    db: PgPool = PgPool::connect(&env("DATABASE_URL")).await?
+    spawn retention(db.clone())          # e.g. an async fn with `loop:` + tokio::time::interval
+```
+
 ## Types
 | Parvez | Rust |
 |---|---|
@@ -81,6 +108,8 @@ route POST "/events" (state, body: Event) -> usize:
 | `[T]` / `&[T]` | `Vec<T>` / `&[T]` |
 | `T?` | `Option<T>` |
 | `&T` / `&~T` | `&T` / `&mut T` |
+| `()` / `(A, B)` | unit / tuple |
+| `fn(A, B) -> R` | `impl Fn(A, B) -> R` (fn params and returns) |
 | `Self`, `Name<A, B>`, `a::B` | same (passed through) |
 
 ## Statements
@@ -94,7 +123,9 @@ u.age = 3         # field / index assignment
 ret x             # a final `ret` or final expression becomes the tail value
 if c: ... elif d: ... else: ...
 for i in 0..10:   # also 0..=10, &list, list.iter()
+for (k, v) in &map:
 while c:
+loop:             # forever, until `break`
 break / continue
 ```
 
@@ -120,6 +151,8 @@ label = match code:
 - Lists: `[1, 2, 3]` becomes `vec![...]`. Indexing: `v[i]` (`i` must be `usize`).
 - Calls: `f(a, b)`, methods `x.len()`, `u.greet()`, paths `User::new(..)`, `Vec::new()`. Any Rust std method works.
 - Struct literal: `User(name: "Ada", age: 36)` (every field named; `Self(...)` inside `impl`).
+- Tuples: `(1, "a")`, `()`; fields `t.0`, `t.1`.
+- Closures: `|x| x * 2`, `|a, b: i32| a + b`, `move |x| ...`. With a return type, a closure takes a block: `|x: i32| -> str:` and then an indented body (`ret` returns from the closure). Use them with `.map`, `.filter`, callbacks and `fn(A) -> R` params.
 - `?` propagates an error. Use it only inside a `!` function. `x.await` awaits a future (only inside `async fn` and routes).
 - Generic calls: `json_decode<Event>(raw)`, `s.parse<i32>()` (or Rust's `::<T>`).
 - JSON: `json_encode(x)?` gives a `str` (`json_pretty` for indented output). `json_decode<T>(raw)?` or `e: T = json_decode(raw)?` parses into `T`. Both return Results, so add `?`.
@@ -127,7 +160,7 @@ label = match code:
 ## Strings
 - `"text {expr} {expr:?} {x:.2}"` interpolates any expression, with an optional Rust format spec after `:`. Write `{{` and `}}` for literal braces. A string literal can't appear inside `{...}`; assign it to a variable first.
 - A literal becomes `String` or `&str` to match the declared param, field, variant or return type. Don't add `.to_string()` for Parvez-declared types.
-- Args to Rust std methods have no declared type: a plain `"lit"` passes as `&str` and an interpolated `"..{x}.."` as `String`. Write `.to_string()` or `&"..."` when the method needs the other kind.
+- Calls into Rust/crate code have no declared types here, so a plain `"lit"` passes as `&str` (e.g. `sqlx::query("...")`, `Path::new("/x")`) and an interpolated `"..{x}.."` as `String`. `Some("x")`, `Ok(..)`, `Arc::new(..)` and similar constructors get an owned `String`. Write `.to_string()` when an API needs ownership, e.g. `map.insert("k".to_string(), v)`.
 - `print(a, b, ...)` prints its arguments separated by spaces (`println!`); `eprint(...)` does the same on stderr. `fail("msg {x}")` returns an error immediately (`anyhow::bail!`, only in `!` functions).
 
 ## Rules rustc enforces
@@ -135,7 +168,7 @@ label = match code:
 - Integer literals default to `i32`. Annotate when you need another type: `x: u64 = 5`.
 - A fallible call in a non-`!` fn needs explicit handling, e.g. `.unwrap_or(0)` or `.is_err()`.
 - Casts (`as`) don't exist yet. Use typed literals (`x: u64 = 5`) or `.into()` / `T::from(x)` / `.try_into()?`.
-- Not in v0.3: closures, traits, generics on your own types, macros (`vec!`, `json!`), shared state across routes. If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
+- Not supported yet: traits, generics on your own types, macros (`vec!`, `json!`), `let (a, b) = ...` destructuring, and multiple files. If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
 
 ## Security (enforced at compile time)
 Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `= fix: ...`). Write the safe form from the start:
@@ -156,8 +189,8 @@ Services are hardened automatically (nothing to write):
 - SIGINT and SIGTERM trigger a graceful shutdown: in-flight requests finish, then the process exits 0.
 
 Supply chain (on `parvez build` and `parvez run`):
-- Cargo.lock is checked against the RustSec advisory DB (cached, refreshed daily). A known vulnerability fails the build. Set `PARVEZ_AUDIT=warn|off` or `[security] audit` in parvez.toml to relax this.
-- `<name>.sbom.json` (CycloneDX 1.5: every crate with its version, license and purl) is written next to the binary.
+- The crates actually compiled into the binary are checked against the RustSec advisory DB (cached, refreshed daily). Optional dependencies of disabled features are ignored. A known vulnerability fails the build. Set `PARVEZ_AUDIT=warn|off` or `[security] audit` in parvez.toml to relax this.
+- `<name>.sbom.json` (CycloneDX 1.5: every compiled crate with its version, license and purl) is written next to the binary.
 
 ## Errors (fix loop)
 Syntax and rustc errors both point at `.prvz` lines:
@@ -176,4 +209,6 @@ app.prvz:6: error[E0308]: mismatched types
 - `parvez show f.prvz [-o f.rs] [--map]`: prints or writes the Rust.
 - `parvez heal f.prvz`: updates dependencies to the newest compatible versions, then re-scans and re-checks. It reports advisories that need a major upgrade (pin those in parvez.toml).
 - `parvez fuzz f.prvz`: builds and starts the service, then sends type-aware malformed and edge-case requests (bad types, boundary numbers, 100 KB strings, traversal and SQL payloads, 3 MB and 50k-deep bodies, wrong methods) to every route. It fails on a crash, a hang, or a leak of internals (panic text, `.rs:` paths, OS errors).
+  - It reports per-route **coverage**: how many requests got past validation and guards into the handler.
+  - To reach handlers, put `fuzz.toml` next to the file. `[params]` gives path or query values (e.g. a real UUID), `[body]` sets JSON body fields, and `[headers]` is sent with every request. `[sign] command = ["python3", "sign.py"]` signs each request: it gets `FUZZ_METHOD`, `FUZZ_PATH` and `FUZZ_QUERY` in env and the body on stdin, and prints `Header: value` lines. Each route also gets one `no-auth` request. A route that decodes its own body with `json_decode<T>(&req.text_body())` is fuzzed with `T`-shaped bodies.
 - `parvez mcp`: an MCP server on stdio with tools `parvez_spec`, `parvez_check` (code or path in, mapped errors or `ok` out) and `parvez_eject`. Register it with `claude mcp add parvez -- parvez mcp`.

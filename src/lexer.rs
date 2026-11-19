@@ -137,6 +137,38 @@ pub fn keyword_text(t: &Tok) -> Option<&'static str> {
     })
 }
 
+/// Body of a `"""` string -> raw one-line string content: drop the newline
+/// after the opening quotes and the indentation-only last line, remove the
+/// common indentation, then escape newlines, tabs and quotes.
+fn triple_quoted(body: &str) -> String {
+    let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
+    let mut lines: Vec<&str> = body.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    if lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (k, l) in lines.iter().enumerate() {
+        if k > 0 {
+            out.push_str("\\n");
+        }
+        let l = if l.len() >= indent { &l[indent..] } else { l.trim_start() };
+        for ch in l.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(ch),
+            }
+        }
+    }
+    out
+}
+
 pub fn lex(src: &str) -> Result<Vec<Token>> {
     lex_from(src, 1)
 }
@@ -220,6 +252,35 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
                 while i < n && c[i] != '\n' {
                     i += 1;
                 }
+            }
+            '"' if i + 2 < n && c[i + 1] == '"' && c[i + 2] == '"' => {
+                // """multi-line""": dedented, newlines/quotes escaped so the
+                // body is a valid one-line Rust string literal.
+                let start_line = line;
+                i += 3;
+                let mut body = String::new();
+                loop {
+                    if i + 2 >= n {
+                        bail!("line {start_line}: unterminated \"\"\" string");
+                    }
+                    if c[i] == '"' && c[i + 1] == '"' && c[i + 2] == '"' {
+                        i += 3;
+                        break;
+                    }
+                    if c[i] == '\n' {
+                        line += 1;
+                    }
+                    if c[i] == '\\' && i + 1 < n {
+                        body.push(c[i]);
+                        body.push(c[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    body.push(c[i]);
+                    i += 1;
+                }
+                let tok = Tok::Str(triple_quoted(&body));
+                out.push(Token { tok, line: start_line });
             }
             '"' => {
                 i += 1;
@@ -402,10 +463,20 @@ mod tests {
     }
 
     #[test]
+    fn triple_quoted_strings() {
+        let t = lex("q = \"\"\"\n    SELECT *\n      FROM t\n    WHERE a = \"x\"\n    \"\"\"\ny = 1\n").unwrap();
+        assert_eq!(t[2].tok, Tok::Str("SELECT *\\n  FROM t\\nWHERE a = \\\"x\\\"".into()));
+        assert_eq!((t[2].line, t[5].line), (1, 6), "lines keep counting through the string");
+        let t = lex("s = \"\"\"one line\"\"\"\n").unwrap();
+        assert_eq!(t[2].tok, Tok::Str("one line".into()));
+    }
+
+    #[test]
     fn errors() {
         assert!(lex("x = \"abc\n").is_err());
         assert!(lex("fn f():\n\tx = 1\n").is_err());
         assert!(lex("if a:\n        x\n    y\n").is_err());
+        assert!(lex("x = \"\"\"abc\n").is_err());
         let e = lex("fn f():\n    x = (1 +\n\n").unwrap_err().to_string();
         assert!(e.starts_with("line 2:"), "{e}");
     }

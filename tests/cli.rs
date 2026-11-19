@@ -202,14 +202,16 @@ async fn main()!:
 fn http(port: u16, method: &str, path: &str, body: &str) -> (u16, String) {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
+    // A server may answer (e.g. 413) and close before reading a large body,
+    // so a failed write is fine as long as a response arrives.
+    let _ = write!(
         s,
         "{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
-    )
-    .unwrap();
-    let mut resp = String::new();
-    s.read_to_string(&mut resp).unwrap();
+    );
+    let mut raw = Vec::new();
+    let _ = s.read_to_end(&mut raw);
+    let resp = String::from_utf8_lossy(&raw).into_owned();
     let status = resp[9..12].parse().unwrap();
     (status, resp.split_once("\r\n\r\n").map(|x| x.1.to_string()).unwrap_or_default())
 }
@@ -636,4 +638,148 @@ fn advisory_gate_blocks_vulnerable_deps_and_heal_reports() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("parvez: warning: 1 known-vulnerable dependency"));
     assert!(dir.join("app").exists() && dir.join("app.sbom.json").exists());
+}
+
+// ---------- v0.6 ----------
+
+#[test]
+fn general_purpose_language_features_run() {
+    let dir = scratch("lang6");
+    std::fs::write(
+        dir.join("lang.prvz"),
+        r#"use std::collections::HashMap
+
+@json
+type Ev:
+    @rename("type")
+    kind: str
+    @default
+    count: i32
+    @omit_none
+    note: str?
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32:
+    ret f(x)
+
+fn pair() -> (i32, str):
+    ret (1, "one")
+
+async fn work(n: i32) -> i32:
+    ret n * 10
+
+async fn main()!:
+    nums = [1, 2, 3, 4]
+    doubled: [i32] = nums.iter().map(|x| x * 2).collect()
+    evens: [i32] = nums.iter().filter(|x| *x % 2 == 0).cloned().collect()
+    print("{doubled:?} {evens:?}")
+    add = |a: i32, b: i32| a + b
+    print(add(2, 3), apply(|x| x + 1, 41))
+    big = |x: i32| -> str:
+        if x > 2: ret "big"
+        ret "small"
+    print(big(5), big(1))
+    ~n = 0
+    loop:
+        n += 1
+        if n == 3: break
+    print("loop {n}")
+    p = pair()
+    print(p.0, p.1)
+    ~m: HashMap<str, i32> = HashMap::new()
+    m.insert("a".to_string(), 1)
+    for (k, v) in &m:
+        print(k, v)
+    sql = """
+        SELECT *
+          FROM t
+        WHERE name = "x"
+        """
+    print(sql)
+    h = spawn work(4)
+    print(h.await?)
+    j = spawn:
+        print("in task")
+    j.await?
+    e: Ev = json_decode("{{\"type\":\"click\"}}")?
+    print(e.kind, e.count, json_encode(&e)?)
+    name: str? = Some("x")
+    print(name.unwrap())
+    unit: () = ()
+    print(std::path::Path::new("/").exists())
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["run", "lang.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "[2, 4, 6, 8] [2, 4]\n5 42\nbig small\nloop 3\n1 one\na 1\nSELECT *\n  FROM t\nWHERE name = \"x\"\n40\nin task\nclick 0 {\"type\":\"click\",\"count\":0}\nx\ntrue\n"
+    );
+}
+
+#[test]
+fn req_guards_status_codes_and_signed_fuzz() {
+    let dir = scratch("auth6");
+    std::fs::write(
+        dir.join("api.prvz"),
+        r#"@json
+type Who: user: str, ip: str
+
+fn require_key(req) -> str!:
+    match req.header("x-api-key"):
+        Some(k) if k == env("API_KEY", "test-key") -> ret "alice"
+        Some(_) -> fail(403, code: "FORBIDDEN", "bad key")
+        None -> fail(401, code: "UNAUTHENTICATED", "missing x-api-key")
+
+@guard(require_key)
+route GET "/whoami/{n}" (req, auth, n: u32) -> Who:
+    ret Who(user: "{auth}-{n}", ip: req.client_ip())
+
+@guard(require_key)
+route POST "/ping":
+    status(204)
+
+route POST "/echo" (req, body: Who) -> Who!:
+    status(201)
+    ret body
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "api.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("api")).env("PORT", port.to_string()).stdout(std::process::Stdio::null()).spawn().unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let get = |key: Option<&str>, path: &str| {
+        let h = key.map(|k| format!("x-api-key: {k}\r\n")).unwrap_or_default();
+        let raw = http_raw(port, format!("GET {path} HTTP/1.1\r\nHost: t\r\n{h}Connection: close\r\n\r\n").as_bytes());
+        (raw[9..12].to_string(), raw.split_once("\r\n\r\n").unwrap().1.to_string())
+    };
+    assert_eq!(get(None, "/whoami/1"), ("401".into(), r#"{"code":"UNAUTHENTICATED","error":"missing x-api-key"}"#.into()));
+    assert_eq!(get(Some("nope"), "/whoami/1"), ("403".into(), r#"{"code":"FORBIDDEN","error":"bad key"}"#.into()));
+    assert_eq!(get(Some("test-key"), "/whoami/7"), ("200".into(), r#"{"user":"alice-7","ip":"127.0.0.1"}"#.into()));
+    let ping = http_raw(port, b"POST /ping HTTP/1.1\r\nHost: t\r\nx-api-key: test-key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert!(ping.starts_with("HTTP/1.1 204"), "{ping}");
+    assert_eq!(http(port, "POST", "/echo", r#"{"user":"bob","ip":"x"}"#), (201, r#"{"user":"bob","ip":"x"}"#.into()));
+    let (code, body) = http(port, "POST", "/echo", r#"{"user":"#);
+    assert_eq!(code, 422);
+    assert!(body.starts_with(r#"{"error":"invalid JSON body"#), "{body}");
+
+    // fuzz with fuzz.toml credentials gets past the guard; without them it can't
+    let out = run_in(&dir, &["fuzz", "api.prvz"]);
+    let err = text(&out.stderr);
+    assert!(err.contains("GET /whoami/{n}: 0/"), "guard rejections are not coverage: {err}");
+    assert!(err.contains("was never reached"), "{err}");
+    std::fs::write(dir.join("fuzz.toml"), "[headers]\nx-api-key = \"test-key\"\n").unwrap();
+    let out = run_in(&dir, &["fuzz", "api.prvz"]);
+    let err = text(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!err.contains("was never reached"), "{err}");
+    assert!(err.contains("0 failure(s)"), "{err}");
 }

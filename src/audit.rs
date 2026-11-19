@@ -24,6 +24,27 @@ pub fn cache_dir() -> PathBuf {
     base.join("parvez")
 }
 
+/// (name, version) of every crate actually compiled into the binary for the
+/// host target. Cargo.lock lists more: optional deps of disabled features
+/// (e.g. sqlx's MySQL/SQLite drivers) appear there but are never built.
+pub fn compiled_packages(proj: &Path) -> Result<std::collections::HashSet<(String, String)>> {
+    let out = Command::new("cargo")
+        .args(["tree", "--offline", "-e", "normal,build", "--prefix", "none", "-f", "{p}"])
+        .current_dir(proj)
+        .output()
+        .context("running cargo tree")?;
+    anyhow::ensure!(out.status.success(), "cargo tree failed: {}", String::from_utf8_lossy(&out.stderr));
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let name = it.next()?;
+            let ver = it.next()?.strip_prefix('v')?;
+            Some((name.to_string(), ver.to_string()))
+        })
+        .collect())
+}
+
 // ---------- SBOM ----------
 
 /// Writes a CycloneDX SBOM for the cargo project at `proj`. Returns the
@@ -51,11 +72,16 @@ pub fn write_sbom(proj: &Path, app: &str, out: &Path) -> Result<usize> {
         .filter_map(|n| n["id"].as_str())
         .collect();
     let root = meta["resolve"]["root"].as_str().unwrap_or("");
+    let compiled = compiled_packages(proj)?;
     let mut comps: Vec<Value> = meta["packages"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|p| p["id"].as_str().is_some_and(|id| resolved.contains(id) && id != root))
+        .filter(|p| {
+            let key = (p["name"].as_str().unwrap_or("").to_string(), p["version"].as_str().unwrap_or("").to_string());
+            compiled.contains(&key)
+        })
         .map(|p| {
             let (name, ver) = (p["name"].as_str().unwrap_or(""), p["version"].as_str().unwrap_or(""));
             let purl = format!("pkg:cargo/{name}@{ver}");
@@ -168,9 +194,11 @@ fn parse_advisory(text: &str) -> Option<Advisory> {
             .map(|xs| xs.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default()
     };
+    // RustSec keeps the title as the first Markdown `# heading` after the TOML.
+    let heading = text[end..].lines().find_map(|l| l.strip_prefix("# ")).map(|t| t.trim().to_string());
     Some(Advisory {
         id: a.get("id")?.as_str()?.to_string(),
-        title: a.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: a.get("title").and_then(|x| x.as_str()).map(String::from).or(heading).unwrap_or_default(),
         patched: list("patched"),
         unaffected: list("unaffected"),
         informational: a.get("informational").and_then(|x| x.as_str()).map(String::from),
@@ -184,7 +212,17 @@ fn affected(version: &str, adv: &Advisory) -> bool {
 }
 
 /// Returns (vulnerabilities, informational notices) for a Cargo.lock.
+#[cfg(test)]
 pub fn scan(lockfile: &Path, db: &Path) -> Result<(Vec<Hit>, Vec<Hit>)> {
+    scan_filtered(lockfile, db, None)
+}
+
+/// Like `scan`, limited to `keep` (e.g. `compiled_packages`) when given.
+pub fn scan_filtered(
+    lockfile: &Path,
+    db: &Path,
+    keep: Option<&std::collections::HashSet<(String, String)>>,
+) -> Result<(Vec<Hit>, Vec<Hit>)> {
     let lock: toml::Table = std::fs::read_to_string(lockfile)
         .with_context(|| format!("reading {}", lockfile.display()))?
         .parse()?;
@@ -195,6 +233,9 @@ pub fn scan(lockfile: &Path, db: &Path) -> Result<(Vec<Hit>, Vec<Hit>)> {
             continue;
         };
         if !p.get("source").and_then(|s| s.as_str()).is_some_and(|s| s.starts_with("registry+")) {
+            continue;
+        }
+        if keep.is_some_and(|k| !k.contains(&(name.to_string(), ver.to_string()))) {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(db.join("crates").join(name)) else { continue };
@@ -216,7 +257,7 @@ pub fn scan(lockfile: &Path, db: &Path) -> Result<(Vec<Hit>, Vec<Hit>)> {
 mod tests {
     use super::*;
 
-    const ADV: &str = "```toml\n[advisory]\nid = \"RUSTSEC-2099-0001\"\npackage = \"demo\"\ntitle = \"Heap overflow in parse\"\n\n[versions]\npatched = [\">= 1.4.2, < 2.0.0\", \">= 2.1.0\"]\nunaffected = [\"< 1.0.0\"]\n```\n\n# Heap overflow\n";
+    const ADV: &str = "```toml\n[advisory]\nid = \"RUSTSEC-2099-0001\"\npackage = \"demo\"\n\n[versions]\npatched = [\">= 1.4.2, < 2.0.0\", \">= 2.1.0\"]\nunaffected = [\"< 1.0.0\"]\n```\n\n# Heap overflow in parse\n\nDetails.\n";
 
     #[test]
     fn advisory_version_matching() {
@@ -237,7 +278,7 @@ mod tests {
         std::fs::write(dir.join("db/crates/demo/RUSTSEC-2099-0001.md"), ADV).unwrap();
         std::fs::write(
             dir.join("db/crates/old/RUSTSEC-2099-0002.md"),
-            ADV.replace("0001", "0002").replace("title =", "informational = \"unmaintained\"\ntitle ="),
+            ADV.replace("0001", "0002").replace("package = \"demo\"", "package = \"old\"\ninformational = \"unmaintained\""),
         )
         .unwrap();
         let reg = "source = \"registry+https://github.com/rust-lang/crates.io-index\"";
@@ -247,6 +288,10 @@ mod tests {
         )
         .unwrap();
         let (v, n) = scan(&dir.join("Cargo.lock"), &dir.join("db")).unwrap();
+        // only compiled packages are checked when a filter is given
+        let keep: std::collections::HashSet<(String, String)> = [("old".to_string(), "1.0.0".to_string())].into();
+        let (fv, _) = scan_filtered(&dir.join("Cargo.lock"), &dir.join("db"), Some(&keep)).unwrap();
+        assert!(fv.is_empty(), "demo is not compiled, so not reported");
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].render(), "RUSTSEC-2099-0001 demo@1.2.0: Heap overflow in parse (patched: >= 1.4.2, < 2.0.0 | >= 2.1.0)");
         assert_eq!(n.len(), 1);

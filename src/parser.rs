@@ -21,6 +21,10 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                 let attrs = p.parse_attrs()?;
                 let reason = attrs.allow_insecure.clone();
                 let only_reason = !attrs.json && attrs.derives.is_empty();
+                let is_route = matches!(p.peek(), Tok::Ident(r) if r == "route");
+                if !attrs.guards.is_empty() && !is_route {
+                    bail!("line {line}: @guard(...) goes on a `route`");
+                }
                 match p.peek().clone() {
                     Tok::Fn | Tok::Async if only_reason => {
                         let mut f = p.parse_fn()?;
@@ -30,6 +34,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                     Tok::Ident(r) if r == "route" && only_reason => {
                         let mut rt = p.parse_route()?;
                         rt.allow_insecure = reason;
+                        rt.guards = attrs.guards.clone();
                         items.push(Item::Route(rt));
                     }
                     Tok::Ident(r) if r == "state" && only_reason => {
@@ -82,6 +87,28 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
         && let Some(r) = routes.iter().find(|r| r.state)
     {
         bail!("line {}: route uses `state` but there is no `state:` block", r.line);
+    }
+    let fns: Vec<&FnDef> = items.iter().filter_map(|i| if let Item::Fn(f) = i { Some(f) } else { None }).collect();
+    let app_state = Type::Ref(Box::new(Type::Named("AppState".into(), vec![])), false);
+    let req_ty = Type::Ref(Box::new(Type::Named("Req".into(), vec![])), false);
+    for r in &routes {
+        if r.auth && r.guards.is_empty() {
+            bail!("line {}: route takes `auth` but has no @guard(fn) to produce it", r.line);
+        }
+        for g in &r.guards {
+            let Some(f) = fns.iter().find(|f| &f.name == g) else {
+                bail!("line {}: @guard({g}): no `fn {g}` in this file", r.line);
+            };
+            for (pname, pty) in &f.params {
+                let ok = (pname == "state" && *pty == app_state) || (pname == "req" && *pty == req_ty);
+                if !ok {
+                    bail!("line {}: guard `{g}` may only take untyped `state` and/or `req` params, found `{pname}`", f.line);
+                }
+                if pname == "state" && states.is_empty() {
+                    bail!("line {}: guard `{g}` takes `state` but there is no `state:` block", f.line);
+                }
+            }
+        }
     }
     if let Some(r) = routes.first() {
         for i in &items {
@@ -171,8 +198,9 @@ impl Parser {
         while self.eat(&Tok::Newline) {}
     }
     fn end_stmt(&mut self) -> Result<()> {
-        // A `match` expression ends with its own DEDENT.
-        if self.pos > 0 && self.toks[self.pos - 1].tok == Tok::Dedent {
+        // Block-bodied expressions (`match`, closures, `spawn:`) end with their
+        // own DEDENT, or with the NEWLINE of an inline body.
+        if self.pos > 0 && matches!(self.toks[self.pos - 1].tok, Tok::Dedent | Tok::Newline) {
             return Ok(());
         }
         match self.peek() {
@@ -193,6 +221,7 @@ impl Parser {
         let name = self.ident("type name")?;
         self.expect(Tok::Colon, "`:` after type name")?;
         let mut fields = Vec::new();
+        let mut field_attrs = Vec::new();
         let block = self.eat(&Tok::Newline);
         if block {
             self.skip_newlines();
@@ -203,9 +232,15 @@ impl Parser {
             if block && self.eat(&Tok::Dedent) {
                 break;
             }
+            let fa = self.parse_field_attrs()?;
             let f = self.field_name("field name")?;
             self.expect(Tok::Colon, "`:` after field name")?;
-            fields.push((f, self.parse_type()?));
+            let ty = self.parse_type()?;
+            if fa.omit_none && !matches!(ty, Type::Opt(_)) {
+                bail!("line {}: @omit_none needs an optional field (`{f}: T?`)", self.line());
+            }
+            fields.push((f, ty));
+            field_attrs.push(fa);
             if self.eat(&Tok::Comma) {
                 continue;
             }
@@ -220,7 +255,31 @@ impl Parser {
         if fields.is_empty() {
             bail!("line {}: type `{name}` has no fields", self.line());
         }
-        Ok(StructDef { name, fields, line, attrs: Attrs::default() })
+        Ok(StructDef { name, fields, field_attrs, line, attrs: Attrs::default() })
+    }
+
+    /// `@rename("x")`, `@default`, `@omit_none` lines before a field.
+    fn parse_field_attrs(&mut self) -> Result<FieldAttrs> {
+        let mut fa = FieldAttrs::default();
+        while self.eat(&Tok::At) {
+            let line = self.line();
+            match self.ident("field decorator")?.as_str() {
+                "rename" => {
+                    self.expect(Tok::LParen, "`(\"json_name\")`")?;
+                    fa.rename = match self.next() {
+                        Tok::Str(s) if !s.is_empty() => Some(s),
+                        _ => bail!("line {line}: @rename needs a JSON name string"),
+                    };
+                    self.expect(Tok::RParen, "`)`")?;
+                }
+                "default" => fa.default = true,
+                "omit_none" => fa.omit_none = true,
+                other => bail!("line {line}: unknown field decorator `@{other}` (known: @rename(\"x\"), @default, @omit_none)"),
+            }
+            self.expect(Tok::Newline, "newline after field decorator (put the field on the next line)")?;
+            self.skip_newlines();
+        }
+        Ok(fa)
     }
 
     /// `enum Name: A, B(str)` or an indented list of variants.
@@ -336,8 +395,14 @@ impl Parser {
         let mut params = Vec::new();
         while !self.eat(&Tok::RParen) {
             let p = self.ident("parameter name")?;
-            self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
-            params.push((p, self.parse_type()?));
+            // untyped `state` / `req`: the service's &AppState / &Req (for guards and helpers)
+            if (p == "state" || p == "req") && self.peek() != &Tok::Colon {
+                let ty = if p == "state" { "AppState" } else { "Req" };
+                params.push((p, Type::Ref(Box::new(Type::Named(ty.into(), vec![])), false)));
+            } else {
+                self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
+                params.push((p, self.parse_type()?));
+            }
             if !self.eat(&Tok::Comma) {
                 self.expect(Tok::RParen, "`,` or `)`")?;
                 break;
@@ -356,6 +421,11 @@ impl Parser {
             let line = self.line();
             match self.ident("decorator name after `@`")?.as_str() {
                 "json" => attrs.json = true,
+                "guard" => {
+                    self.expect(Tok::LParen, "`(fn_name)` after @guard")?;
+                    attrs.guards.push(self.ident("guard function name")?);
+                    self.expect(Tok::RParen, "`)`")?;
+                }
                 "allow_insecure" => {
                     self.expect(Tok::LParen, "`(\"reason\")` after @allow_insecure")?;
                     let reason = match self.next() {
@@ -379,7 +449,7 @@ impl Parser {
                         }
                     }
                 }
-                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @allow_insecure(\"reason\"))"),
+                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @allow_insecure(\"reason\"))"),
             }
             self.expect(Tok::Newline, "newline after decorator")?;
             self.skip_newlines();
@@ -436,12 +506,16 @@ impl Parser {
             t => bail!("line {line}: expected a path string starting with `/`, found {t:?}"),
         };
         let mut params = Vec::new();
-        let mut state = false;
+        let (mut state, mut req, mut auth) = (false, false, false);
         if self.eat(&Tok::LParen) {
             while !self.eat(&Tok::RParen) {
                 let p = self.ident("parameter name")?;
                 if p == "state" && self.peek() != &Tok::Colon {
                     state = true;
+                } else if p == "req" && self.peek() != &Tok::Colon {
+                    req = true;
+                } else if p == "auth" && self.peek() != &Tok::Colon {
+                    auth = true;
                 } else {
                     self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
                     params.push((p, self.parse_type()?));
@@ -458,7 +532,7 @@ impl Parser {
         for (p, _) in &params {
             if !holes.contains(p) && p != "body" && p != "query" {
                 bail!(
-                    "line {line}: route param `{p}` must be a path param (`{{{p}}}` in the path), `body` (JSON body), `query` (query string) or `state`"
+                    "line {line}: route param `{p}` must be a path param (`{{{p}}}` in the path), `body` (JSON body), `query` (query string), or untyped `state` / `req` / `auth`"
                 );
             }
         }
@@ -468,7 +542,7 @@ impl Parser {
             }
         }
         let body = self.parse_block()?;
-        Ok(RouteDef { method, path, params, state, ret, fallible, body, line, allow_insecure: None })
+        Ok(RouteDef { method, path, params, state, req, auth, guards: vec![], ret, fallible, body, line, allow_insecure: None })
     }
 
     /// `state:` NEWLINE INDENT (`name: Type = expr` NEWLINE)+ DEDENT
@@ -480,12 +554,18 @@ impl Parser {
         self.skip_newlines();
         self.expect(Tok::Indent, "indented `name: Type = value` lines")?;
         let mut fields = Vec::new();
+        let mut tasks = Vec::new();
         loop {
             self.skip_newlines();
             if self.eat(&Tok::Dedent) || self.peek() == &Tok::Eof {
                 break;
             }
             let fline = self.line();
+            if matches!(self.peek(), Tok::Ident(s) if s == "spawn") {
+                tasks.push((self.parse_expr()?, fline));
+                self.end_stmt()?;
+                continue;
+            }
             let name = self.field_name("state field name")?;
             self.expect(Tok::Colon, "`:` and a type (state fields need `name: Type = value`)")?;
             let ty = self.parse_type()?;
@@ -497,7 +577,7 @@ impl Parser {
         if fields.is_empty() {
             bail!("line {line}: `state:` has no fields");
         }
-        Ok(StateDef { fields, line, allow_insecure: None })
+        Ok(StateDef { fields, tasks, line, allow_insecure: None })
     }
 
     /// `&self`, `&~self`, `self`, `~self` as the first parameter.
@@ -529,6 +609,17 @@ impl Parser {
                 self.expect(Tok::RBracket, "`]`")?;
                 Type::List(Box::new(inner))
             }
+            Tok::LParen => {
+                self.next();
+                Type::Tuple(self.type_list(Tok::RParen)?)
+            }
+            Tok::Fn => {
+                self.next();
+                self.expect(Tok::LParen, "`(` after `fn` in a function type")?;
+                let args = self.type_list(Tok::RParen)?;
+                let ret = if self.eat(&Tok::Arrow) { Some(Box::new(self.parse_type()?)) } else { None };
+                Type::Fn(args, ret)
+            }
             Tok::Ident(_) => {
                 let mut name = self.ident("type")?;
                 while self.eat(&Tok::PathSep) {
@@ -552,6 +643,19 @@ impl Parser {
             ty = Type::Opt(Box::new(ty));
         }
         Ok(ty)
+    }
+
+    /// Comma-separated types up to (and consuming) `close`.
+    fn type_list(&mut self, close: Tok) -> Result<Vec<Type>> {
+        let mut ts = Vec::new();
+        while !self.eat(&close) {
+            ts.push(self.parse_type()?);
+            if !self.eat(&Tok::Comma) {
+                self.expect(close.clone(), "`,` or closing bracket")?;
+                break;
+            }
+        }
+        Ok(ts)
     }
 
     // ---------- statements ----------
@@ -595,11 +699,27 @@ impl Parser {
             Tok::If => self.parse_if(),
             Tok::For => {
                 self.next();
-                let var = self.ident("loop variable")?;
+                let var = if self.eat(&Tok::LParen) {
+                    let mut names = Vec::new();
+                    while !self.eat(&Tok::RParen) {
+                        names.push(self.ident("name in `for (a, b) in ...`")?);
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(Tok::RParen, "`,` or `)`")?;
+                            break;
+                        }
+                    }
+                    format!("({})", names.join(", "))
+                } else {
+                    self.ident("loop variable")?
+                };
                 self.expect(Tok::In, "`in`")?;
                 let iter = self.parse_expr()?;
                 let body = self.parse_block()?;
                 Ok(Stmt::For { var, iter, body })
+            }
+            Tok::Ident(l) if l == "loop" && self.peek_at(1) == &Tok::Colon => {
+                self.next();
+                Ok(Stmt::Loop(self.parse_block()?))
             }
             Tok::While => {
                 self.next();
@@ -845,10 +965,40 @@ impl Parser {
         Some(types)
     }
 
+    /// `|a, b: i32| expr` or `|x| -> T:` + block (at the `|`).
+    fn parse_closure(&mut self, is_move: bool) -> Result<Expr> {
+        self.expect(Tok::Pipe, "`|`")?;
+        let mut params = Vec::new();
+        while !self.eat(&Tok::Pipe) {
+            let p = self.ident("closure parameter")?;
+            let ty = if self.eat(&Tok::Colon) { Some(self.parse_type()?) } else { None };
+            params.push((p, ty));
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::Pipe, "`,` or `|`")?;
+                break;
+            }
+        }
+        let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
+        let body = if self.peek() == &Tok::Colon {
+            ClosureBody::Block(self.parse_block()?)
+        } else if ret.is_some() {
+            bail!("line {}: a closure with `-> T` needs a `:` block body", self.line());
+        } else {
+            ClosureBody::Expr(self.parse_expr()?)
+        };
+        Ok(Expr::Closure { params, ret, body: Box::new(body), is_move })
+    }
+
     fn parse_args(&mut self) -> Result<Vec<Expr>> {
         let mut args = Vec::new();
         while !self.eat(&Tok::RParen) {
-            args.push(self.parse_expr()?);
+            if self.at_named() {
+                let n = self.field_name("argument name")?;
+                self.next(); // `:`
+                args.push(Expr::Named(n, Box::new(self.parse_expr()?)));
+            } else {
+                args.push(self.parse_expr()?);
+            }
             if !self.eat(&Tok::Comma) {
                 self.expect(Tok::RParen, "`,` or `)`")?;
                 break;
@@ -884,6 +1034,13 @@ impl Parser {
             Tok::True => Expr::Bool(true),
             Tok::False => Expr::Bool(false),
             Tok::Str(s) => Expr::Str(parse_str(&s, line)?),
+            Tok::Ident(m) if m == "move" && self.peek() == &Tok::Pipe => self.parse_closure(true)?,
+            Tok::Ident(sp) if sp == "spawn" && self.peek() == &Tok::Colon => {
+                Expr::Spawn(Box::new(ClosureBody::Block(self.parse_block()?)))
+            }
+            Tok::Ident(sp) if sp == "spawn" && matches!(self.peek(), Tok::Ident(_)) => {
+                Expr::Spawn(Box::new(ClosureBody::Expr(self.parse_expr()?)))
+            }
             Tok::Ident(mut s) => {
                 while self.peek() == &Tok::PathSep && self.peek_at(1) != &Tok::Lt {
                     self.next();
@@ -892,9 +1049,27 @@ impl Parser {
                 Expr::Ident(s)
             }
             Tok::LParen => {
+                if self.eat(&Tok::RParen) {
+                    return Ok(Expr::Tuple(vec![]));
+                }
                 let e = self.parse_expr()?;
+                if self.eat(&Tok::Comma) {
+                    let mut items = vec![e];
+                    while !self.eat(&Tok::RParen) {
+                        items.push(self.parse_expr()?);
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(Tok::RParen, "`,` or `)`")?;
+                            break;
+                        }
+                    }
+                    return Ok(Expr::Tuple(items));
+                }
                 self.expect(Tok::RParen, "`)`")?;
                 e
+            }
+            Tok::Pipe => {
+                self.pos -= 1;
+                self.parse_closure(false)?
             }
             Tok::Match => self.parse_match(line)?,
             Tok::LBracket => {
@@ -1270,6 +1445,41 @@ mod tests {
         let Item::Fn(f) = &p.items[2] else { panic!() };
         assert!(matches!(&f.body[0].stmt, Stmt::Let { value: Expr::Field(_, n), .. } if n == "type"));
         assert!(matches!(&f.body[1].stmt, Stmt::Let { value: Expr::StructLit(_, fs), .. } if fs[1].0 == "match"));
+    }
+
+    #[test]
+    fn v06_closures_spawn_loop_tuples_named_args() {
+        let p = prog("fn f()!:\n    a = xs.map(|x| x * 2)\n    b = move |x: i32, y| -> i32:\n        ret x\n    t = (1, \"a\")\n    u = ()\n    loop:\n        break\n    for (k, v) in m: print(k)\n    h = spawn work(1)\n    j = spawn:\n        print(1)\n    fail(401, code: \"X\", \"m\")\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        let val = |i: usize| match &f.body[i].stmt { Stmt::Let { value, .. } => value.clone(), _ => panic!("{i}") };
+        assert!(matches!(val(0), Expr::Method(_, _, _, a) if matches!(a[0], Expr::Closure { .. })));
+        assert!(matches!(val(1), Expr::Closure { is_move: true, ref params, ret: Some(_), .. } if params.len() == 2));
+        assert!(matches!(val(2), Expr::Tuple(ref x) if x.len() == 2));
+        assert_eq!(val(3), Expr::Tuple(vec![]));
+        assert!(matches!(f.body[4].stmt, Stmt::Loop(_)));
+        assert!(matches!(&f.body[5].stmt, Stmt::For { var, .. } if var == "(k, v)"));
+        assert!(matches!(val(6), Expr::Spawn(ref b) if matches!(**b, ClosureBody::Expr(_))));
+        assert!(matches!(val(7), Expr::Spawn(ref b) if matches!(**b, ClosureBody::Block(_))));
+        assert!(matches!(&f.body[8].stmt, Stmt::Expr(Expr::Call(_, _, a)) if matches!(&a[1], Expr::Named(n, _) if n == "code")));
+        // `loop` / `spawn` stay usable as names
+        assert!(parse(lex("fn loop(spawn: i32) -> i32:\n    ret loop(spawn)\n").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn v06_field_attrs_types_guards() {
+        let p = prog("@json\ntype E:\n    @rename(\"type\")\n    kind: str\n    @default\n    @omit_none\n    note: str?\nfn g(f: fn(i32) -> str, t: (i32, str)) -> ():\n    ret\n");
+        let Item::Struct(s) = &p.items[0] else { panic!() };
+        assert_eq!(s.field_attrs[0].rename.as_deref(), Some("type"));
+        assert!(s.field_attrs[1].default && s.field_attrs[1].omit_none);
+        let Item::Fn(f) = &p.items[1] else { panic!() };
+        assert!(matches!(&f.params[0].1, Type::Fn(a, Some(_)) if a.len() == 1));
+        assert_eq!(f.ret, Some(Type::Tuple(vec![])));
+        let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
+        assert!(err("@guard(nope)\nroute GET \"/\" -> str:\n    ret \"\"\n").contains("no `fn nope`"));
+        assert!(err("fn g(x: i32) -> str!:\n    ret \"\"\n@guard(g)\nroute GET \"/\":\n    ret\n").contains("may only take untyped"));
+        assert!(err("route GET \"/\" (auth):\n    ret\n").contains("no @guard"));
+        assert!(err("@guard(g)\nfn f():\n    ret\n").contains("goes on a `route`"));
+        assert!(err("type E:\n    @omit_none\n    a: i32\n").contains("needs an optional field"));
     }
 
     #[test]

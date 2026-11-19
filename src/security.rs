@@ -182,6 +182,7 @@ impl Linter {
                 self.expr(cond, line, cx);
                 self.block(body, &mut cx.clone());
             }
+            Stmt::Loop(body) => self.block(body, &mut cx.clone()),
         }
     }
 
@@ -202,8 +203,22 @@ impl Linter {
             Expr::Method(recv, m, _, args) => {
                 self.method_rules(recv, m, args, line, cx);
                 self.expr(recv, line, cx);
-                args.iter().for_each(|a| self.expr(a, line, cx));
+                let recv_tainted = tainted(recv, cx);
+                for a in args {
+                    match a {
+                        // `tainted.iter().map(|x| ..)`: the closure's params carry the taint
+                        Expr::Closure { params, body, .. } if recv_tainted => {
+                            let mut inner = cx.clone();
+                            inner.taint.extend(params.iter().map(|(n, _)| n.clone()));
+                            self.closure_body(body, line, &mut inner);
+                        }
+                        other => self.expr(other, line, cx),
+                    }
+                }
             }
+            Expr::Closure { body, .. } | Expr::Spawn(body) => self.closure_body(body, line, &mut cx.clone()),
+            Expr::Tuple(xs) => xs.iter().for_each(|x| self.expr(x, line, cx)),
+            Expr::Named(_, x) => self.expr(x, line, cx),
             Expr::StructLit(_, fields) => {
                 for (f, v) in fields {
                     self.secret_binding(f, v, line);
@@ -232,6 +247,13 @@ impl Linter {
                 }
             }
             Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+        }
+    }
+
+    fn closure_body(&mut self, body: &ClosureBody, line: usize, cx: &mut Cx) {
+        match body {
+            ClosureBody::Expr(x) => self.expr(x, line, cx),
+            ClosureBody::Block(b) => self.block(b, cx),
         }
     }
 
@@ -353,6 +375,9 @@ fn tainted(e: &Expr, cx: &Cx) -> bool {
         Expr::List(xs) => xs.iter().any(|x| tainted(x, cx)),
         Expr::StructLit(_, fs) => fs.iter().any(|(_, v)| tainted(v, cx)),
         Expr::Match(s, _) => tainted(s, cx),
+        Expr::Tuple(xs) => xs.iter().any(|x| tainted(x, cx)),
+        Expr::Named(_, x) => tainted(x, cx),
+        Expr::Closure { .. } | Expr::Spawn(_) => false,
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => false,
     }
 }
@@ -439,6 +464,12 @@ mod tests {
                 (5, "sql-injection", "`.query(..)` receives a string built from interpolation/concatenation"),
             ]
         );
+    }
+
+    #[test]
+    fn taint_flows_into_closures_over_tainted_data() {
+        let src = "route POST \"/x\" (body: Req) -> str!:\n    texts = body.files.iter().map(|f| std::fs::read_to_string(f)).collect()\n    ok = [\"a\"].iter().map(|f| std::fs::read_to_string(f)).collect()\n    q = sqlx::query(\"\"\"\n        SELECT * FROM t\n        WHERE id = $1\n        \"\"\").bind(body.id)\n    ret \"\"\n";
+        assert_eq!(rules(src), [(2, "path-traversal")]);
     }
 
     #[test]

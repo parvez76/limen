@@ -35,7 +35,13 @@ const KNOWN: &[(&str, &str, &str, &[&str], bool)] = &[
     ("base64", "base64", "0.22", &[], true),
     ("sha2", "sha2", "0.10", &[], true),
     ("thiserror", "thiserror", "2", &[], true),
-    ("sqlx", "sqlx", "0.8", &["runtime-tokio", "postgres", "sqlite"], true),
+    ("sqlx", "sqlx", "0.8", &["runtime-tokio", "postgres", "chrono", "uuid", "json", "derive", "migrate"], false),
+    ("hmac", "hmac", "0.12", &[], true),
+    ("hex", "hex", "0.4", &[], true),
+    ("ed25519_dalek", "ed25519-dalek", "2", &[], true),
+    ("subtle", "subtle", "2", &[], true),
+    ("jsonwebtoken", "jsonwebtoken", "9", &[], true),
+    ("redis", "redis", "0.27", &["tokio-comp"], true),
 ];
 
 const BUILTIN: &[&str] = &["std", "core", "alloc", "crate", "self", "super", "Self"];

@@ -21,6 +21,8 @@ pub enum Item {
 pub struct StateDef {
     /// (name, type, initializer, line)
     pub fields: Vec<(String, Type, Expr, usize)>,
+    /// `spawn ...` lines: background tasks started after the fields exist
+    pub tasks: Vec<(Expr, usize)>,
     pub line: usize,
     /// `@allow_insecure("reason")`
     pub allow_insecure: Option<String>,
@@ -43,6 +45,12 @@ pub struct RouteDef {
     pub params: Vec<(String, Type)>,
     /// `(state, ...)`: the route receives `state: &AppState`
     pub state: bool,
+    /// `(req, ...)`: the route receives `req: &Req` (headers, raw body, client IP)
+    pub req: bool,
+    /// `(auth, ...)`: the route receives the last guard's return value
+    pub auth: bool,
+    /// `@guard(fn_name)` lines, run in order before the handler
+    pub guards: Vec<String>,
     /// `@allow_insecure("reason")`
     pub allow_insecure: Option<String>,
     pub ret: Option<Type>,
@@ -58,12 +66,24 @@ pub struct Attrs {
     pub derives: Vec<String>,
     /// `@allow_insecure("reason")`: skip security checks for this item
     pub allow_insecure: Option<String>,
+    /// `@guard(fn_name)` (routes only)
+    pub guards: Vec<String>,
+}
+
+/// Per-field decorators on `@json` types: `@rename("x")`, `@default`, `@omit_none`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FieldAttrs {
+    pub rename: Option<String>,
+    pub default: bool,
+    pub omit_none: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, Type)>,
+    /// same length as `fields`
+    pub field_attrs: Vec<FieldAttrs>,
     pub line: usize,
     pub attrs: Attrs,
 }
@@ -136,6 +156,10 @@ pub enum Type {
     List(Box<Type>),
     /// `T?` -> Option<T>
     Opt(Box<Type>),
+    /// `()` / `(A, B)`
+    Tuple(Vec<Type>),
+    /// `fn(A, B) -> R` -> `impl Fn(A, B) -> R` (parameter/return position)
+    Fn(Vec<Type>, Option<Box<Type>>),
 }
 
 pub type Block = Vec<Located>;
@@ -165,7 +189,10 @@ pub enum Stmt {
         branches: Vec<(Expr, Block)>,
         els: Option<Block>,
     },
+    /// `var` is a name or a tuple pattern like `(k, v)`
     For { var: String, iter: Expr, body: Block },
+    /// `loop:`
+    Loop(Block),
     While { cond: Expr, body: Block },
     Break,
     Continue,
@@ -230,4 +257,103 @@ pub enum Expr {
     /// `e.await`
     Await(Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
+    /// `(a, b)`
+    Tuple(Vec<Expr>),
+    /// `|a, b: i32| expr` / `move |x| -> T:` block
+    Closure {
+        params: Vec<(String, Option<Type>)>,
+        ret: Option<Type>,
+        body: Box<ClosureBody>,
+        is_move: bool,
+    },
+    /// `spawn fut` -> tokio::spawn(fut); `spawn:` block -> tokio::spawn(async move { .. })
+    Spawn(Box<ClosureBody>),
+    /// `name: value` inside call args, e.g. `fail(401, code: "x", "msg")`
+    Named(String, Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClosureBody {
+    Expr(Expr),
+    Block(Block),
+}
+
+/// Calls `f` on every expression in `b`, recursively (statements, nested
+/// blocks, match arms, closures, spawn bodies, string interpolations).
+pub fn visit_exprs(b: &Block, f: &mut dyn FnMut(&Expr)) {
+    for s in b {
+        visit_stmt(&s.stmt, f);
+    }
+}
+
+fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
+    match s {
+        Stmt::Let { value, .. } => visit_expr(value, f),
+        Stmt::Assign { target, value, .. } => {
+            visit_expr(target, f);
+            visit_expr(value, f);
+        }
+        Stmt::Expr(e) | Stmt::Ret(Some(e)) => visit_expr(e, f),
+        Stmt::Ret(None) | Stmt::Break | Stmt::Continue => {}
+        Stmt::If { branches, els } => {
+            for (c, b) in branches {
+                visit_expr(c, f);
+                visit_exprs(b, f);
+            }
+            if let Some(b) = els {
+                visit_exprs(b, f);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            visit_expr(iter, f);
+            visit_exprs(body, f);
+        }
+        Stmt::While { cond, body } => {
+            visit_expr(cond, f);
+            visit_exprs(body, f);
+        }
+        Stmt::Loop(body) => visit_exprs(body, f),
+    }
+}
+
+pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    let body = |b: &ClosureBody, f: &mut dyn FnMut(&Expr)| match b {
+        ClosureBody::Expr(x) => visit_expr(x, f),
+        ClosureBody::Block(b) => visit_exprs(b, f),
+    };
+    match e {
+        Expr::Call(_, _, args) => args.iter().for_each(|a| visit_expr(a, f)),
+        Expr::Method(x, _, _, args) => {
+            visit_expr(x, f);
+            args.iter().for_each(|a| visit_expr(a, f));
+        }
+        Expr::Str(parts) => {
+            for p in parts {
+                if let StrPart::Interp(x, _) = p {
+                    visit_expr(x, f);
+                }
+            }
+        }
+        Expr::List(xs) | Expr::Tuple(xs) => xs.iter().for_each(|x| visit_expr(x, f)),
+        Expr::StructLit(_, fs) => fs.iter().for_each(|(_, v)| visit_expr(v, f)),
+        Expr::Binary(a, _, b) | Expr::Range(a, b, _) | Expr::Index(a, b) => {
+            visit_expr(a, f);
+            visit_expr(b, f);
+        }
+        Expr::Unary(_, x) | Expr::Ref(x, _) | Expr::Field(x, _) | Expr::Try(x) | Expr::Await(x) | Expr::Named(_, x) => {
+            visit_expr(x, f)
+        }
+        Expr::Match(x, arms) => {
+            visit_expr(x, f);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    visit_expr(g, f);
+                }
+                visit_exprs(&a.body, f);
+            }
+        }
+        Expr::Closure { body: b, .. } | Expr::Spawn(b) => body(b, f),
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+    }
 }
