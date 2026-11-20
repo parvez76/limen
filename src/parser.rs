@@ -254,6 +254,28 @@ pub(crate) fn page_binding(source: &str, line: usize) -> Result<Located> {
     Ok(stmt)
 }
 
+/// A Masud control line (`for x in xs:`, `if c:`, `elif c:`, `else:`) parsed with the
+/// normal statement parser over a placeholder body, which the template replaces.
+pub(crate) fn page_control(source: &str, line: usize) -> Result<Located> {
+    let head = source.trim_start_matches("el");
+    let mut p = Parser {
+        toks: lex_from(&format!("{head}\n    __masud_placeholder = 0"), line)?,
+        pos: 0,
+        depth: 0,
+    };
+    let stmt = p.parse_stmt()?;
+    p.skip_newlines();
+    let ok = match &stmt.stmt {
+        Stmt::For { .. } => !source.starts_with("el"),
+        Stmt::If { branches, els } => branches.len() == 1 && els.is_none(),
+        _ => false,
+    };
+    if !ok || p.peek() != &Tok::Eof {
+        bail!("line {line}: expected `for x in items:`, `if cond:`, `elif cond:` or `else:`");
+    }
+    Ok(stmt)
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,

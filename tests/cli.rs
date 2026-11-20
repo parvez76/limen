@@ -1150,6 +1150,9 @@ fn parvez_test_runs_blocks_and_maps_failures() {
     assert!(!out.status.success(), "{all}");
     assert!(all.contains("3 passed; 1 failed"), "{all}");
     assert!(all.contains("app.prvz:35: expected 21 but got 20"), "{all}");
+    // panics point at the .prvz line, never the generated Rust; no rustc warnings
+    assert!(all.contains("panicked at app.prvz:35:"), "{all}");
+    assert!(!all.contains("src/main.rs") && !all.contains("warning:"), "{all}");
     let out = run_in(&dir, &["test", "app.prvz", "priced and counted"]);
     let all = text(&out.stdout) + &text(&out.stderr);
     assert!(out.status.success() && all.contains("1 passed"), "{all}");
@@ -1263,15 +1266,19 @@ fn oidc_guard_validates_tokens_against_jwks() {
         }
     });
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let token = |alg: &str, key: &str, extra: &str, exp: u64, aud: &str| {
+    let signed = |alg: &str, key: &str, payload: String| {
         let h = b64url(format!(r#"{{"alg":"{alg}","kid":"k1","typ":"JWT"}}"#).as_bytes());
-        let p = b64url(
-            format!(r#"{{"iss":"{iss}","sub":"u-1","aud":"{aud}","exp":{exp},"email":"ada@adn.test","realm_access":{{"roles":["RemoteOps.Engineer"{extra}]}}}}"#)
-                .as_bytes(),
-        );
+        let p = b64url(payload.as_bytes());
         let msg = format!("{h}.{p}");
         let sig = openssl(&["dgst", "-sha256", "-sign", key], Some(msg.as_bytes()));
         format!("{msg}.{}", b64url(&sig))
+    };
+    let token = |alg: &str, key: &str, extra: &str, exp: u64, aud: &str| {
+        signed(alg, key, format!(r#"{{"iss":"{iss}","sub":"u-1","aud":"{aud}","exp":{exp},"email":"ada@adn.test","realm_access":{{"roles":["RemoteOps.Engineer"{extra}]}}}}"#))
+    };
+    // Keycloak shapes: `typ` access/ID/refresh, client roles, missing e-mail
+    let keycloak = |top: &str| {
+        signed("RS256", "key.pem", format!(r#"{{"iss":"{iss}","sub":"u-2","aud":["remoteops-api","account"],"exp":{},"preferred_username":"bob"{top}}}"#, now + 300))
     };
     std::fs::write(
         dir.join("svc.prvz"),
@@ -1311,4 +1318,11 @@ fn oidc_guard_validates_tokens_against_jwks() {
     let none = format!("{}.{}.", b64url(br#"{"alg":"none","typ":"JWT"}"#), parts[1]);
     assert_eq!(call(&none).0, "401", "alg none");
     assert_eq!(call("").0, "401");
+    let admin_role = r#","realm_access":{"roles":["RemoteOps.Admin"]}"#;
+    assert_eq!(call(&keycloak(&format!(r#","typ":"Bearer"{admin_role}"#))), ("200".into(), "bob".into()), "access token, e-mail falls back to username");
+    assert_eq!(call(&keycloak(&format!(r#","typ":"ID"{admin_role}"#))).0, "401", "ID token");
+    assert_eq!(call(&keycloak(&format!(r#","typ":"Refresh"{admin_role}"#))).0, "401", "refresh token");
+    assert_eq!(call(&keycloak(r#","resource_access":{"remoteops-api":{"roles":["RemoteOps.Admin"]}}"#)).0, "200", "own client role");
+    assert_eq!(call(&keycloak(r#","resource_access":{"account":{"roles":["RemoteOps.Admin"]}}"#)).0, "403", "another client's role");
+    assert_eq!(call(&keycloak(&format!(r#","sub":""{admin_role}"#))).0, "401", "empty subject");
 }

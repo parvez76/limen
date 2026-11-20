@@ -122,6 +122,64 @@ fn element(source: &str, line: usize) -> Result<(Vec<HtmlPart>, Option<String>)>
     Ok((parts, None))
 }
 
+/// An open element or control block in a page template. Block variants carry
+/// the enclosing scope's statements (`outer`) while their body is collected.
+enum Frame {
+    Tag(String),
+    For(String, Expr, usize),
+    /// branches so far (the last one is being filled), line of the `if`
+    If(Vec<(Expr, Block)>, usize),
+    Else(Vec<(Expr, Block)>, usize),
+    Outer(Box<Frame>, Vec<Located>),
+}
+
+impl Frame {
+    fn with_outer(self, outer: Vec<Located>) -> Frame {
+        Frame::Outer(Box::new(self), outer)
+    }
+}
+
+/// Closes a frame: an element emits its end tag; a block wraps the collected
+/// body into its statement and appends it to the enclosing scope.
+fn close(frame: Frame, out: &mut Vec<Located>, line: usize) {
+    match frame {
+        Frame::Tag(t) => out.push(Located {
+            line,
+            stmt: Stmt::Render(vec![HtmlPart::Markup(format!("</{t}>"))]),
+        }),
+        Frame::Outer(inner, outer) => {
+            let body = std::mem::replace(out, outer);
+            let (stmt, at) = match *inner {
+                Frame::For(var, iter, at) => (Stmt::For { var, iter, body }, at),
+                Frame::If(mut branches, at) => {
+                    branches.last_mut().unwrap().1 = body;
+                    (Stmt::If { branches, els: None }, at)
+                }
+                Frame::Else(branches, at) => (Stmt::If { branches, els: Some(body) }, at),
+                other => {
+                    close(other, out, line);
+                    return;
+                }
+            };
+            out.push(Located { line: at, stmt });
+        }
+        _ => unreachable!("control frames are always wrapped with their outer scope"),
+    }
+}
+
+fn visit_stmt_exprs(stmt: &Stmt, line: usize) -> Result<()> {
+    match stmt {
+        Stmt::For { iter, var, .. } => {
+            if var.contains("__masud") {
+                bail!("line {line}: __masud is reserved for the renderer");
+            }
+            check_expression(iter, line)
+        }
+        Stmt::If { branches, .. } => branches.iter().try_for_each(|(c, _)| check_expression(c, line)),
+        _ => Ok(()),
+    }
+}
+
 pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
     let mut iter = src.lines().enumerate().peekable();
     let mut items = Vec::new();
@@ -175,7 +233,10 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
                 value: Expr::Str(vec![StrPart::Lit(String::new())]),
             },
         }];
-        let mut parents: Vec<(usize, String)> = Vec::new();
+        // Open elements and control blocks; a block keeps the statements of its
+        // enclosing scope while its own body is collected in `out`.
+        let mut parents: Vec<(usize, Frame)> = Vec::new();
+        let mut out: Vec<Located> = std::mem::take(&mut route.body);
         let mut levels = Vec::new();
         let mut child_expected = true;
         let mut last_indent = 0;
@@ -210,23 +271,53 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
             last_indent = indent;
             last_line = n;
             child_expected = false;
-            let mut parts = Vec::new();
             while parents.last().is_some_and(|(i, _)| *i >= indent) {
-                parts.push(HtmlPart::Markup(format!("</{}>", parents.pop().unwrap().1)));
+                let (_, frame) = parents.pop().unwrap();
+                close(frame, &mut out, n);
             }
             let row = row.trim();
             if let Some(binding) = row.strip_prefix("let ") {
-                route.body.push(Located {
-                    line: n,
-                    stmt: Stmt::Render(parts),
-                });
                 let binding = parser::page_binding(binding, n)?;
                 if let Stmt::Let { value, .. } = &binding.stmt {
                     check_expression(value, n)?;
                 }
-                route.body.push(binding);
+                out.push(binding);
                 continue;
             }
+            let control = ["for ", "if ", "elif ", "else:"].iter().any(|k| row.starts_with(k));
+            if control {
+                // elif/else continue the `if` that was just closed at this indentation
+                let continues = row.starts_with("elif ") || row.starts_with("else");
+                let reopened = if continues {
+                    match out.pop() {
+                        Some(Located { stmt: Stmt::If { branches, els: None }, line }) => Some((branches, line)),
+                        _ => bail!("line {n}: {} without a preceding if", if row.starts_with("else") { "else" } else { "elif" }),
+                    }
+                } else {
+                    None
+                };
+                let frame = if row == "else:" {
+                    let (branches, at) = reopened.unwrap();
+                    Frame::Else(branches, at)
+                } else {
+                    let stmt = parser::page_control(row, n)?;
+                    visit_stmt_exprs(&stmt.stmt, n)?;
+                    match (stmt.stmt, reopened) {
+                        (Stmt::For { var, iter, .. }, None) => Frame::For(var, iter, n),
+                        (Stmt::If { mut branches, .. }, prev) => {
+                            let (cond, _) = branches.pop().unwrap();
+                            let (mut before, at) = prev.unwrap_or((Vec::new(), n));
+                            before.push((cond, Vec::new()));
+                            Frame::If(before, at)
+                        }
+                        _ => bail!("line {n}: invalid control line"),
+                    }
+                };
+                parents.push((indent, frame.with_outer(std::mem::take(&mut out))));
+                child_expected = true;
+                continue;
+            }
+            let mut parts = Vec::new();
             if let Some(raw) = row.strip_prefix("raw ") {
                 if !reason {
                     bail!("line {n}: raw needs @allow_unsafe_html(\"reason\") on this page");
@@ -236,11 +327,11 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
                 let (chunk, parent) = element(row, n)?;
                 parts.extend(chunk);
                 if let Some(tag) = parent {
-                    parents.push((indent, tag));
+                    parents.push((indent, Frame::Tag(tag)));
                     child_expected = true;
                 }
             }
-            route.body.push(Located {
+            out.push(Located {
                 line: n,
                 stmt: Stmt::Render(parts),
             });
@@ -248,19 +339,14 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
         if child_expected {
             bail!("line {last_line}: expected indented page content");
         }
-        let closing = parents
-            .into_iter()
-            .rev()
-            .map(|(_, t)| HtmlPart::Markup(format!("</{t}>")))
-            .collect();
-        route.body.push(Located {
-            line: last_line,
-            stmt: Stmt::Render(closing),
-        });
-        route.body.push(Located {
+        while let Some((_, frame)) = parents.pop() {
+            close(frame, &mut out, last_line);
+        }
+        out.push(Located {
             line: last_line,
             stmt: Stmt::Ret(Some(Expr::Ident("__masud".into()))),
         });
+        route.body = out;
         items.push(Item::Route(route));
         reason = false;
     }
@@ -292,6 +378,15 @@ mod tests {
             "    p {__masud}",
             "    p {}",
             "    p {x:?}",
+            "    else:\n        p x",
+            "    elif x:\n        p y",
+            "    if x:\n        p a\n    else:\n        p b\n    else:\n        p c",
+            "    if x:\n    p no child",
+            "    for __masud in xs:\n        p y",
+            "    for x in __masud.chars():\n        p y",
+            "    if __masud.is_empty():\n        p y",
+            "    while x:\n        p y",
+            "    div:\n        if x:\n            p a\n    elif y:\n        p b",
         ] {
             assert!(parse(&format!("page GET \"/\" -> html:\n{body}"), 1).is_err(), "{body}");
         }
@@ -301,9 +396,26 @@ mod tests {
     }
 
     #[test]
+    fn control_blocks_nest_inside_elements() {
+        let src = "page GET \"/\" -> html:\n    ul:\n        for d in &ds:\n            li {d}\n            if d.a:\n                em a\n            elif d.b:\n                em b\n            else:\n                em c\n    p end";
+        let items = parse(src, 1).unwrap();
+        let Item::Route(r) = &items[0] else { panic!() };
+        let kinds: Vec<_> = r.body.iter().map(|l| match &l.stmt {
+            Stmt::Render(_) => "render",
+            Stmt::For { body, .. } => {
+                assert!(matches!(&body[1].stmt, Stmt::If { branches, els: Some(_) } if branches.len() == 2));
+                "for"
+            }
+            Stmt::Ret(_) => "ret",
+            _ => "other",
+        }).collect();
+        assert_eq!(kinds, ["other", "render", "for", "render", "render", "ret"]);
+    }
+
+    #[test]
     fn mutated_templates_parse_without_panics() {
         let seed =
-            "import models\npage GET \"/a\" -> html:\n    main:\n        button(hx-get=\"/a\" title=\"{x.y}\") {x}";
+            "import models\npage GET \"/a\" -> html:\n    main:\n        for x in xs:\n            if x.a:\n                button(hx-get=\"/a\" title=\"{x.y}\") {x}\n            else:\n                p no";
         for (pos, ch) in seed.char_indices() {
             for replacement in ["", "\n  ", "}", "😀", "@", "\t", "(", "\""] {
                 let mut mutated = seed.to_string();

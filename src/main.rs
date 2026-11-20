@@ -108,7 +108,21 @@ fn real_main() -> Result<()> {
             if let Some(f) = filter {
                 args.push(test_filter(&f));
             }
-            let status = Command::new("cargo").args(&args).current_dir(&proj).status().context("running cargo test")?;
+            let table = std::fs::read_to_string(proj.join("prvz.map")).unwrap_or_default();
+            let places: Vec<&str> = table.lines().collect();
+            let mut child = Command::new("cargo")
+                .args(&args)
+                .current_dir(&proj)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .context("running cargo test")?;
+            let stdout = child.stdout.take().expect("piped stdout");
+            let mut out = std::io::stdout().lock();
+            for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+                writeln!(out, "{}", diagnostics::map_panic_location(&line?, &places))?;
+            }
+            drop(out);
+            let status = child.wait().context("running cargo test")?;
             std::process::exit(status.code().unwrap_or(1));
         }
         Cmd::Types { file, out, .. } => {
@@ -362,6 +376,13 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
         return Ok(Outcome::Errors(errors));
     }
 
+    if mode == Mode::Test {
+        // `parvez test` rewrites `panicked at src/main.rs:N:C` with this table.
+        let path = file.display().to_string();
+        let modules = generated.files.get(1..).unwrap_or(&[]);
+        let ctx = diagnostics::Ctx { prvz_path: &path, prvz_src: &src, rust_src: code, map: &generated.map, modules };
+        write_if_changed(&proj.join("prvz.map"), &diagnostics::location_table(&ctx))?;
+    }
     if mode == Mode::Check || mode == Mode::Test {
         return Ok(Outcome::Built(None));
     }

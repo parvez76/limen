@@ -47,13 +47,53 @@ impl Ctx<'_> {
     }
 }
 
-/// Spans that refer to the generated program (not std or dependencies).
+/// One `.prvz` location per generated Rust line (`file:line`, or empty).
+pub fn location_table(ctx: &Ctx) -> String {
+    let mut out = String::new();
+    for n in ctx.map {
+        if *n > 0 {
+            let (file, line) = ctx.place(*n);
+            out.push_str(&format!("{file}:{line}"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `thread 't' panicked at src/main.rs:120:9:` -> `... panicked at app.prvz:14:`.
+/// Lines without a known location are left alone.
+pub fn map_panic_location(line: &str, places: &[&str]) -> String {
+    const AT: &str = "panicked at src/main.rs:";
+    let Some(i) = line.find(AT) else { return line.to_string() };
+    let rest = &line[i + AT.len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let place = digits.parse::<usize>().ok().and_then(|n| places.get(n.checked_sub(1)?)).filter(|p| !p.is_empty());
+    let Some(place) = place else { return line.to_string() };
+    let tail = rest[digits.len()..].trim_start_matches(|c: char| c == ':' || c.is_ascii_digit());
+    format!("{}panicked at {place}:{tail}", &line[..i])
+}
+
+/// Spans that refer to the generated program (not std or dependencies). A span
+/// inside a macro expansion (e.g. the `format!` behind an interpolated string)
+/// is traced back through `expansion.span` to its call site in our code.
 fn our_spans(v: &Value) -> Vec<&Value> {
+    fn ours(s: &Value) -> bool {
+        s["file_name"].as_str().is_some_and(|f| f.ends_with("src/main.rs"))
+    }
     v["spans"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter(|s| s["file_name"].as_str().is_some_and(|f| f.ends_with("src/main.rs")))
+                .filter_map(|s| {
+                    let mut cur = s;
+                    for _ in 0..32 {
+                        if ours(cur) {
+                            return Some(cur);
+                        }
+                        cur = cur.get("expansion").and_then(|e| e.get("span"))?;
+                    }
+                    None
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -161,6 +201,28 @@ mod tests {
 
     fn ctx() -> Ctx<'static> {
         Ctx { prvz_path: "app.prvz", prvz_src: PRVZ, rust_src: RUST, map: &MAP, modules: &[] }
+    }
+
+    #[test]
+    fn panic_locations_point_at_prvz_lines() {
+        let places = ["", "app.prvz:3", "store.prvz:9"];
+        assert_eq!(
+            map_panic_location("thread 'tests::t' (42) panicked at src/main.rs:3:9:", &places),
+            "thread 'tests::t' (42) panicked at store.prvz:9:"
+        );
+        // unknown or unmapped lines stay as they are
+        for l in ["panicked at src/main.rs:1:5:", "panicked at src/main.rs:99:1:", "ok"] {
+            assert_eq!(map_panic_location(l, &places), l);
+        }
+    }
+
+    #[test]
+    fn maps_errors_inside_macro_expansions_to_the_call_site() {
+        let msg = r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","code":{"code":"E0308"},
+            "spans":[{"file_name":"/rustc/abc/library/alloc/src/macros.rs","line_start":116,"is_primary":true,"label":"expected `&str`, found `String`",
+            "expansion":{"span":{"file_name":"src/main.rs","line_start":7,"is_primary":false}}}],"children":[]}}"#;
+        let out = render(&msg.replace('\n', ""), &ctx());
+        assert!(out[0].starts_with("app.prvz:4: error[E0308]: mismatched types"), "{}", out[0]);
     }
 
     #[test]

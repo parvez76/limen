@@ -1,4 +1,4 @@
-# PARVEZ v0.9 SPEC (AI system prompt)
+# PARVEZ v0.9.1 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -150,7 +150,7 @@ Explicit routes and pages take precedence. GET and HEAD serve assets with extens
 
 ## Masud v0.1
 
-Import a page module with `import ui.dashboard`. In `ui/dashboard.msd`, import backend modules just as in Parvez. Page headers accept the route parameter syntax. The renderer supports local `let` bindings, Parvez expressions, and serializable values. Strings render as text, other values use their JSON representation.
+Import a page module with `import ui.dashboard`. In `ui/dashboard.msd`, import backend modules just as in Parvez. Page headers accept the route parameter syntax. The renderer supports local `let` bindings, Parvez expressions, and serializable values. Control lines work like Parvez blocks: `for item in &items:`, `if cond:`, `elif cond:` and `else:`, each with indented markup underneath. Interpolated values inside them are escaped the same way. Strings render as text, other values use their JSON representation.
 
 ```
 import models
@@ -304,10 +304,10 @@ route GET "/admin/devices" (auth) -> str:
 ```
 - **Configuration:**
   - `PARVEZ_OIDC_ISSUER`: the issuer URL. It must be `https://`, except localhost for development.
-  - `PARVEZ_OIDC_AUDIENCE`: the expected `aud`. Recommended.
+  - `PARVEZ_OIDC_AUDIENCE`: the expected `aud`. **Required:** when it's unset every request fails closed with 401, because another client's token from the same realm would otherwise pass.
   - `PARVEZ_OIDC_JWKS_URL`: optional; by default it's taken from discovery.
-- **Checks:** the signature, using asymmetric algorithms only (`none` and HMAC are rejected), plus issuer, audience, `exp` and `nbf` with 60 s leeway. Signing keys are cached for 10 minutes, and an unknown key ID triggers one refetch to handle key rotation. Any failure returns 401 `{"code":"unauthenticated"}`.
-- **`Claims`:** `sub`, `email`, `name`, `username` and `roles` (merged from `realm_access`, `resource_access.*` and `roles`), plus `has_role(r)`, `claim(name)` and `raw`.
+- **Checks:** the signature, using asymmetric algorithms only (`none` and HMAC are rejected), plus issuer, audience, `exp` and `nbf` with 60 s leeway, a non-empty `sub`, and `typ`: when `typ` is present it must be `Bearer`, so Keycloak ID and refresh tokens (same signing key) are rejected. Signing keys are cached for 10 minutes, and an unknown key ID triggers one refetch to handle key rotation. Any failure returns 401 `{"code":"unauthenticated"}`.
+- **`Claims`:** `sub`, `email`, `name`, `username` and `roles` (merged from `realm_access.roles`, `resource_access.<audience>.roles` (only this API's own client) and `roles`). `email` falls back to `preferred_username`, and `name` falls back to `email`, plus `has_role(r)`, `claim(name)` and `raw`.
 
 ## Errors (fix loop)
 Syntax and rustc errors both point at `.prvz` lines:

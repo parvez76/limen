@@ -183,7 +183,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.9 includes Masud v0.1, tests, observability and OIDC. For traits, generics on your own types, `as` casts, or Rust macros, use `parvez show` to continue in Rust.
+Parvez v0.9.1 includes Masud v0.1 (with `for`/`if`), tests, observability and OIDC. For traits, generics on your own types, `as` casts, or Rust macros, use `parvez show` to continue in Rust.
 
 ## License
 
