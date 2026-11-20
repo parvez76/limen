@@ -54,9 +54,22 @@ enum Cmd {
 }
 
 fn main() {
-    if let Err(e) = real_main() {
-        eprintln!("parvez: error: {e:#}");
-        std::process::exit(1);
+    // The compiler recurses over (bounded, but possibly large) syntax trees
+    // from untrusted input; a big stack keeps that from aborting the process.
+    let worker = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("spawn compiler thread");
+    match worker.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("parvez: error: {e:#}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("parvez: error: internal compiler error (please report it with the input that caused it)");
+            std::process::exit(101);
+        }
     }
 }
 
@@ -105,44 +118,100 @@ pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
     Ok((src, codegen::generate_with(&prog, &deps::service_config(file)?)))
 }
 
-/// Read, parse and security-lint a .prvz file.
+/// `file:line` for an encoded line (see `ast::FILE_STRIDE`).
+fn locate(files: &[(String, String)], encoded: usize) -> String {
+    let (k, line) = ast::split_line(encoded);
+    let name = files.get(k).map(|f| f.0.as_str()).unwrap_or("?");
+    format!("{name}:{line}")
+}
+
+/// "line N: msg" (N encoded) -> "file.prvz:N: msg".
+fn located(files: &[(String, String)], e: anyhow::Error) -> anyhow::Error {
+    let m = e.to_string();
+    match m.strip_prefix("line ").and_then(|r| r.split_once(": ")) {
+        Some((n, rest)) if n.parse::<usize>().is_ok() => anyhow!("{}: {rest}", locate(files, n.parse().unwrap())),
+        _ => anyhow!("{}: {m}", files.first().map(|f| f.0.as_str()).unwrap_or("?")),
+    }
+}
+
+/// Reads the main file and every file it (transitively) imports:
+/// `import auth.tokens` -> `<main dir>/auth/tokens.prvz`. Each file is lexed
+/// with an encoded line base so errors and the source map name the file.
+fn load_program(file: &Path) -> Result<ast::Program> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let result = load_into(file, &mut files);
+    result.map_err(|e| located(&files, e))
+}
+
+fn load_into(file: &Path, files: &mut Vec<(String, String)>) -> Result<ast::Program> {
+    let src = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    files.push((file.display().to_string(), src.clone()));
+    let items = parser::parse_items(lexer::lex(&src)?)?;
+    let base = file.parent().unwrap_or(Path::new("."));
+    let mut modules: Vec<ast::Module> = Vec::new();
+    let mut queue: std::collections::VecDeque<ast::ImportDef> = imports(&items).into();
+    while let Some(imp) = queue.pop_front() {
+        if modules.iter().any(|m| m.path == imp.path) {
+            continue;
+        }
+        let rel = format!("{}.prvz", imp.path.join("/"));
+        let path = base.join(&rel);
+        if !path.exists() {
+            bail!("line {}: `import {}`: no file {rel} next to the main file", imp.line, imp.path.join("."));
+        }
+        let k = files.len();
+        let msrc = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        files.push((path.display().to_string(), msrc.clone()));
+        let mitems = parser::parse_items(lexer::lex_from(&msrc, k * ast::FILE_STRIDE + 1)?)?;
+        queue.extend(imports(&mitems));
+        modules.push(ast::Module { path: imp.path, items: mitems });
+    }
+    let prog = ast::Program { items, modules, files: files.clone() };
+    parser::validate(&prog)?;
+    Ok(prog)
+}
+
+fn imports(items: &[ast::Item]) -> Vec<ast::ImportDef> {
+    items.iter().filter_map(|i| if let ast::Item::Import(d) = i { Some(d.clone()) } else { None }).collect()
+}
+
+/// Read, parse (with imports) and security-lint a .prvz program.
 pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     if file.extension().and_then(|e| e.to_str()) != Some("prvz") {
         bail!("{}: expected a .prvz file", file.display());
     }
-    let src = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    // "line N: msg" -> "file.prvz:N: msg"
-    let located = |e: anyhow::Error| {
-        let m = e.to_string();
-        match m.strip_prefix("line ").and_then(|r| r.split_once(": ")) {
-            Some((n, rest)) => anyhow!("{}:{n}: {rest}", file.display()),
-            None => anyhow!("{}: {m}", file.display()),
-        }
-    };
-    let tokens = lexer::lex(&src).map_err(located)?;
-    let prog = parser::parse(tokens).map_err(located)?;
+    let prog = load_program(file)?;
+    let files = prog.files.clone();
     let report = security::lint(&prog);
     for (line, why) in &report.allowed {
-        eprintln!("parvez: warning: {}:{line}: security checks disabled by @allow_insecure: {why}", file.display());
+        eprintln!("parvez: warning: {}: security checks disabled by @allow_insecure: {why}", locate(&files, *line));
     }
     if !report.findings.is_empty() {
-        let path = file.display().to_string();
-        let all: Vec<String> = report.findings.iter().map(|f| f.render(&path)).collect();
+        let all: Vec<String> = report
+            .findings
+            .iter()
+            .map(|f| {
+                let (k, l) = ast::split_line(f.line);
+                let name = files.get(k).map(|x| x.0.as_str()).unwrap_or("?");
+                security::Finding { line: l, ..f.clone() }.render(name)
+            })
+            .collect();
         bail!(
-            "{}\n{path}: {} security error(s); fix them or add @allow_insecure(\"reason\") to the fn/route",
+            "{}\n{}: {} security error(s); fix them or add @allow_insecure(\"reason\") to the fn/route",
             all.join("\n"),
+            file.display(),
             report.findings.len()
         );
     }
-    let has_main = prog.items.iter().any(|i| match i {
-        ast::Item::Fn(f) => f.name == "main",
+    let has_main = prog.all_items().iter().any(|(m, i)| match i {
+        ast::Item::Fn(f) => m.is_empty() && f.name == "main",
         ast::Item::Route(_) => true, // routes generate the server's main
         _ => false,
     });
     if !has_main {
         bail!("{}: no `fn main()` (or `route`) found", file.display());
     }
-    Ok((src, prog))
+    Ok((files[0].1.clone(), prog))
 }
 
 /// Binary name from the file stem: `my-tool.prvz` -> `my_tool`.
@@ -214,7 +283,8 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
         .context("failed to run `cargo` — is the Rust toolchain installed? (https://rustup.rs)")?;
     if !out.status.success() {
         let path = file.display().to_string();
-        let ctx = diagnostics::Ctx { prvz_path: &path, prvz_src: &src, rust_src: code, map: &generated.map };
+        let modules = generated.files.get(1..).unwrap_or(&[]);
+        let ctx = diagnostics::Ctx { prvz_path: &path, prvz_src: &src, rust_src: code, map: &generated.map, modules };
         let errors = diagnostics::render(&String::from_utf8_lossy(&out.stdout), &ctx);
         if errors.is_empty() {
             // Not a compile error (network, toolchain, ...): show cargo's own output.

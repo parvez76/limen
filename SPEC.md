@@ -1,15 +1,25 @@
-# PARVEZ v0.6 SPEC (AI system prompt)
+# PARVEZ v0.7 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
 ## Lexical
 - Indent with spaces only (tabs are an error). A block opens with `:` and either a NEWLINE plus an indented body or one statement on the same line: `if x: ret 1`.
 - `#` starts a comment. Newlines inside `()` and `[]` are ignored, so lists and calls can span lines. A long method chain can wrap inside `( ... )`.
+- A line that starts with `.name` continues the previous line, so method chains need no parentheses:
+  ```
+  rows = sqlx::query("SELECT 1")
+      .fetch_all(&state.db)
+      .await?
+  ```
+- `'a'`, `'\n'` and `'\u{1F600}'` are char literals. `\u{..}` escapes work inside interpolated strings.
 - `"""` starts a multi-line string, ideal for SQL and templates. Common indentation and the first and last blank lines are removed, `"` needs no escaping, and `{x}` still interpolates.
 - Keywords: `fn type enum impl match use async if elif else for in while ret break continue true false and or not` (`route`, `state`, `loop`, `spawn` and `move` act as keywords only in their positions, so they still work as names).
 - Keywords can be field names (`e.type`, `Event(type: "x")`, `type E: type: str`). Rust keywords such as `gen`, `move` and `loop` work as any name; Parvez escapes them (`r#gen`), and JSON still sees `"type"`.
 
-## Top level (`use`, `fn`, `type`, `enum`, `impl`, `state`, `route`; needs `fn main` or at least one `route`)
+## Files and modules
+`import store` loads `store.prvz`, and `import auth.tokens` loads `auth/tokens.prvz` (paths are relative to the main file). Refer to a module's items as `store::find(id)` or `store::Item`. Inside a module, its own names come first, then the main file's. Modules may hold `fn`, `type`, `enum`, `impl`, `use`, `route` and `socket`; `state:` and `fn main` stay in the main file. Errors name the file: `auth/tokens.prvz:12: ...`.
+
+## Top level (`import`, `use`, `fn`, `type`, `enum`, `impl`, `state`, `route`, `socket`; needs `fn main` or at least one `route`)
 ```
 type User: name: str, age: u8          # one line; block form = one field per line
 enum Status:                           # or one line: enum Color: Red, Green, Blue
@@ -70,7 +80,25 @@ route POST "/hb" (state, req, auth, body: Beat)!:  # auth = the last guard's ret
 ```
 - `req` methods: `header(name) -> str?`, `raw_body() -> &[u8]` (exact bytes, e.g. for signatures), `text_body() -> str`, `client_ip() -> str`, `method()`, `path()`, `query_string()`.
 - Set `PARVEZ_TRUST_PROXY=1` behind a reverse proxy so `client_ip()` uses `X-Real-IP` / `X-Forwarded-For`.
-- A route with `req` still accepts `body: T`: it's parsed from the raw bytes, and invalid JSON gives 422.
+- A route with `req` still accepts `body: T`: it's parsed from the raw bytes, and invalid JSON gives 422. `@body_error(400, code: "bad_request", "invalid JSON body")` on a route sets that response instead.
+- `req.param("id")` reads a path parameter (useful in guards). `@guard(auth::verify)` can name a guard in another module.
+
+### WebSockets
+```
+@guard(ticket)                  # runs before the upgrade: it can still answer 401/409
+@protocols("ro.v1")             # subprotocol negotiation
+@max_message(8388608)           # bytes per message
+socket "/ws/{room}" (state, auth, room: str, conn):
+    peers_add(state, conn.sender())        # WsSender: cloneable, storable in state, usable from any task
+    loop:
+        match conn.recv().await?:          # WsMsg::Text(str) / WsMsg::Binary([u8]); None once closed
+            Some(msg) -> conn.sender().send(&msg)
+            None -> break
+```
+- On `conn`: `recv()`, `recv_json<T>()`, `send_text(s)`, `send_bytes(b)` and `send_json(&v)` (these wait for queue space), plus `sender()`, `protocol()` and `close(code, reason)`.
+- On `WsSender`: `text(s)`, `bytes(b)`, `send(&msg)` and `json(&v)` never block. If the client is slow (queue of 64 full) or gone, the frame is dropped and they return `false`. Also `close(code, reason)` and `same(&other)`.
+- On `WsMsg`: `is_text()`, `len()`, `text()`, `bytes()`.
+- Pings every 20 s (`PARVEZ_WS_PING_SECS`) are automatic. When the handler returns, the socket closes with 1000.
 - Every error is JSON `{"error": ...}`: a missing field is 422, broken JSON 400, wrong content-type 415, an unknown route 404, a wrong method 405.
 
 ### Shared state
@@ -151,7 +179,7 @@ label = match code:
 - Lists: `[1, 2, 3]` becomes `vec![...]`. Indexing: `v[i]` (`i` must be `usize`).
 - Calls: `f(a, b)`, methods `x.len()`, `u.greet()`, paths `User::new(..)`, `Vec::new()`. Any Rust std method works.
 - Struct literal: `User(name: "Ada", age: 36)` (every field named; `Self(...)` inside `impl`).
-- Tuples: `(1, "a")`, `()`; fields `t.0`, `t.1`.
+- Tuples: `(1, "a")`, `()`; fields `t.0`, `t.1`. Destructure with `a, ~b = pair()`.
 - Closures: `|x| x * 2`, `|a, b: i32| a + b`, `move |x| ...`. With a return type, a closure takes a block: `|x: i32| -> str:` and then an indented body (`ret` returns from the closure). Use them with `.map`, `.filter`, callbacks and `fn(A) -> R` params.
 - `?` propagates an error. Use it only inside a `!` function. `x.await` awaits a future (only inside `async fn` and routes).
 - Generic calls: `json_decode<Event>(raw)`, `s.parse<i32>()` (or Rust's `::<T>`).
@@ -168,7 +196,7 @@ label = match code:
 - Integer literals default to `i32`. Annotate when you need another type: `x: u64 = 5`.
 - A fallible call in a non-`!` fn needs explicit handling, e.g. `.unwrap_or(0)` or `.is_err()`.
 - Casts (`as`) don't exist yet. Use typed literals (`x: u64 = 5`) or `.into()` / `T::from(x)` / `.try_into()?`.
-- Not supported yet: traits, generics on your own types, macros (`vec!`, `json!`), `let (a, b) = ...` destructuring, and multiple files. If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
+- Not supported yet: traits, generics on your own types, macros (`vec!`, `json!`), constants, and `if` as an expression (use `match cond: true -> a  false -> b`). If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
 
 ## Security (enforced at compile time)
 Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `= fix: ...`). Write the safe form from the start:
@@ -211,4 +239,6 @@ app.prvz:6: error[E0308]: mismatched types
 - `parvez fuzz f.prvz`: builds and starts the service, then sends type-aware malformed and edge-case requests (bad types, boundary numbers, 100 KB strings, traversal and SQL payloads, 3 MB and 50k-deep bodies, wrong methods) to every route. It fails on a crash, a hang, or a leak of internals (panic text, `.rs:` paths, OS errors).
   - It reports per-route **coverage**: how many requests got past validation and guards into the handler.
   - To reach handlers, put `fuzz.toml` next to the file. `[params]` gives path or query values (e.g. a real UUID), `[body]` sets JSON body fields, and `[headers]` is sent with every request. `[sign] command = ["python3", "sign.py"]` signs each request: it gets `FUZZ_METHOD`, `FUZZ_PATH` and `FUZZ_QUERY` in env and the body on stdin, and prints `Header: value` lines. Each route also gets one `no-auth` request. A route that decodes its own body with `json_decode<T>(&req.text_body())` is fuzzed with `T`-shaped bodies.
-- `parvez mcp`: an MCP server on stdio with tools `parvez_spec`, `parvez_check` (code or path in, mapped errors or `ok` out) and `parvez_eject`. Register it with `claude mcp add parvez -- parvez mcp`.
+- Compiler limits: nesting deeper than 256 levels, or more than 2000 operators in one expression, is a clean error.
+- `parvez mcp`: an MCP server on stdio. Each request is isolated (a compiler bug returns an error). `parvez_check` **refuses unknown crates** because their build scripts would run; allow specific ones with `PARVEZ_MCP_ALLOW_CRATES=a,b`.
+- `parvez mcp` tools: `parvez_spec`, `parvez_check` (code or path in, mapped errors or `ok` out) and `parvez_eject`. Register it with `claude mcp add parvez -- parvez mcp`.

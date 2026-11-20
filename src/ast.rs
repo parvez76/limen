@@ -2,7 +2,45 @@
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    /// items of the main file
     pub items: Vec<Item>,
+    /// imported files, each a module (`import auth.tokens` -> path ["auth", "tokens"])
+    pub modules: Vec<Module>,
+    /// (display name, source) per file; index 0 is the main file
+    pub files: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Module {
+    pub path: Vec<String>,
+    pub items: Vec<Item>,
+}
+
+impl Program {
+    /// Every item with the module path it lives in (empty = main file).
+    pub fn all_items(&self) -> Vec<(&[String], &Item)> {
+        let mut v: Vec<(&[String], &Item)> = self.items.iter().map(|i| (&[][..], i)).collect();
+        for m in &self.modules {
+            v.extend(m.items.iter().map(|i| (m.path.as_slice(), i)));
+        }
+        v
+    }
+}
+
+/// Lines are encoded as `file_index * FILE_STRIDE + line` so every error and
+/// source-map entry can name its file. File 0 (the main file) is unchanged.
+pub const FILE_STRIDE: usize = 1_000_000;
+
+/// Encoded line -> (file index, line within that file).
+pub fn split_line(n: usize) -> (usize, usize) {
+    (n / FILE_STRIDE, n % FILE_STRIDE)
+}
+
+/// `import a.b`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDef {
+    pub path: Vec<String>,
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +52,7 @@ pub enum Item {
     Use(UseDef),
     Route(RouteDef),
     State(StateDef),
+    Import(ImportDef),
 }
 
 /// `state:` block: shared resources built once at server start.
@@ -49,8 +88,14 @@ pub struct RouteDef {
     pub req: bool,
     /// `(auth, ...)`: the route receives the last guard's return value
     pub auth: bool,
+    /// `socket` routes: WebSocket upgrade options; the body runs per connection
+    pub socket: Option<SocketOpts>,
+    /// `(conn, ...)` in a socket: the connection (`&mut Conn`)
+    pub conn: bool,
     /// `@guard(fn_name)` lines, run in order before the handler
     pub guards: Vec<String>,
+    /// `@body_error(400, code: "bad_request", "invalid JSON body")`
+    pub body_error: Option<BodyError>,
     /// `@allow_insecure("reason")`
     pub allow_insecure: Option<String>,
     pub ret: Option<Type>,
@@ -68,6 +113,25 @@ pub struct Attrs {
     pub allow_insecure: Option<String>,
     /// `@guard(fn_name)` (routes only)
     pub guards: Vec<String>,
+    /// `@body_error(status, code: "..", "msg")` (routes only)
+    pub body_error: Option<BodyError>,
+    /// `@protocols(..)` / `@max_message(n)` (sockets only)
+    pub socket: SocketOpts,
+}
+
+/// `@protocols("ro.v1")`, `@max_message(8388608)` on a `socket`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SocketOpts {
+    pub protocols: Vec<String>,
+    pub max_message: Option<String>,
+}
+
+/// Response for a request body that fails to decode as the route's `body: T`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BodyError {
+    pub status: String,
+    pub code: Option<String>,
+    pub message: String,
 }
 
 /// Per-field decorators on `@json` types: `@rename("x")`, `@default`, `@omit_none`.
@@ -184,6 +248,8 @@ pub enum Stmt {
     /// `target op value` where op is `=`, `+=`, ...
     Assign { target: Expr, op: String, value: Expr },
     Expr(Expr),
+    /// `a, ~b = expr` -> `let (a, mut b) = expr;`
+    LetTuple { names: Vec<(String, bool)>, value: Expr },
     Ret(Option<Expr>),
     If {
         branches: Vec<(Expr, Block)>,
@@ -237,6 +303,8 @@ pub enum Pat {
 pub enum Expr {
     Int(String),
     Float(String),
+    /// `'a'` (raw body, escapes kept)
+    Char(String),
     Str(Vec<StrPart>),
     Bool(bool),
     /// Identifier or path (`a`, `Vec::new`).
@@ -293,7 +361,7 @@ fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
             visit_expr(target, f);
             visit_expr(value, f);
         }
-        Stmt::Expr(e) | Stmt::Ret(Some(e)) => visit_expr(e, f),
+        Stmt::Expr(e) | Stmt::Ret(Some(e)) | Stmt::LetTuple { value: e, .. } => visit_expr(e, f),
         Stmt::Ret(None) | Stmt::Break | Stmt::Continue => {}
         Stmt::If { branches, els } => {
             for (c, b) in branches {
@@ -354,6 +422,6 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             }
         }
         Expr::Closure { body: b, .. } | Expr::Spawn(b) => body(b, f),
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+        Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Ident(_) => {}
     }
 }

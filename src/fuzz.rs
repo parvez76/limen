@@ -128,14 +128,14 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn struct_def(&self, name: &str) -> Option<&StructDef> {
-        self.prog.items.iter().find_map(|i| match i {
-            Item::Struct(s) if s.name == name => Some(s),
+        self.prog.all_items().into_iter().find_map(|(_, i)| match i {
+            Item::Struct(s) if s.name == name || name.ends_with(&format!("::{}", s.name)) => Some(s),
             _ => None,
         })
     }
     fn enum_def(&self, name: &str) -> Option<&EnumDef> {
-        self.prog.items.iter().find_map(|i| match i {
-            Item::Enum(e) if e.name == name => Some(e),
+        self.prog.all_items().into_iter().find_map(|(_, i)| match i {
+            Item::Enum(e) if e.name == name || name.ends_with(&format!("::{}", e.name)) => Some(e),
             _ => None,
         })
     }
@@ -270,8 +270,11 @@ pub fn cases_with(prog: &Program, cfg: &FuzzConfig) -> Vec<Case> {
 fn build_cases(prog: &Program, cfg: &FuzzConfig) -> Vec<Case> {
     let cx = Ctx { prog };
     let mut out = Vec::new();
-    for item in &prog.items {
+    for (_, item) in prog.all_items() {
         let Item::Route(r) = item else { continue };
+        if r.socket.is_some() {
+            continue; // WebSocket upgrades are not fuzzed as plain HTTP
+        }
         let route = format!("{} {}", r.method, r.path);
         let ty = |n: &str| r.params.iter().find(|(p, _)| p == n).map(|(_, t)| t);
         let holes = path_params(&r.path);

@@ -65,10 +65,18 @@ pub fn crate_of(path: &str, strict: bool) -> Option<String> {
     Some(first.to_string())
 }
 
+/// Crates Parvez knows and pins (plus codegen markers). Anything else is an
+/// arbitrary crates.io package whose build script would run at check time.
+pub fn is_known(name: &str) -> bool {
+    name == "axum_ws" || KNOWN.iter().any(|k| k.0 == name)
+}
+
 /// Builds the `[dependencies]` table for the detected crates.
 pub fn dependencies(crates: &BTreeSet<String>, overrides: Option<&Table>) -> Table {
     let mut deps = Table::new();
-    for c in crates {
+    // `axum_ws` is a marker from codegen: axum with WebSocket support.
+    let ws = crates.contains("axum_ws");
+    for c in crates.iter().filter(|c| *c != "axum_ws") {
         let (pkg, spec) = match KNOWN.iter().find(|k| k.0 == c) {
             Some(&(_, pkg, ver, feats, default)) => {
                 if feats.is_empty() && default {
@@ -91,6 +99,12 @@ pub fn dependencies(crates: &BTreeSet<String>, overrides: Option<&Table>) -> Tab
             None => (c.replace('_', "-"), Value::String("*".into())),
         };
         deps.insert(pkg, spec);
+    }
+    if ws {
+        let mut t = Table::new();
+        t.insert("version".into(), Value::String("0.8".into()));
+        t.insert("features".into(), Value::Array(vec![Value::String("ws".into())]));
+        deps.insert("axum".into(), Value::Table(t));
     }
     if let Some(o) = overrides {
         for (k, v) in o {

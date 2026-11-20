@@ -4,8 +4,9 @@ use crate::ast::*;
 use crate::lexer::{Tok, Token, keyword_text, lex_from};
 use anyhow::{Result, bail};
 
-pub fn parse(tokens: Vec<Token>) -> Result<Program> {
-    let mut p = Parser { toks: tokens, pos: 0 };
+/// Top-level items of one file (no whole-program checks; see `validate`).
+pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
+    let mut p = Parser { toks: tokens, pos: 0, depth: 0 };
     let mut items = Vec::new();
     loop {
         p.skip_newlines();
@@ -21,9 +22,16 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                 let attrs = p.parse_attrs()?;
                 let reason = attrs.allow_insecure.clone();
                 let only_reason = !attrs.json && attrs.derives.is_empty();
-                let is_route = matches!(p.peek(), Tok::Ident(r) if r == "route");
+                let is_route = matches!(p.peek(), Tok::Ident(r) if r == "route" || r == "socket");
+                let is_socket = matches!(p.peek(), Tok::Ident(r) if r == "socket");
+                if attrs.socket != SocketOpts::default() && !is_socket {
+                    bail!("line {line}: @protocols / @max_message go on a `socket`");
+                }
                 if !attrs.guards.is_empty() && !is_route {
                     bail!("line {line}: @guard(...) goes on a `route`");
+                }
+                if attrs.body_error.is_some() && !is_route {
+                    bail!("line {line}: @body_error(...) goes on a `route`");
                 }
                 match p.peek().clone() {
                     Tok::Fn | Tok::Async if only_reason => {
@@ -31,10 +39,14 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                         f.allow_insecure = reason;
                         items.push(Item::Fn(f));
                     }
-                    Tok::Ident(r) if r == "route" && only_reason => {
+                    Tok::Ident(r) if (r == "route" || r == "socket") && only_reason => {
                         let mut rt = p.parse_route()?;
+                        if let Some(so) = rt.socket.as_mut() {
+                            *so = attrs.socket.clone();
+                        }
                         rt.allow_insecure = reason;
                         rt.guards = attrs.guards.clone();
+                        rt.body_error = attrs.body_error.clone();
                         items.push(Item::Route(rt));
                     }
                     Tok::Ident(r) if r == "state" && only_reason => {
@@ -63,41 +75,87 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
                 }
             }
             Tok::Ident(r) if r == "route" => items.push(Item::Route(p.parse_route()?)),
+            Tok::Ident(r) if r == "socket" && matches!(p.peek_at(1), Tok::Str(_)) => items.push(Item::Route(p.parse_route()?)),
+            Tok::Ident(r) if r == "import" && matches!(p.peek_at(1), Tok::Ident(_)) => {
+                let line = p.line();
+                p.next();
+                let mut path = vec![p.ident("module name after `import`")?];
+                while p.eat(&Tok::Dot) {
+                    path.push(p.ident("module name after `.`")?);
+                }
+                p.end_stmt()?;
+                items.push(Item::Import(ImportDef { path, line }));
+            }
             Tok::Ident(r) if r == "state" && p.peek_at(1) == &Tok::Colon => items.push(Item::State(p.parse_state()?)),
             t => bail!(
-                "line {}: expected `fn`, `type`, `enum`, `impl`, `use` or `route` at top level, found {:?}",
+                "line {}: expected `fn`, `type`, `enum`, `impl`, `use`, `import` or `route` at top level, found {:?}",
                 p.line(),
                 t
             ),
         }
     }
-    let routes: Vec<&RouteDef> =
-        items.iter().filter_map(|i| if let Item::Route(r) = i { Some(r) } else { None }).collect();
-    let states: Vec<&StateDef> =
-        items.iter().filter_map(|i| if let Item::State(s) = i { Some(s) } else { None }).collect();
-    if let [_, second, ..] = states.as_slice() {
+    Ok(items)
+}
+
+/// Parses a single-file program and runs the whole-program checks.
+#[cfg(test)]
+pub fn parse(tokens: Vec<Token>) -> Result<Program> {
+    let prog = Program { items: parse_items(tokens)?, modules: vec![], files: vec![] };
+    validate(&prog)?;
+    Ok(prog)
+}
+
+/// Whole-program checks across the main file and every imported module:
+/// one `state:` (main file only), guards exist and take only `state`/`req`,
+/// `fn main` vs routes, duplicate routes.
+pub fn validate(prog: &Program) -> Result<()> {
+    let all = prog.all_items();
+    let routes: Vec<(&[String], &RouteDef)> =
+        all.iter().filter_map(|(m, i)| if let Item::Route(r) = i { Some((*m, r)) } else { None }).collect();
+    let states: Vec<(&[String], &StateDef)> =
+        all.iter().filter_map(|(m, i)| if let Item::State(s) = i { Some((*m, s)) } else { None }).collect();
+    if let Some((_, s)) = states.iter().find(|(m, _)| !m.is_empty()) {
+        bail!("line {}: `state:` belongs in the main file, not in an imported module", s.line);
+    }
+    if let [_, (_, second), ..] = states.as_slice() {
         bail!("line {}: only one `state:` block is allowed", second.line);
     }
-    if let Some(s) = states.first()
+    if let Some((_, s)) = states.first()
         && routes.is_empty()
     {
-        bail!("line {}: `state:` is shared by `route`s, but this file has none", s.line);
+        bail!("line {}: `state:` is shared by `route`s, but this program has none", s.line);
     }
     if states.is_empty()
-        && let Some(r) = routes.iter().find(|r| r.state)
+        && let Some((_, r)) = routes.iter().find(|(_, r)| r.state)
     {
         bail!("line {}: route uses `state` but there is no `state:` block", r.line);
     }
-    let fns: Vec<&FnDef> = items.iter().filter_map(|i| if let Item::Fn(f) = i { Some(f) } else { None }).collect();
+    // fns by qualified name: `verify` (main file), `auth::verify` (module auth)
+    let fns: Vec<(String, &FnDef)> = all
+        .iter()
+        .filter_map(|(m, i)| match i {
+            Item::Fn(f) if m.is_empty() => Some((f.name.clone(), f)),
+            Item::Fn(f) => Some((format!("{}::{}", m.join("::"), f.name), f)),
+            _ => None,
+        })
+        .collect();
+    if let Some((_, f)) = all.iter().find_map(|(m, i)| match i {
+        Item::Fn(f) if !m.is_empty() && f.name == "main" => Some((m, f)),
+        _ => None,
+    }) {
+        bail!("line {}: `fn main` belongs in the main file, not in an imported module", f.line);
+    }
     let app_state = Type::Ref(Box::new(Type::Named("AppState".into(), vec![])), false);
     let req_ty = Type::Ref(Box::new(Type::Named("Req".into(), vec![])), false);
-    for r in &routes {
+    for (m, r) in &routes {
         if r.auth && r.guards.is_empty() {
             bail!("line {}: route takes `auth` but has no @guard(fn) to produce it", r.line);
         }
         for g in &r.guards {
-            let Some(f) = fns.iter().find(|f| &f.name == g) else {
-                bail!("line {}: @guard({g}): no `fn {g}` in this file", r.line);
+            let local = format!("{}::{g}", m.join("::"));
+            let found = fns.iter().find(|(n, _)| (!m.is_empty() && *n == local) || n == g);
+            let Some((_, f)) = found else {
+                bail!("line {}: @guard({g}): no `fn {g}` in this program", r.line);
             };
             for (pname, pty) in &f.params {
                 let ok = (pname == "state" && *pty == app_state) || (pname == "req" && *pty == req_ty);
@@ -110,33 +168,48 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             }
         }
     }
-    if let Some(r) = routes.first() {
-        for i in &items {
-            if let Item::Fn(f) = i
-                && f.name == "main"
-            {
-                bail!(
-                    "line {}: this file has `route`s (first at line {}), so Parvez generates `main` (the HTTP server); rename or remove `fn main`",
-                    f.line,
-                    r.line
-                );
-            }
+    if let Some((_, r)) = routes.first() {
+        if let Some((_, f)) = fns.iter().find(|(n, _)| n == "main") {
+            bail!(
+                "line {}: this file has `route`s (first at line {}), so Parvez generates `main` (the HTTP server); rename or remove `fn main`",
+                f.line,
+                r.line
+            );
         }
-        for (k, a) in routes.iter().enumerate() {
-            if let Some(b) = routes[..k].iter().find(|b| b.method == a.method && b.path == a.path) {
+        for (k, (_, a)) in routes.iter().enumerate() {
+            if let Some((_, b)) = routes[..k].iter().find(|(_, b)| b.method == a.method && b.path == a.path) {
                 bail!("line {}: duplicate route {} {} (already at line {})", a.line, a.method, a.path, b.line);
             }
         }
     }
-    Ok(Program { items })
+    Ok(())
 }
 
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// current nesting (expressions, blocks, types, patterns)
+    depth: usize,
 }
 
+/// Deeper input is rejected with an error instead of overflowing the stack
+/// (the compiler runs untrusted code, e.g. snippets sent to `parvez mcp`).
+const MAX_DEPTH: usize = 256;
+/// Longest `a + b + c ...` chain: it becomes an equally deep expression tree.
+const MAX_CHAIN: usize = 2_000;
+
 impl Parser {
+    /// Runs `f` one nesting level deeper, failing cleanly past MAX_DEPTH.
+    fn nest<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_DEPTH {
+            bail!("line {}: nesting too deep (more than {MAX_DEPTH} levels)", self.line());
+        }
+        self.depth += 1;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -421,9 +494,59 @@ impl Parser {
             let line = self.line();
             match self.ident("decorator name after `@`")?.as_str() {
                 "json" => attrs.json = true,
+                "protocols" => {
+                    self.expect(Tok::LParen, "`(\"proto\", ...)` after @protocols")?;
+                    while !self.eat(&Tok::RParen) {
+                        match self.next() {
+                            Tok::Str(s) => attrs.socket.protocols.push(s),
+                            _ => bail!("line {line}: @protocols takes strings, e.g. @protocols(\"ro.v1\")"),
+                        }
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(Tok::RParen, "`,` or `)`")?;
+                            break;
+                        }
+                    }
+                }
+                "max_message" => {
+                    self.expect(Tok::LParen, "`(bytes)` after @max_message")?;
+                    attrs.socket.max_message = match self.next() {
+                        Tok::Int(n) => Some(n),
+                        _ => bail!("line {line}: @max_message takes a byte count, e.g. @max_message(8388608)"),
+                    };
+                    self.expect(Tok::RParen, "`)`")?;
+                }
+                "body_error" => {
+                    // @body_error(400, code: "bad_request", "invalid JSON body")
+                    self.expect(Tok::LParen, "`(status, code: \"..\", \"message\")`")?;
+                    let status = match self.next() {
+                        Tok::Int(n) => n,
+                        _ => bail!("line {line}: @body_error needs an HTTP status first, e.g. @body_error(400, \"invalid JSON body\")"),
+                    };
+                    self.expect(Tok::Comma, "`,`")?;
+                    let mut code = None;
+                    if matches!(self.peek(), Tok::Ident(c) if c == "code") && self.peek_at(1) == &Tok::Colon {
+                        self.next();
+                        self.next();
+                        code = match self.next() {
+                            Tok::Str(s) => Some(s),
+                            _ => bail!("line {line}: `code:` needs a string"),
+                        };
+                        self.expect(Tok::Comma, "`,`")?;
+                    }
+                    let message = match self.next() {
+                        Tok::Str(s) => s,
+                        _ => bail!("line {line}: @body_error needs a message string"),
+                    };
+                    self.expect(Tok::RParen, "`)`")?;
+                    attrs.body_error = Some(BodyError { status, code, message });
+                }
                 "guard" => {
                     self.expect(Tok::LParen, "`(fn_name)` after @guard")?;
-                    attrs.guards.push(self.ident("guard function name")?);
+                    let mut g = self.ident("guard function name")?;
+                    while self.eat(&Tok::PathSep) {
+                        g = format!("{g}::{}", self.ident("path segment")?);
+                    }
+                    attrs.guards.push(g);
                     self.expect(Tok::RParen, "`)`")?;
                 }
                 "allow_insecure" => {
@@ -449,7 +572,7 @@ impl Parser {
                         }
                     }
                 }
-                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @allow_insecure(\"reason\"))"),
+                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @body_error(..), @allow_insecure(\"reason\"))"),
             }
             self.expect(Tok::Newline, "newline after decorator")?;
             self.skip_newlines();
@@ -493,11 +616,12 @@ impl Parser {
         Ok(UseDef { path, line })
     }
 
-    /// `route METHOD "/path/{p}" [(params)] [-> T][!]:` block
+    /// `route METHOD "/path/{p}" [(params)] [-> T][!]:` block, or
+    /// `socket "/path/{p}" [(params)]:` (a WebSocket; GET upgrade)
     fn parse_route(&mut self) -> Result<RouteDef> {
         let line = self.line();
-        self.next(); // `route`
-        let method = self.ident("HTTP method (GET, POST, PUT, PATCH, DELETE)")?;
+        let is_socket = matches!(self.next(), Tok::Ident(k) if k == "socket");
+        let method = if is_socket { "GET".to_string() } else { self.ident("HTTP method (GET, POST, PUT, PATCH, DELETE)")? };
         if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method.as_str()) {
             bail!("line {line}: unknown HTTP method `{method}` (use GET, POST, PUT, PATCH or DELETE)");
         }
@@ -506,7 +630,7 @@ impl Parser {
             t => bail!("line {line}: expected a path string starting with `/`, found {t:?}"),
         };
         let mut params = Vec::new();
-        let (mut state, mut req, mut auth) = (false, false, false);
+        let (mut state, mut req, mut auth, mut conn) = (false, false, false, false);
         if self.eat(&Tok::LParen) {
             while !self.eat(&Tok::RParen) {
                 let p = self.ident("parameter name")?;
@@ -516,6 +640,11 @@ impl Parser {
                     req = true;
                 } else if p == "auth" && self.peek() != &Tok::Colon {
                     auth = true;
+                } else if p == "conn" && self.peek() != &Tok::Colon {
+                    if !is_socket {
+                        bail!("line {line}: `conn` is the WebSocket connection; it only exists in a `socket`");
+                    }
+                    conn = true;
                 } else {
                     self.expect(Tok::Colon, "`:` after parameter name (types are required)")?;
                     params.push((p, self.parse_type()?));
@@ -527,7 +656,10 @@ impl Parser {
             }
         }
         let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
-        let fallible = self.eat(&Tok::Bang);
+        let fallible = self.eat(&Tok::Bang) || is_socket;
+        if is_socket && (ret.is_some() || !conn) {
+            bail!("line {line}: a socket takes `conn` and returns nothing: socket \"{path}\" (conn):");
+        }
         let holes = path_params(&path);
         for (p, _) in &params {
             if !holes.contains(p) && p != "body" && p != "query" {
@@ -542,7 +674,23 @@ impl Parser {
             }
         }
         let body = self.parse_block()?;
-        Ok(RouteDef { method, path, params, state, req, auth, guards: vec![], ret, fallible, body, line, allow_insecure: None })
+        Ok(RouteDef {
+            method,
+            path,
+            params,
+            state,
+            req,
+            auth,
+            socket: if is_socket { Some(SocketOpts::default()) } else { None },
+            conn,
+            guards: vec![],
+            body_error: None,
+            ret,
+            fallible,
+            body,
+            line,
+            allow_insecure: None,
+        })
     }
 
     /// `state:` NEWLINE INDENT (`name: Type = expr` NEWLINE)+ DEDENT
@@ -597,6 +745,10 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<Type> {
+        self.nest(|p| p.parse_type_inner())
+    }
+
+    fn parse_type_inner(&mut self) -> Result<Type> {
         let mut ty = match self.peek().clone() {
             Tok::Amp => {
                 self.next();
@@ -662,6 +814,10 @@ impl Parser {
 
     /// `:` followed by either an indented block or a single inline statement.
     fn parse_block(&mut self) -> Result<Block> {
+        self.nest(|p| p.parse_block_inner())
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Block> {
         self.expect(Tok::Colon, "`:` to open a block")?;
         self.parse_body()
     }
@@ -746,6 +902,24 @@ impl Parser {
                 self.next();
                 self.end_stmt()?;
                 Ok(Stmt::Continue)
+            }
+            // `a, ~b = expr`
+            Tok::Ident(_) | Tok::Tilde
+                if self.peek_at(1) == &Tok::Comma
+                    || (self.peek() == &Tok::Tilde && self.peek_at(2) == &Tok::Comma) =>
+            {
+                let mut names = Vec::new();
+                loop {
+                    let m = self.eat(&Tok::Tilde);
+                    names.push((self.ident("name in `a, b = ...`")?, m));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::Assign, "`=` after `a, b`")?;
+                let value = self.parse_expr()?;
+                self.end_stmt()?;
+                Ok(Stmt::LetTuple { names, value })
             }
             Tok::Tilde => {
                 self.next();
@@ -846,9 +1020,14 @@ impl Parser {
 
     fn parse_bin(&mut self, min: u8) -> Result<Expr> {
         let mut left = self.parse_unary()?;
+        let mut chain = 0;
         while let Some((prec, op)) = self.bin_op() {
             if prec < min {
                 break;
+            }
+            chain += 1;
+            if chain > MAX_CHAIN {
+                bail!("line {}: expression too long (more than {MAX_CHAIN} operators in a row); split it up", self.line());
             }
             self.next();
             let right = self.parse_bin(prec + 1)?;
@@ -861,6 +1040,10 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
+        self.nest(|p| p.parse_unary_inner())
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr> {
         match self.peek() {
             Tok::Minus => {
                 self.next();
@@ -1030,6 +1213,7 @@ impl Parser {
         let line = self.line();
         Ok(match self.next() {
             Tok::Int(s) => Expr::Int(s),
+            Tok::Char(c) => Expr::Char(c),
             Tok::Float(s) => Expr::Float(s),
             Tok::True => Expr::Bool(true),
             Tok::False => Expr::Bool(false),
@@ -1133,6 +1317,10 @@ impl Parser {
     }
 
     fn parse_pat1(&mut self) -> Result<Pat> {
+        self.nest(|p| p.parse_pat1_inner())
+    }
+
+    fn parse_pat1_inner(&mut self) -> Result<Pat> {
         match self.peek().clone() {
             Tok::Ident(mut name) => {
                 self.next();
@@ -1206,6 +1394,21 @@ fn parse_str(raw: &str, line: usize) -> Result<Vec<StrPart>> {
     let mut i = 0;
     while i < c.len() {
         match c[i] {
+            // `\u{1F600}` is a Rust escape, not an interpolation
+            '\\' if c.get(i + 1) == Some(&'u') && c.get(i + 2) == Some(&'{') => {
+                while i < c.len() {
+                    lit.push(c[i]);
+                    i += 1;
+                    if c[i - 1] == '}' {
+                        break;
+                    }
+                }
+            }
+            '\\' if i + 1 < c.len() => {
+                lit.push(c[i]);
+                lit.push(c[i + 1]);
+                i += 2;
+            }
             '{' if c.get(i + 1) == Some(&'{') => {
                 lit.push('{');
                 i += 2;
@@ -1238,7 +1441,7 @@ fn parse_str(raw: &str, line: usize) -> Result<Vec<StrPart>> {
                 if src.trim().is_empty() {
                     bail!("line {line}: empty `{{}}` in string; write `{{expr}}`");
                 }
-                let mut p = Parser { toks: lex_from(src, line)?, pos: 0 };
+                let mut p = Parser { toks: lex_from(src, line)?, pos: 0, depth: 0 };
                 let e = p.parse_expr()?;
                 p.skip_newlines();
                 if p.peek() != &Tok::Eof {
@@ -1480,6 +1683,49 @@ mod tests {
         assert!(err("route GET \"/\" (auth):\n    ret\n").contains("no @guard"));
         assert!(err("@guard(g)\nfn f():\n    ret\n").contains("goes on a `route`"));
         assert!(err("type E:\n    @omit_none\n    a: i32\n").contains("needs an optional field"));
+    }
+
+    #[test]
+    fn v07_imports_sockets_ergonomics() {
+        let items = parse_items(lex("import store\nimport auth.tokens\nfn main():\n    n, ~s = pair()\n    c = '!'\n    x = a\n        .b()\n").unwrap()).unwrap();
+        assert!(matches!(&items[1], Item::Import(d) if d.path == ["auth", "tokens"]));
+        let Item::Fn(f) = &items[2] else { panic!() };
+        assert!(matches!(&f.body[0].stmt, Stmt::LetTuple { names, .. } if names == &[("n".to_string(), false), ("s".to_string(), true)]));
+        assert!(matches!(&f.body[1].stmt, Stmt::Let { value: Expr::Char(c), .. } if c == "!"));
+        assert!(matches!(&f.body[2].stmt, Stmt::Let { value: Expr::Method(..), .. }));
+        let p = prog("@protocols(\"ro.v1\")\n@max_message(1024)\nsocket \"/ws/{id}\" (id: str, conn):\n    ret\n");
+        let Item::Route(r) = &p.items[0] else { panic!() };
+        assert!(r.conn && r.fallible);
+        assert_eq!(r.socket, Some(SocketOpts { protocols: vec!["ro.v1".into()], max_message: Some("1024".into()) }));
+        let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
+        assert!(err("route GET \"/x\" (conn):\n    ret\n").contains("only exists in a `socket`"));
+        assert!(err("socket \"/x\":\n    ret\n").contains("a socket takes `conn`"));
+        assert!(err("@protocols(\"a\")\nroute GET \"/x\":\n    ret\n").contains("go on a `socket`"));
+        // whole-program checks see module routes, guards and stray `state`/`main`
+        let module = |src: &str| Module { path: vec!["m".into()], items: parse_items(lex(src).unwrap()).unwrap() };
+        let mk = |main: &str, m: &str| Program { items: parse_items(lex(main).unwrap()).unwrap(), modules: vec![module(m)], files: vec![] };
+        assert!(validate(&mk("fn x():\n    ret\n", "fn g(req) -> str!:\n    ret \"a\"\n@guard(g)\nroute GET \"/a\" (auth) -> str:\n    ret auth\n")).is_ok());
+        assert!(validate(&mk("fn x():\n    ret\n", "state:\n    a: i32 = 1\n")).unwrap_err().to_string().contains("main file"));
+        assert!(validate(&mk("route GET \"/a\":\n    ret\n", "route GET \"/a\":\n    ret\n")).unwrap_err().to_string().contains("duplicate route"));
+    }
+
+    #[test]
+    fn deep_or_long_input_is_an_error_not_a_crash() {
+        // the compiler runs on a 64 MB thread (main.rs); test under the same stack
+        std::thread::Builder::new().stack_size(64 << 20).spawn(deep_or_long_body).unwrap().join().unwrap();
+    }
+
+    fn deep_or_long_body() {
+        let src = |e: &str| format!("fn main():\n    x = {e}\n");
+        let err = |e: &str| parse(lex(&src(e)).unwrap()).map(|_| ()).unwrap_err().to_string();
+        let nested = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
+        assert!(err(&nested).contains("nesting too deep"));
+        assert!(err(&format!("{}1", "-".repeat(5000))).contains("nesting too deep"));
+        assert!(err(&format!("[{}]", "[".repeat(400) + &"]".repeat(400))).contains("nesting too deep"));
+        assert!(err(&format!("1{}", " + 1".repeat(MAX_CHAIN + 1))).contains("expression too long"));
+        // at the limits it still parses
+        assert!(parse(lex(&src(&format!("{}1{}", "(".repeat(200), ")".repeat(200)))).unwrap()).is_ok());
+        assert!(parse(lex(&src(&format!("1{}", " + 1".repeat(MAX_CHAIN)))).unwrap()).is_ok());
     }
 
     #[test]

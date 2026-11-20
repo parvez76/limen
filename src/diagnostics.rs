@@ -20,6 +20,8 @@ pub struct Ctx<'a> {
     pub rust_src: &'a str,
     /// Rust line (1-based) -> `.prvz` line, see `codegen::Generated::map`
     pub map: &'a [usize],
+    /// (name, source) of imported files; index k-1 for file k of an encoded line
+    pub modules: &'a [(String, String)],
 }
 
 impl Ctx<'_> {
@@ -27,8 +29,18 @@ impl Ctx<'_> {
         let i = rust_line.saturating_sub(1) as usize;
         self.map.get(i).copied().unwrap_or(0)
     }
+    /// (file name, line within it) for an encoded line.
+    fn place(&self, n: usize) -> (&str, usize) {
+        let (k, line) = crate::ast::split_line(n);
+        match k {
+            0 => (self.prvz_path, line),
+            _ => (self.modules.get(k - 1).map(|m| m.0.as_str()).unwrap_or("?"), line),
+        }
+    }
     fn src_line(&self, n: usize) -> Option<&str> {
-        self.prvz_src.lines().nth(n.checked_sub(1)?)
+        let (k, line) = crate::ast::split_line(n);
+        let src = if k == 0 { self.prvz_src } else { self.modules.get(k - 1)?.1.as_str() };
+        src.lines().nth(line.checked_sub(1)?)
     }
     fn rust_line(&self, n: u64) -> Option<&str> {
         self.rust_src.lines().nth((n as usize).checked_sub(1)?)
@@ -82,9 +94,10 @@ fn render_one(msg: &Value, ctx: &Ctx) -> String {
 
     let mut s = String::new();
     if ln > 0 {
-        s.push_str(&format!("{}:{ln}: error{code}: {text}\n", ctx.prvz_path));
+        let (file, l) = ctx.place(ln);
+        s.push_str(&format!("{file}:{l}: error{code}: {text}\n"));
         if let Some(src) = ctx.src_line(ln) {
-            s.push_str(&format!("{ln:>4} | {src}\n"));
+            s.push_str(&format!("{l:>4} | {src}\n"));
         }
     } else {
         s.push_str(&format!("{} (generated line {rust_ln}): error{code}: {text}\n", ctx.prvz_path));
@@ -96,7 +109,17 @@ fn render_one(msg: &Value, ctx: &Ctx) -> String {
             notes.push(n);
         }
     };
-    let at = |l: usize| if l > 0 && l != ln { format!("line {l}: ") } else { String::new() };
+    let at = |l: usize| {
+        if l == 0 || l == ln {
+            return String::new();
+        }
+        let (file, line) = ctx.place(l);
+        if crate::ast::split_line(l).0 == crate::ast::split_line(ln).0 {
+            format!("line {line}: ")
+        } else {
+            format!("{file}:{line}: ")
+        }
+    };
 
     if let Some(label) = primary["label"].as_str() {
         note(label.to_string());
@@ -137,7 +160,7 @@ mod tests {
     const MAP: [usize; 8] = [0, 0, 1, 2, 2, 3, 4, 4];
 
     fn ctx() -> Ctx<'static> {
-        Ctx { prvz_path: "app.prvz", prvz_src: PRVZ, rust_src: RUST, map: &MAP }
+        Ctx { prvz_path: "app.prvz", prvz_src: PRVZ, rust_src: RUST, map: &MAP, modules: &[] }
     }
 
     #[test]
@@ -157,6 +180,17 @@ not json at all"#;
         assert!(e.contains("= help: consider borrowing here"));
         assert!(e.contains("= rust: let p = port(String::from(\"80\"));"));
         assert!(!e.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn maps_errors_into_module_files() {
+        let modules = [("store.prvz".to_string(), "fn f() -> i32:\n    ret \"x\"\n".to_string())];
+        let map = [0, 0, 1, 2, 2, 3, 4, 1_000_002];
+        let ctx = Ctx { prvz_path: "app.prvz", prvz_src: PRVZ, rust_src: RUST, map: &map, modules: &modules };
+        let json = r#"{"reason":"compiler-message","message":{"message":"mismatched types","code":{"code":"E0308"},"level":"error","spans":[{"file_name":"src/main.rs","line_start":8,"is_primary":true,"label":"expected `i32`"},{"file_name":"src/main.rs","line_start":3,"is_primary":false,"label":"return type"}],"children":[]}}"#;
+        let e = &render(json, &ctx)[0];
+        assert!(e.starts_with("store.prvz:2: error[E0308]: mismatched types\n   2 |     ret \"x\"\n"), "{e}");
+        assert!(e.contains("= app.prvz:1: return type"), "{e}");
     }
 
     #[test]

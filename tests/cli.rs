@@ -783,3 +783,192 @@ route POST "/echo" (req, body: Who) -> Who!:
     assert!(!err.contains("was never reached"), "{err}");
     assert!(err.contains("0 failure(s)"), "{err}");
 }
+
+// ---------- v0.7 ----------
+
+#[test]
+fn multi_file_modules_build_serve_and_map_errors() {
+    let dir = scratch("modules7");
+    std::fs::create_dir_all(dir.join("auth")).unwrap();
+    std::fs::write(
+        dir.join("app.prvz"),
+        "import store\nimport auth.tokens\n\nstate:\n    hits: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)\n\nroute GET \"/items/{id}\" (id: u32) -> store::Item!:\n    ret store::find(id)?\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("store.prvz"),
+        "@json\ntype Item: id: u32, name: str, kind: Kind\n\n@json\nenum Kind: Tool, Book\n\nfn find(id: u32) -> Item!:\n    if id == 0: fail(404, code: \"not_found\", \"no item {id}\")\n    ret Item(id: id, name: \"item-{id}\", kind: if_book(id))\n\nfn if_book(id: u32) -> Kind:\n    if id % 2 == 0: ret Book\n    ret Tool\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("auth/tokens.prvz"),
+        "fn bearer(req) -> str!:\n    match req.header(\"authorization\"):\n        Some(h) if h == \"Bearer t0k\" -> ret \"admin\"\n        _ -> fail(401, code: \"unauthenticated\", \"bad token\")\n\n@guard(bearer)\nroute GET \"/admin/count\" (state, auth) -> str:\n    n = state.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1\n    ret \"{auth} {n}\"\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "app.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("app")).env("PORT", port.to_string()).stdout(std::process::Stdio::null()).spawn().unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(http(port, "GET", "/items/4", ""), (200, r#"{"id":4,"name":"item-4","kind":"Book"}"#.into()));
+    assert_eq!(http(port, "GET", "/items/0", ""), (404, r#"{"code":"not_found","error":"no item 0"}"#.into()));
+    let admin = |tok: &str| {
+        let raw = http_raw(port, format!("GET /admin/count HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {tok}\r\nConnection: close\r\n\r\n").as_bytes());
+        (raw[9..12].to_string(), raw.split_once("\r\n\r\n").unwrap().1.to_string())
+    };
+    assert_eq!(admin("nope").0, "401");
+    assert_eq!(admin("t0k"), ("200".into(), "admin 1".into()));
+
+    // a type error inside a module is reported against that module's file and line
+    std::fs::write(dir.join("store.prvz"), "fn find(id: u32) -> i32:\n    ret \"x\"\n").unwrap();
+    let out = run_in(&dir, &["check", "app.prvz"]);
+    let err = text(&out.stderr);
+    assert!(err.contains("store.prvz:2: error[E0308]"), "{err}");
+}
+
+/// Minimal WebSocket client (RFC 6455) over std, for tests.
+struct Ws(std::net::TcpStream);
+
+impl Ws {
+    fn connect(port: u16, path: &str, protocols: &str) -> Result<(Ws, String), String> {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {protocols}\r\n\r\n"
+        )
+        .unwrap();
+        let mut head = Vec::new();
+        let mut b = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if s.read(&mut b).unwrap_or(0) == 0 {
+                break;
+            }
+            head.push(b[0]);
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        if head.starts_with("HTTP/1.1 101") { Ok((Ws(s), head)) } else { Err(head) }
+    }
+
+    fn send(&mut self, opcode: u8, payload: &[u8]) {
+        use std::io::Write;
+        let mask = [7u8, 1, 9, 3];
+        let mut f = vec![0x80 | opcode];
+        if payload.len() < 126 {
+            f.push(0x80 | payload.len() as u8);
+        } else {
+            f.push(0x80 | 126);
+            f.extend((payload.len() as u16).to_be_bytes());
+        }
+        f.extend(mask);
+        f.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        self.0.write_all(&f).unwrap();
+    }
+
+    /// (opcode, payload) of the next non-ping frame.
+    fn recv(&mut self) -> (u8, Vec<u8>) {
+        use std::io::Read;
+        loop {
+            let mut h = [0u8; 2];
+            self.0.read_exact(&mut h).unwrap();
+            let mut len = (h[1] & 0x7f) as usize;
+            if len == 126 {
+                let mut l = [0u8; 2];
+                self.0.read_exact(&mut l).unwrap();
+                len = u16::from_be_bytes(l) as usize;
+            } else if len == 127 {
+                let mut l = [0u8; 8];
+                self.0.read_exact(&mut l).unwrap();
+                len = u64::from_be_bytes(l) as usize;
+            }
+            let mut p = vec![0u8; len];
+            self.0.read_exact(&mut p).unwrap();
+            if h[0] & 0x0f != 0x9 {
+                return (h[0] & 0x0f, p);
+            }
+        }
+    }
+
+    fn text(&mut self) -> String {
+        let (op, p) = self.recv();
+        assert_eq!(op, 1, "expected a text frame");
+        String::from_utf8(p).unwrap()
+    }
+}
+
+#[test]
+fn websocket_guard_subprotocol_and_relay() {
+    let dir = scratch("ws7");
+    std::fs::write(
+        dir.join("chat.prvz"),
+        r#"use std::collections::HashMap
+use std::sync::Mutex
+
+state:
+    peers: Mutex<HashMap<str, WsSender>> = Mutex::new(HashMap::new())
+
+fn ticket(req) -> str!:
+    offered = req.header("sec-websocket-protocol").unwrap_or_default()
+    for p in offered.split(','):
+        t = p.trim()
+        if t.starts_with("tok."): ret t.trim_start_matches("tok.").to_string()
+    room = req.param("room").unwrap_or_default()
+    fail(401, code: "unauthenticated", "no token for room {room}")
+
+@guard(ticket)
+@protocols("chat.v1")
+socket "/ws/{room}" (state, auth, room: str, conn):
+    key = "{room}/{auth}"
+    state.peers.lock().unwrap().insert(key.clone(), conn.sender())
+    conn.send_text("hello {auth} via {conn.protocol().unwrap_or_default()}").await?
+    loop:
+        match conn.recv().await?:
+            Some(msg) ->
+                for (k, peer) in state.peers.lock().unwrap().iter():
+                    if k.starts_with(&"{room}/") and *k != key: peer.send(&msg)
+            None -> break
+    state.peers.lock().unwrap().remove(&key)
+"#,
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "chat.prvz"]);
+    assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("chat")).env("PORT", port.to_string()).stdout(std::process::Stdio::null()).spawn().unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // the guard rejects before the upgrade, with the JSON error contract
+    let rejected = Ws::connect(port, "/ws/r1", "chat.v1").err().expect("must not upgrade");
+    assert!(rejected.starts_with("HTTP/1.1 401"), "{rejected}");
+
+    let (mut a, head) = Ws::connect(port, "/ws/r1", "chat.v1, tok.alice").unwrap();
+    assert!(head.to_lowercase().contains("sec-websocket-protocol: chat.v1"), "{head}");
+    let (mut b, _) = Ws::connect(port, "/ws/r1", "chat.v1, tok.bob").unwrap();
+    let (mut c, _) = Ws::connect(port, "/ws/r2", "chat.v1, tok.carol").unwrap();
+    assert_eq!(a.text(), "hello alice via chat.v1");
+    assert_eq!(b.text(), "hello bob via chat.v1");
+    assert_eq!(c.text(), "hello carol via chat.v1");
+    a.send(1, b"hi bob");
+    assert_eq!(b.text(), "hi bob");
+    b.send(2, b"\x00\x01bin");
+    assert_eq!(a.recv(), (2, b"\x00\x01bin".to_vec()), "binary stays binary");
+    // carol is in another room: nothing arrives
+    c.0.set_read_timeout(Some(std::time::Duration::from_millis(400))).unwrap();
+    let mut probe = [0u8; 1];
+    assert!(std::io::Read::read(&mut c.0, &mut probe).is_err(), "room isolation");
+    // closing: the server answers with a close frame
+    a.send(8, &1000u16.to_be_bytes());
+    assert_eq!(a.recv().0, 8);
+}

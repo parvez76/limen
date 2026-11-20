@@ -10,6 +10,8 @@ pub enum Tok {
     Float(String),
     /// Raw string body (escape sequences kept verbatim, Rust-compatible).
     Str(String),
+    /// `'a'`, `'\n'`, `'\u{1F600}'`: raw body between the quotes
+    Char(String),
     // keywords
     Fn,
     Type,
@@ -242,11 +244,45 @@ pub fn lex_from(src: &str, start_line: usize) -> Result<Vec<Token>> {
             ' ' | '\t' | '\r' => i += 1,
             '\n' => {
                 i += 1;
-                if open.is_empty() {
-                    push!(Tok::Newline);
-                    at_start = true;
-                }
                 line += 1;
+                if open.is_empty() {
+                    // A next line starting with `.name` continues a method chain.
+                    let mut j = i;
+                    while j < n && (c[j] == ' ' || c[j] == '\t' || c[j] == '\r') {
+                        j += 1;
+                    }
+                    let continues = j + 1 < n && c[j] == '.' && (c[j + 1].is_alphabetic() || c[j + 1] == '_');
+                    if continues {
+                        i = j;
+                    } else {
+                        line -= 1;
+                        push!(Tok::Newline);
+                        line += 1;
+                        at_start = true;
+                    }
+                }
+            }
+            '\'' => {
+                let start = i;
+                i += 1;
+                let mut body = String::new();
+                while i < n && c[i] != '\'' && c[i] != '\n' {
+                    if c[i] == '\\' && i + 1 < n {
+                        body.push(c[i]);
+                        body.push(c[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    body.push(c[i]);
+                    i += 1;
+                }
+                let one_char = body.chars().count() == 1 || body.starts_with('\\');
+                if i >= n || c[i] != '\'' || body.is_empty() || !one_char {
+                    let _ = start;
+                    bail!("line {line}: invalid char literal; use 'x' (one character) or \"text\" for strings");
+                }
+                i += 1;
+                push!(Tok::Char(body));
             }
             '#' => {
                 while i < n && c[i] != '\n' {
@@ -469,6 +505,17 @@ mod tests {
         assert_eq!((t[2].line, t[5].line), (1, 6), "lines keep counting through the string");
         let t = lex("s = \"\"\"one line\"\"\"\n").unwrap();
         assert_eq!(t[2].tok, Tok::Str("one line".into()));
+    }
+
+    #[test]
+    fn char_literals_and_dot_continuation() {
+        let t = toks("c = 'a'\nd = '\\n'\nx = a\n    .b()\n    .c()\ny = 1\n");
+        assert_eq!(t[2], Tok::Char("a".into()));
+        assert_eq!(t[6], Tok::Char("\\n".into()));
+        // `x = a .b() .c()` on one logical line, then `y`
+        let nl = t.iter().position(|x| *x == Tok::Ident("y".into())).unwrap();
+        assert!(!t[9..nl - 1].contains(&Tok::Newline), "{t:?}");
+        assert!(lex("c = 'ab'\n").is_err());
     }
 
     #[test]

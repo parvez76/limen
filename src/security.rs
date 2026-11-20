@@ -61,7 +61,7 @@ const FIX_SECRET: &str = "load secrets at runtime with `env(\"NAME\")` (e.g. in 
 pub fn lint(prog: &Program) -> Report {
     let mut l = Linter { findings: Vec::new() };
     let mut allowed = Vec::new();
-    for item in &prog.items {
+    for (_, item) in prog.all_items() {
         match item {
             Item::Fn(f) => l.function(f, &mut allowed),
             Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, &mut allowed)),
@@ -160,6 +160,12 @@ impl Linter {
                 }
             }
             Stmt::Expr(e) | Stmt::Ret(Some(e)) => self.expr(e, line, cx),
+            Stmt::LetTuple { names, value } => {
+                self.expr(value, line, cx);
+                if tainted(value, cx) {
+                    cx.taint.extend(names.iter().map(|(n, _)| n.clone()));
+                }
+            }
             Stmt::Ret(None) | Stmt::Break | Stmt::Continue => {}
             Stmt::If { branches, els } => {
                 for (c, b) in branches {
@@ -246,7 +252,7 @@ impl Linter {
                     self.block(&arm.body, &mut inner);
                 }
             }
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+            Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Ident(_) => {}
         }
     }
 
@@ -378,7 +384,7 @@ fn tainted(e: &Expr, cx: &Cx) -> bool {
         Expr::Tuple(xs) => xs.iter().any(|x| tainted(x, cx)),
         Expr::Named(_, x) => tainted(x, cx),
         Expr::Closure { .. } | Expr::Spawn(_) => false,
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => false,
+        Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) => false,
     }
 }
 

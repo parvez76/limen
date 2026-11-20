@@ -23,7 +23,13 @@ pub fn serve() -> Result<()> {
             continue;
         }
         let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(req) => handle(&req),
+            // A compiler bug must not take the whole server down.
+            Ok(req) => std::panic::catch_unwind(|| handle(&req)).unwrap_or_else(|_| {
+                Some(json!({
+                    "jsonrpc": "2.0", "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "error": { "code": -32603, "message": "internal compiler error" }
+                }))
+            }),
             Err(e) => Some(json!({
                 "jsonrpc": "2.0", "id": null,
                 "error": { "code": -32700, "message": format!("parse error: {e}") }
@@ -127,6 +133,30 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
                 Ok(x) => x,
                 Err(e) => return Ok(text(e, true)),
             };
+            // Checking compiles dependencies, and their build scripts run on this
+            // machine: never fetch crates the caller merely named in a `use`.
+            if let Ok((_, g)) = transpile(&file) {
+                let allowed: Vec<String> = std::env::var("PARVEZ_MCP_ALLOW_CRATES")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|c| c.trim().replace('-', "_"))
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                let blocked: Vec<&String> =
+                    g.deps.iter().filter(|c| !crate::deps::is_known(c) && !allowed.contains(c)).collect();
+                if !blocked.is_empty() {
+                    let names: Vec<&str> = blocked.iter().map(|c| c.as_str()).collect();
+                    return Ok(text(
+                        format!(
+                            "refused: unknown crate(s) {} would be downloaded and their build scripts run. \
+                             Use known crates, or allow these with PARVEZ_MCP_ALLOW_CRATES={}",
+                            names.join(", "),
+                            names.join(",")
+                        ),
+                        true,
+                    ));
+                }
+            }
             Ok(match compile_at(&file, Mode::Check, &root) {
                 Ok(Outcome::Built(_)) => text(format!("ok: {shown} has no errors"), false),
                 Ok(Outcome::Errors(errs)) => {
