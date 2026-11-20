@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Parvez: secure services, Python-dense syntax, Rust binaries</title>
-<meta name="description" content="Parvez is a token-dense language that compiles to Rust, with security checks built into the compiler.">
+<title>Parvez: the usual security mistakes don't compile</title>
+<meta name="description" content="Parvez is a small language for backend services and DevOps tools. The compiler refuses unguarded routes, leaked secrets and injectable queries, and hands back one native binary.">
 <style>
   :root { color-scheme: light dark; --fg: #1d1f23; --bg: #fbfbfa; --muted: #5d6470; --code: #f0f1f3; --accent: #1a7f37; }
   @media (prefers-color-scheme: dark) { :root { --fg: #e6e8eb; --bg: #15171a; --muted: #9aa3ad; --code: #22262b; --accent: #4ac26b; } }
@@ -23,7 +23,8 @@
 <body>
 <main>
   <h1>Parvez</h1>
-  <p class="tag">Python-dense syntax. Rust-grade binaries. Security the compiler enforces.</p>
+  <p class="tag">The usual security mistakes don't compile.</p>
+  <p>A small language for backend services and DevOps tools. You write a few lines. The compiler refuses the route nobody guarded, the secret headed for a log, and the query pasted together from strings. What you get back is one native binary.</p>
 
   <h2>Install</h2>
   <p>Linux (x86_64, ARM64) and macOS (Apple silicon):</p>
@@ -37,14 +38,16 @@ parvez test main.prvz      # tests
 parvez run main.prvz       # http://localhost:8080</code></pre>
   <p>Later, <code>parvez upgrade</code> moves to the newest release, verified the same way.</p>
 
-  <h2>Secure by default</h2>
+  <h2>What it feels like</h2>
   <ul>
-    <li>Every route and page declares <code>@guard</code> or <code>@public</code>, or it doesn't compile.</li>
-    <li>SQL, shell and path injection, followed across functions, modules, traits and stored state, are compile errors with the fix.</li>
-    <li><code>Secret</code> values can't reach logs, output or JSON.</li>
-    <li>Strict Content-Security-Policy, HSTS, safe errors, limits and timeouts in every service.</li>
-    <li>Signed, reproducible releases.</li>
+    <li><strong>Friday deploys get boring.</strong> Every endpoint says who may call it, or the build stops. Injectable SQL, and file paths and commands built from request input, are compile errors with the fix, even after the input passed through helpers, traits or stored state.</li>
+    <li><strong>The whole service fits on one screen.</strong> A JSON service is 9 lines, where the hand-written Rust is 48 (<a href="https://github.com/parvez76/project-parvez/tree/main/docs/comparison">see both</a>).</li>
+    <li><strong>When your agent slips, it lands on the right line.</strong> The spec is one file written for AI agents, and errors point at your <code>.prvz</code> line.</li>
+    <li><strong>Leaving costs nothing.</strong> It compiles to plain, readable Rust; <code>parvez show</code> hands it over.</li>
   </ul>
+
+  <h2>What it won't do</h2>
+  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Parvez enforces the wrong answer. It runs on top of Rust, covers Linux and Apple-silicon Macs, and is pre-1.0. <a href="https://github.com/parvez76/project-parvez#what-parvez-wont-do">The full list</a>.</p>
 
   <p class="muted"><a href="https://github.com/parvez76/project-parvez">Source on GitHub</a> · <a href="https://github.com/parvez76/project-parvez/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/project-parvez/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
 </main>

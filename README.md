@@ -1,27 +1,50 @@
 # Parvez
 
-Python's token efficiency with Rust's production reliability.
+**The usual security mistakes don't compile.**
 
-Parvez is a small, indentation-based language for backend microservices and DevOps tools. Its dense syntax keeps code short for both humans and LLMs. The `parvez` compiler translates `.prvz` files into plain, readable Rust, and `cargo` builds that Rust into a single standalone binary. rustc does all the type and borrow checking, and the generated code has no Parvez runtime, so there's no lock-in.
+Parvez is a small language for backend services and DevOps tools. You write a few lines. The compiler refuses the route nobody guarded, the secret headed for a log, and the query pasted together from strings. What you get back is one native binary.
+
+## Picture this
+
+It's Friday afternoon. You asked your AI agent for one more admin endpoint, and it wrote one. It reads fine. It also forgot the permission check, the kind of line a tired reviewer skims past.
+
+You build it:
 
 ```
-type User: name: str, age: u8
-
-fn port(raw: &str) -> i32!:
-    p: i32 = raw.trim().parse()?
-    if p < 1 or p > 65535: fail("port {p} out of range")
-    ret p
-
-fn main()!:
-    users = [User(name: "Ada", age: 36), User(name: "Linus", age: 12)]
-    ~adults = 0
-    for u in &users:
-        if u.age >= 18: adults += 1
-    p = port("8080")?
-    print("adults: {adults}, port: {p}")
+parvez: error: admin.prvz:1: route GET /admin/users has no access policy. Add @guard(fn) to require
+sign-in or another check, or @public("why anyone may call it") to serve it to everyone (Parvez denies by default)
 ```
 
-A complete JSON REST microservice ([examples/service.prvz](examples/service.prvz)) is 16 lines of Parvez instead of about 77 lines of axum + tokio + serde Rust, roughly 79% fewer tokens:
+Nothing shipped. You add one line, `@guard(staff)`, and go home on time.
+
+## Friday deploys get boring
+
+Some mistakes can't reach production unless someone waives them on purpose, in writing, with `@allow_insecure("why")`. Every endpoint says who may call it, or the build stops. A `Secret` prints as `[redacted]`, can't be turned into JSON, and passing its value to a log, a print or an error message is a compile error. SQL pasted together from strings is a compile error anywhere. File paths and shell commands built from request input are compile errors too, even when the input went through helper functions, a trait or `state:` first. Every error comes with the fix:
+
+```
+leak.prvz:7: security[secret-exposure]: an exposed Secret is passed to `log_info(..)`
+     = fix: pass `s.expose()` only to the API that needs the value (a DB bind, an HMAC key, a header);
+            print or log the Secret itself, which shows [redacted]
+leak.prvz:8: security[sql-injection]: `sqlx::query(..)` receives a string built from interpolation/concatenation
+     = fix: never build SQL with interpolation or `+`; use a parameterized query,
+            e.g. sqlx::query("SELECT * FROM users WHERE id = $1").bind(id)
+```
+
+Before a review, one command shows who can call what:
+
+```
+$ parvez routes app.prvz
+METHOD  PATH          KIND      ACCESS                                                AT
+GET     /ping         route     PUBLIC (load balancer health probe)                   app.prvz:5
+GET     /admin/users  route     guard staff                                           app.prvz:9
+GET     /healthz      built-in  PUBLIC (built-in health check)                        -
+```
+
+Before a release, `parvez fuzz` throws hostile input at every route and fails on any crash, hang or leaked internal detail.
+
+## The whole service fits on one screen
+
+This is a complete JSON service:
 
 ```
 @json
@@ -37,198 +60,64 @@ route POST "/events" (body: Event) -> Event!:
     ret body
 ```
 
-`parvez run service.prvz` serves this on `:8080` (or `$PORT`) as a 1.4 MB native binary. Every error, including bad JSON, unknown routes and wrong methods, comes back as `{"error": ...}` with the right status. A `state:` block adds shared resources such as DB pools, clients and in-memory stores, available to any route that takes `state`.
+The same service written by hand in Rust with axum takes 48 lines plus a `Cargo.toml`. This one is 9, and 76 tokens instead of 402.¹ Both answer the same requests with the same status codes and the same JSON error format. Yours also comes with health checks, Prometheus metrics, request limits, timeouts and security headers you didn't write.
 
-## Secure by default
+Short code is quicker to review, and it leaves room in an AI's context window for the part of the problem that's actually hard.
 
-Parvez generates every line that ships, so security isn't left to each developer:
+## When your agent slips, it lands on the right line
 
-- **Deny-by-default access control.** Every route, socket and page must declare `@guard(fn)` or `@public("reason")`, or it doesn't compile, so a forgotten permission check (OWASP's #1 risk, broken access control) can't ship. `parvez routes` prints the complete access map for review.
-- **Secrets can't leak.** `Secret` values print as `[redacted]`, can't be serialized into JSON or logs, compare in constant time and are zeroed in memory (best effort, see SECURITY.md); `s.expose()` into a log, print, error or string is a compile error, and secret-named `state:` fields must use `Secret`.
-- **Compile-time security checks.** SQL built by string interpolation, shell commands built from input, request data reaching the filesystem (`safe_join` is the fix), followed into helper functions and across modules,, and hard-coded secrets are compile errors pointing at the `.prvz` line, each with the safe alternative. Opting out takes an explicit `@allow_insecure("reason")`.
-- **Standards-mapped findings.** Every rule names the CWE, OWASP Top 10 and ASVS requirement it enforces, and `parvez lint --sarif` feeds GitHub code scanning and other security dashboards. [SECURITY.md](SECURITY.md) has the full control map and how to report a vulnerability.
-- **Hardened services.** Internal errors and panics become a generic 500, with details logged server-side only. Body size limits, timeouts, concurrency backpressure, security headers (a strict Content-Security-Policy on pages, HSTS, anti-framing, no-sniff) and graceful SIGTERM shutdown are always on.
-- **Supply chain.** Builds fail on dependencies with known RustSec advisories, `parvez heal` moves to patched versions, and every build writes a CycloneDX SBOM.
-- **`parvez fuzz`** sends hostile, type-aware input to every route and fails on any crash, hang or leak.
-
-Memory safety and data-race freedom come from Rust itself. Logic flaws, such as a missing permission check, are still yours to get right; Parvez removes whole classes of bugs, not all of them.
-
-## Production essentials, built in
-
-- **Tests in Parvez:** `test "..."` blocks with `assert`/`assert_eq` and an in-process HTTP client, run by `parvez test`. Failures point at `.prvz` lines.
-- **Observability:** JSON logs with request IDs, Prometheus `/metrics` (route-template labels, latency histogram, custom events), and `/healthz` / `/readyz`, all without writing any code.
-- **OIDC:** `oidc(req).await?` in a guard validates Keycloak/Entra/Auth0 bearer tokens (JWKS discovery and rotation, asymmetric algorithms only, and issuer, audience, token-type and expiry checks). `oidc_session(req)` adds browser sign-in for Masud pages: code flow with PKCE, encrypted session cookies, refresh and CSRF checks. `@guard(...)` works on pages and routes alike.
-
-## Install
-
-Linux (x86_64, ARM64) and macOS (Apple silicon):
-
-```bash
-curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh
-```
-
-The installer downloads the release for your platform and checks it against the release's `SHA256SUMS`, and against its signed build attestation if the GitHub CLI (`gh`) is installed. It refuses to install on any mismatch. It puts `parvez` in `~/.parvez/bin` and adds that to your PATH. Parvez builds your programs with the Rust toolchain; if that's missing, the installer offers to set it up with the official [rustup](https://rustup.rs) installer (`sh -s -- -y` says yes without asking). [Read the script](install.sh) before running it if you like; `PARVEZ_VERSION=v0.17.0` pins a version.
-
-```bash
-parvez doctor      # checks Rust, git, the advisory database, targets and PATH, and says how to fix anything missing
-parvez upgrade     # moves to the newest release, verified the same way (--check only reports)
-```
-
-Or download a release yourself from the [releases page](https://github.com/parvez76/project-parvez/releases) and [verify it](SECURITY.md#verifying-a-release), or build from source:
+[SPEC.md](SPEC.md) is written as a compact system prompt, so an agent can learn the whole language from one file. `parvez mcp` lets the agent check its own code against the compiler (`claude mcp add parvez -- parvez mcp`). When something's wrong, the error points at the `.prvz` line it wrote, not at generated code:
 
 ```
-cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked
-```
-
-## Quickstart
-
-```bash
-parvez new hello && cd hello        # parvez.toml, main.prvz (a route + tests), ui/home.msd
-parvez check main.prvz              # type/borrow check, errors point at .prvz lines
-parvez test main.prvz               # the test blocks, with an in-process HTTP client
-parvez run main.prvz                # http://localhost:8080
-parvez fuzz main.prvz               # hostile input at every route: crashes, hangs, leaks fail it
-parvez fmt --check .                # canonical formatting (CI)
-
-rustup target add x86_64-unknown-linux-musl
-parvez build main.prvz --target x86_64-unknown-linux-musl
-#   -> ./main-x86_64-unknown-linux-musl (static, runs on any Linux) + .sha256 + SBOM
-```
-
-## Usage
-
-| Command | What it does |
-|---|---|
-| `parvez types --ts app.prvz --out types.ts` | Exports TypeScript request, response, and JSON model types across imports |
-| `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
-| `parvez run app.prvz [-- args]` | Builds the program and runs it |
-| `parvez build app.prvz [--target <triple>]` | Builds a release binary (`./app`, or `./app-<triple>` when cross-compiling, e.g. static `x86_64-unknown-linux-musl`) plus `app.sha256` |
-| `parvez lint app.prvz [--sarif -o out.sarif]` | Security rules only (no build), with CWE/OWASP/ASVS references; SARIF 2.1.0 for code scanning. `--rules` lists the rules |
-| `parvez routes app.prvz [--json]` | Access map: every endpoint with its guards or `@public` reason, for security review |
-| `parvez new <name>` | Scaffolds a project (`parvez.toml`, `main.prvz` with tests, `ui/`) that passes `parvez test` immediately |
-| `parvez fmt [paths...] [--check]` | Formats `.prvz`/`.msd` files; every change is verified to leave the program identical |
-| `parvez heal app.prvz` | Updates to patched compatible dependency versions; reports advisories needing a major upgrade |
-| `parvez fuzz app.prvz` | Starts the service and fires malformed/edge-case requests at every route; fails on crash, hang or leak |
-| `parvez test app.prvz [filter]` | Runs `test "..."` blocks, with in-process HTTP tests via `test_app()` |
-| `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec`, `parvez_check`, `parvez_eject` tools (`claude mcp add parvez -- parvez mcp`) |
-| `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
-
-Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reuses that cache between builds.
-
-## Full-stack services in v0.8
-
-A service can serve a static build, JSON endpoints, and Masud HTML pages from one binary. For example, put this in `main.prvz`.
-
-```
-@embed_dir("web/dist")
-import models
-import ui.dashboard
-
-@public
-route GET "/api/summary" -> models::Summary:
-    ret models::summary()
-```
-
-Use ordinary Parvez types in `models.prvz`.
-
-```
-const TARGET: i32 = 8
-@json
-type Summary: label: str
-
-fn summary() -> Summary:
-    label = if TARGET >= 8: "Ready" else: "Waiting"
-    ret Summary(label: label)
-```
-
-In `ui/dashboard.msd`, indentation nests elements and braces interpolate escaped values. Changing the backend field name makes `parvez check main.prvz` point to the reference in this page.
-
-```
-import models
-@public
-page GET "/dashboard" -> html:
-    let summary = models::summary()
-    main:
-        h1 Dashboard
-        p {summary.label}
-```
-
-Run `parvez types --ts --out web/types.ts` before building the frontend. Build the frontend into `web/dist`, then run `parvez build main.prvz`. The resulting binary serves `/dashboard`, `/api/summary`, and the frontend's assets and client-side routes.
-
-## Language at a glance
-
-| Parvez | Rust |
-|---|---|
-| `x = 10` / `~x = 0` | `let x = 10;` / `let mut x = 0;` |
-| `type User: name: str, age: u8` | `#[derive(Debug, Clone)] struct User { name: String, age: u8 }` |
-| `fn add(a: i32, b: i32) -> i32:` | `fn add(a: i32, b: i32) -> i32 { ... }` |
-| `fn main()!:` / `-> T!` | `-> anyhow::Result<()>` / `-> anyhow::Result<T>` |
-| `ret x` | `return x` (or the tail expression) |
-| `[T]`, `T?`, `&~T` | `Vec<T>`, `Option<T>`, `&mut T` |
-| `print("hi {name}")` | `println!("hi {}", name)` |
-| `fail("bad {x}")` | `anyhow::bail!("bad {}", x)` |
-| `and` `or` `not` | `&&` `\|\|` `!` |
-| `if let Some(v) = opt: print(v)` | `if let Some(v) = opt { println!("{}", v); }` |
-| `enum S: A, B(str), C(code: i32)` | `#[derive(Debug, Clone, PartialEq)] enum S { A, B(String), C { code: i32 } }` |
-| `match s:` / `B(msg) -> print(msg)` | `match s { S::B(msg) => println!(..), .. }` |
-| `impl User:` / `fn greet(&self)`, `fn bump(&~self)` | `impl User { fn greet(&self) .. fn bump(&mut self) .. }` |
-| `@json type Event: ...` | adds `#[derive(serde::Serialize, serde::Deserialize)]` |
-| `async fn f() -> str!:` / `x.await` | `async fn f() -> anyhow::Result<String>` / `x.await` |
-| `json_decode<Event>(raw)?` / `json_encode(e)?` | `serde_json::from_str::<Event>(&raw)?` / `serde_json::to_string(&e)?` |
-| `use serde::{Serialize}` / `use reqwest` | `use` + automatic Cargo.toml dependencies (pin in `parvez.toml`) |
-| `route POST "/x/{id}" (id: u64, body: T) -> T!:` | axum handler + router + `#[tokio::main]` server |
-| `@guard(verify)` + `(req, auth)` / `req.header("x")` / `req.client_ip()` | Pre-handler auth with raw request access |
-| `import store` / `store::find(id)` | Multi-file programs (nested `pub mod`s, one binary) |
-| `socket "/ws/{id}" (auth, conn):` / `conn.recv()` / `conn.sender().text(..)` | WebSockets with guards, subprotocols, a bounded send queue |
-| `status(204)` / `fail(401, code: "X", "msg")` | Any status / `{"error", "code"}` contracts |
-| `\|x\| x * 2` / `loop:` / `spawn work()` / `"""SQL"""` / `(a, b)` | closures / `loop` / `tokio::spawn` / dedented multi-line string / tuples |
-| `state:` / `hits: AtomicU64 = AtomicU64::new(0)` / `(state)` | `Arc<AppState>` built at startup, injected via axum `State` |
-| `type Page<T>: items: [T]` / `fn f<T: Clone>(x: T)` | generic structs and functions |
-| `trait Store:` / `impl Store for Pg:` / `Arc<dyn Store>` | traits (async methods via `async-trait`), usable as `dyn` |
-| `{"k": v}` / `json({"k": v, "n": [1]})` | `HashMap::from([..])` / `serde_json::json!({..})` |
-| `x = load(id) catch e: fallback` / `n as f64` | `match load(id) { Ok(v) => v, Err(e) => .. }` / `n as f64` |
-| `a, b = parallel(f(), g())?` / `every 1h (state):` | `tokio::try_join!` / an interval worker with logged errors |
-| `priv fn helper()` / `@test_only import testkit` | module-private items / `#[cfg(test)]` code and dev-dependencies |
-| `oidc_session(req)` in a page guard | Browser sign-in (code + PKCE), encrypted session cookies, refresh, CSRF |
-
-There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue`.
-
-## Errors point at your `.prvz` file
-
-rustc's errors are mapped back through a source map, so humans and AI agents can fix the right line without reading the generated Rust:
-
-```
-app.prvz:6: error[E0308]: mismatched types
-   6 |     ret raw.len()
+typo.prvz:2: error[E0308]: mismatched types
+   2 |     ret raw.len()
      = expected `i32`, found `usize`
-     = line 5: expected `i32` because of return type
+     = line 1: expected `i32` because of return type
      = rust: raw.len()
 ```
 
-The full spec is in [SPEC.md](SPEC.md). It's written as a compact system prompt, so you can paste it into an AI agent and it will write valid Parvez.
+## Leaving costs nothing
 
-## Project layout
+Parvez compiles to plain Rust. There's no separate runtime or library to depend on: what your program needs is in the generated code, where you can read it. The service above is a single 1.7 MB binary. If you ever outgrow Parvez, `parvez show app.prvz -o app.rs` hands you the Rust, and the matching `Cargo.toml` is already in `.parvez_build/app/`. From then on it's a Rust project:
 
-```
-src/lexer.rs    tokens, INDENT/DEDENT
-src/parser.rs   recursive descent -> AST (src/ast.rs)
-src/codegen.rs  AST -> formatted Rust + source map
-src/diagnostics.rs  rustc JSON errors -> .prvz lines
-src/deps.rs     crate detection -> generated Cargo.toml (+ parvez.toml overrides)
-src/mcp.rs      `parvez mcp`: JSON-RPC stdio server for AI agents
-src/security.rs compile-time security checks + rule catalog (CWE / OWASP / ASVS)
-src/sarif.rs    `parvez lint --sarif`: SARIF 2.1.0 export
-src/audit.rs    RustSec advisory gate + CycloneDX SBOM
-src/fuzz.rs     `parvez fuzz`: type-aware HTTP fuzzing of generated services
-src/main.rs     CLI: build / run / show
-examples/       sample .prvz programs
+```rust
+fn staff(req: &Req) -> anyhow::Result<String> {
+    Ok(req.header("x-user").unwrap_or_default())
+}
 ```
 
-Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real programs with rustc.
+## From nothing to running
 
-## Status
+On Linux or an Apple-silicon Mac:
 
-Parvez v0.17.0 installs with one command (`curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh`), which verifies the download and sets up Rust if needed, and adds `parvez upgrade` and `parvez doctor`. v0.16.0 shipped signed, reproducible release binaries (GitHub build attestations, `SHA256SUMS`, a byte-for-byte rebuild check) and closes three more taint blind spots: objects that store request data through methods, method calls on values whose type is inferred from lists and function return types, and second-order flows from database reads into file paths and commands. v0.15.0 follows untrusted input through trait objects and generics (every implementation of a `dyn Trait` call) and through `state:` (data stored by one request and used later by another route or worker). v0.14.0 sends a strict `Content-Security-Policy` on every page and `Strict-Transport-Security` on every response, configurable with `PARVEZ_CSP` / `PARVEZ_HSTS` (breaking for pages with inline `<script>` or `onclick=`: move the script to a file). v0.13.1 compares `Secret` values with SHA-256 digests and the audited `subtle` crate, documents exactly what `Secret` does and doesn't guarantee, stops flagging numeric path parameters, and adds an adversarial security corpus that every release must pass. v0.13.0 follows untrusted input across functions: request data passed into helpers, methods and other modules is tracked to the filesystem and process sinks inside them, and `req`, WebSocket messages and guard inputs now count as untrusted. v0.12.0 mapped every security rule to CWE, OWASP Top 10 and ASVS, adds `parvez lint` with SARIF 2.1.0 output for code scanning, and publishes a security policy (SECURITY.md). v0.11.0 added the `Secret` type: values that are zeroized on drop, compared in constant time, print as `[redacted]` and can never be serialized or returned as JSON, with lint rules for exposure, plain-`str` secrets and hard-coded values. Type names that would shadow Rust built-ins or the Parvez runtime (`Result`, `Option`, `AppError`, ...) are now rejected with a clear error. v0.10.0 made access control deny-by-default: every route, socket and page needs `@guard(...)` or `@public`, and `parvez routes` prints the access map (breaking: add `@public` to deliberately open endpoints). v0.9.3 added instant session revocation (OIDC back-channel logout plus a periodic IdP re-check), inline SVG, `canvas`, `data-*` and format specs in Masud, and fixes Sign out for form posts. v0.9.2 added `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
+```bash
+curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh
+parvez doctor                      # checks the setup and says how to fix anything missing
+parvez new hello && cd hello       # a service with a page and passing tests
+parvez test main.prvz
+parvez run main.prvz               # http://localhost:8080
+```
+
+The installer checks the download against the release's published checksums before installing anything, and offers to set up Rust if you don't have it. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked`.
+
+## What Parvez won't do
+
+- **It won't catch your logic mistakes.** If your guard returns the wrong answer, Parvez enforces the wrong answer. The checks remove whole classes of bugs, not all of them. The known blind spots are listed in [SECURITY.md](SECURITY.md) and kept in a test suite.
+- **It won't make memory perfectly clean.** `Secret` wipes its own memory and compares in constant time, but copies you make from it aren't wiped. [SECURITY.md](SECURITY.md) says exactly where the line is.
+- **It isn't for everything.** It's built for services and command-line tools. Rust macros and lifetimes aren't supported; for those, run `parvez show` and continue in Rust.
+- **It doesn't replace Rust.** It runs on top of it. The installer sets Rust up, and you also need a C linker; `parvez doctor` tells you what's missing.
+- **It isn't on every platform yet.** Prebuilt binaries cover Linux (x86_64, ARM64) and Apple-silicon Macs. Windows is untested.
+- **It's young.** Before 1.0, syntax and defaults can change between minor versions. The [changelog](docs/CHANGELOG.md) says when they do and what to change.
+
+## Learn more
+
+- [Reference](docs/REFERENCE.md): the language at a glance, every command, what's built into every service, full-stack services with Masud pages
+- [SPEC.md](SPEC.md): the complete language, written for humans and AI agents
+- [SECURITY.md](SECURITY.md): what Parvez enforces, mapped to CWE, OWASP and ASVS; how to verify a release; how to report a vulnerability
+- [Changelog](docs/CHANGELOG.md)
+- [examples/](examples/)
+
+¹ Counting non-blank lines, and tokens with OpenAI's `tiktoken` (`o200k_base`; `cl100k_base` gives 76 and 403). The Rust version handles the same cases: the two routes, the validation error, bad JSON, and JSON 404 and 405 responses. Both versions and how to check them are in [docs/comparison](docs/comparison/).
 
 ## License
 

@@ -1,0 +1,11 @@
+@json
+type Event: id: str, kind: str, count: i32
+
+@public
+route GET "/health" -> str:
+    ret "ok"
+
+@public
+route POST "/events" (body: Event) -> Event!:
+    if body.count < 0: fail(400, "count must be >= 0")
+    ret body
