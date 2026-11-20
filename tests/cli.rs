@@ -1868,3 +1868,56 @@ fn taint_crosses_modules_and_functions() {
     let err = text(&run_in(&dir, &["check", "app.prvz"]).stderr);
     assert!(err.contains("app.prvz:9: security[path-traversal]") && err.contains("4 security error(s)"), "{err}");
 }
+
+/// Adversarial corpus: every `# expect: rule` line must be reported, every
+/// `# known-miss: rule` line must not be (yet), and nothing else may be.
+#[test]
+fn security_corpus() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/security_corpus");
+    let mut expected = std::collections::BTreeSet::new();
+    let mut known_miss = std::collections::BTreeSet::new();
+    let mut stack = vec![root.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|x| x.to_str()) != Some("prvz") {
+                continue;
+            }
+            let rel = p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            for (i, line) in std::fs::read_to_string(&p).unwrap().lines().enumerate() {
+                for (tag, set) in [("# expect: ", &mut expected), ("# known-miss: ", &mut known_miss)] {
+                    if let Some(rule) = line.split(tag).nth(1) {
+                        set.insert((rel.clone(), i + 1, rule.trim().to_string()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(expected.len() >= 30, "corpus too small: {}", expected.len());
+    let mut found = std::collections::BTreeSet::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for main in entries.iter().filter(|p| p.extension().and_then(|x| x.to_str()) == Some("prvz")) {
+        let name = main.file_name().unwrap().to_str().unwrap();
+        let out = parvez().current_dir(&root).args(["lint", name]).output().unwrap();
+        let (so, se) = (text(&out.stdout), text(&out.stderr));
+        assert!(se.contains("security finding") || out.status.success(), "{name} failed to lint:\n{se}");
+        for line in so.lines() {
+            // "file.prvz:12: security[rule]: ..."
+            let Some((loc, rest)) = line.split_once(": security[") else { continue };
+            let (file, n) = loc.rsplit_once(':').unwrap();
+            let rule = rest.split(']').next().unwrap();
+            found.insert((file.to_string(), n.parse::<usize>().unwrap(), rule.to_string()));
+        }
+    }
+    let missed: Vec<_> = expected.difference(&found).collect();
+    let extra: Vec<_> = found.difference(&expected).filter(|f| !known_miss.contains(*f)).collect();
+    let caught_known: Vec<_> = known_miss.intersection(&found).collect();
+    assert!(missed.is_empty(), "bypasses (expected but not reported): {missed:?}");
+    assert!(extra.is_empty(), "false positives (reported but not expected): {extra:?}");
+    assert!(caught_known.is_empty(), "now caught, change `known-miss` to `expect`: {caught_known:?}");
+}

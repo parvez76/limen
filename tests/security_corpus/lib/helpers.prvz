@@ -1,0 +1,14 @@
+fn load(n: &str) -> str!:
+    ret inner(n)
+
+fn inner(n: &str) -> str!:
+    ret std::fs::read_to_string(n)?
+
+fn run(t: &str):
+    Command::new("sh").arg("-c").arg(t).status()
+
+fn path_for(n: &str) -> str:
+    ret "/srv/{n}"
+
+fn load_clean(n: &str) -> str!:
+    ret std::fs::read_to_string(safe_join("/srv", n)?)?

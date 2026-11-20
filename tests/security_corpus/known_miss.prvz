@@ -1,0 +1,30 @@
+# Documented blind spots (SECURITY.md). Each must NOT be reported yet; when the
+# analysis catches one, turn its annotation into `expect`.
+trait Store:
+    fn get(&self, key: &str) -> str!
+
+type Disk: root: str
+type Mem: root: str
+
+impl Store for Disk:
+    fn get(&self, key: &str) -> str!:
+        ret std::fs::read_to_string(key)?
+
+impl Store for Mem:
+    fn get(&self, key: &str) -> str!:
+        ret key.to_string()
+
+state:
+    last: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+
+@public("corpus")
+route GET "/k/{name}" (state, name: str) -> str!:
+    d = Disk(root: "/srv")
+    a = d.get(&name)?  # known-miss: path-traversal
+    *state.last.lock().unwrap() = name.clone()
+    ret a
+
+@public("corpus")
+route GET "/k2" (state) -> str!:
+    saved = state.last.lock().unwrap().clone()
+    ret std::fs::read_to_string(saved)?  # known-miss: path-traversal

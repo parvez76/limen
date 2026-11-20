@@ -1,0 +1,39 @@
+# Request data disguised inside one handler: aliases, transforms, branches, loops, closures.
+@json
+type Job: name: str, tool: str, files: [str]
+
+@public("corpus")
+route POST "/flows" (body: Job) -> str!:
+    a = body.name
+    b = a.trim().to_string()
+    c = "{b}.txt"
+    std::fs::read_to_string(&c)?  # expect: path-traversal
+    x, y = (body.name.clone(), 1)
+    std::fs::remove_file(&x)?  # expect: path-traversal
+    for f in &body.files:
+        std::fs::read(f)?  # expect: path-traversal
+    texts = body.files.iter().map(|f| std::fs::read_to_string(f)).collect()  # expect: path-traversal
+    p = if body.name.is_empty(): "default".to_string() else: body.name.clone()
+    std::fs::write(&p, "x")?  # expect: path-traversal
+    if let Some(first) = body.files.first():
+        std::fs::read_to_string(first)?  # expect: path-traversal
+    m = match body.tool.as_str():
+        "a" -> "fixed"
+        other -> other
+    Command::new(m).status()  # expect: command-injection
+    Command::new("sh").arg("-c").arg("echo " + &body.name).status()  # expect: command-injection
+    Command::new("bash").args(["-c", &body.tool]).status()  # expect: command-injection
+    std::fs::OpenOptions::new().append(true).open(&body.name)?  # expect: path-traversal
+    q = "SELECT * FROM t WHERE n = '{body.name}'"
+    db.execute(&q)  # expect: sql-injection
+    ret "ok"
+
+@public("corpus")
+route GET "/req" (req) -> str!:
+    h = req.header("x-file").unwrap_or_default()
+    ret std::fs::read_to_string(h)?  # expect: path-traversal
+
+@public("corpus")
+socket "/ws" (conn):
+    msg = conn.recv().await?
+    Command::new(msg).status()  # expect: command-injection

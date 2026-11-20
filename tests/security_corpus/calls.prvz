@@ -1,0 +1,38 @@
+# Request data handed to other functions: chains, modules, methods, recursion, named args, guards.
+import lib.helpers
+
+fn level1(n: str) -> str!:
+    ret level2(&n)
+
+fn level2(n: &str) -> str!:
+    ret level3(n)
+
+fn level3(n: &str) -> str!:
+    ret std::fs::read_to_string("/srv/{n}")?
+
+fn walk(n: &str, depth: i32) -> str!:
+    if depth > 0:
+        ret walk(n, depth - 1)
+    ret std::fs::read_to_string(n)?
+
+fn who(req) -> str!:
+    u = req.header("x-user").unwrap_or_default()
+    ret std::fs::read_to_string("/etc/staff/{u}")?  # expect: path-traversal
+
+type Vault: root: str
+
+impl Vault:
+    fn open_doc(&self, name: &str) -> str!:
+        ret std::fs::read_to_string(name)?
+
+@guard(who)
+route GET "/c/{name}" (name: str) -> str!:
+    a = level1(name.clone())?  # expect: path-traversal
+    b = walk(&name, 5)?  # expect: path-traversal
+    d = helpers::load(&name)?  # expect: path-traversal
+    helpers::run(&name)  # expect: command-injection
+    v = Vault(root: "/srv")
+    e = v.open_doc(&name)?  # expect: path-traversal
+    p = helpers::path_for(&name)
+    f = std::fs::read_to_string(p)?  # expect: path-traversal
+    ret a

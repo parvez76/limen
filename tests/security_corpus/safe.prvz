@@ -1,0 +1,19 @@
+# Safe code that must not be flagged.
+import lib.helpers
+
+fn read_config(path: &str) -> str!:
+    ret std::fs::read_to_string(path)?
+
+@public("corpus")
+route GET "/s/{name}/{n}" (name: str, n: i64) -> str!:
+    a = std::fs::read_to_string(safe_join("/srv", &name)?)?
+    b = helpers::load_clean(&name)?
+    c = helpers::load("/etc/app.conf")?
+    d = read_config("/etc/app.conf")?
+    e = std::fs::read_to_string("/srv/report-{n}.txt")?
+    Command::new("git").arg("log").arg(&name).status()
+    rows = sqlx::query("SELECT * FROM t WHERE n = $1").bind(&name).fetch_all(&pool).await?
+    ret a
+
+fn main_tool(path: str) -> str!:
+    ret std::fs::read_to_string(&path)?

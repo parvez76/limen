@@ -195,7 +195,7 @@ pub fn lint(prog: &Program) -> Report {
             Item::Every(e) => l.block(&e.body, &mut Cx::default()),
             Item::Route(r) => {
                 let mut cx = Cx::default();
-                cx.taint.extend(r.params.iter().map(|(n, _)| n.clone()));
+                cx.taint.extend(r.params.iter().filter(|(_, t)| carries_text(t)).map(|(n, _)| n.clone()));
                 // `req` exposes headers, params and the raw body; a socket's `conn` yields client messages
                 if r.req {
                     cx.taint.insert("req".into());
@@ -266,6 +266,15 @@ struct Fx<'a> {
     sums: HashMap<String, Vec<Vec<Sink>>>,
 }
 
+/// Numbers, `bool` and `char` can't hold a path, a script or SQL: parameters of
+/// those types aren't taint sources (`/files/{id}` with `id: i64` is safe).
+fn carries_text(t: &Type) -> bool {
+    const SCALARS: &[&str] = &[
+        "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "bool", "char",
+    ];
+    !matches!(t, Type::Named(n, a) if a.is_empty() && SCALARS.contains(&n.as_str()))
+}
+
 fn qualify(module: &[String], name: &str) -> String {
     if module.is_empty() { name.to_string() } else { format!("{}::{name}", module.join("::")) }
 }
@@ -331,8 +340,8 @@ impl<'a> Fx<'a> {
                 let per_param = f
                     .params
                     .iter()
-                    .map(|(p, _)| {
-                        if p == "state" {
+                    .map(|(p, t)| {
+                        if p == "state" || !carries_text(t) {
                             return Vec::new();
                         }
                         let mut probe = Linter::new(self, module);
@@ -392,7 +401,7 @@ impl<'f, 'a> Linter<'f, 'a> {
     fn function(&mut self, f: &FnDef, guard: bool, allowed: &mut Vec<(usize, String)>, suppressed: &mut Vec<(Finding, String)>) {
         let mut cx = Cx::default();
         if guard {
-            cx.taint.extend(f.params.iter().filter(|(n, _)| n != "state").map(|(n, _)| n.clone()));
+            cx.taint.extend(f.params.iter().filter(|(n, t)| n != "state" && carries_text(t)).map(|(n, _)| n.clone()));
         }
         if let Some(why) = &f.allow_insecure {
             allowed.push((f.line, why.clone()));

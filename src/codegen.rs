@@ -121,8 +121,9 @@ pub fn generate_with(prog: &Program, cfg: &ServiceConfig) -> Generated {
         for l in SECRET_PRELUDE.lines() {
             g.line(l);
         }
-        g.deps.insert("zeroize".into());
-        g.deps.insert("serde".into());
+        for d in ["zeroize", "serde", "sha2", "subtle"] {
+            g.deps.insert(d.into());
+        }
     }
     let mut out = finish(&g.out);
     out.dev_deps = g.dev_deps.difference(&g.deps).cloned().collect();
@@ -3707,15 +3708,20 @@ impl Secret<String> {
     }
 }
 
-/// Constant-time: the time depends only on the candidate's length, never on where
-/// the bytes differ or on the secret's own length.
+/// Constant-time comparison. Both sides are hashed to fixed-size SHA-256
+/// digests, compared with `subtle` (no early exit, optimization barriers), and
+/// the digests are wiped. The time doesn't depend on where the values differ,
+/// and doesn't reveal the secret's length.
 fn secret_eq(secret: &[u8], candidate: &[u8]) -> bool {
-    let mut diff = secret.len() ^ candidate.len();
-    for (i, y) in candidate.iter().enumerate() {
-        let x = secret.get(i).copied().unwrap_or(0);
-        diff |= std::hint::black_box((x ^ y) as usize);
-    }
-    diff == 0
+    use sha2::Digest;
+    use subtle::ConstantTimeEq;
+    use zeroize::Zeroize;
+    let mut a: [u8; 32] = sha2::Sha256::digest(secret).into();
+    let mut b: [u8; 32] = sha2::Sha256::digest(candidate).into();
+    let same: bool = a.ct_eq(&b).into();
+    a.zeroize();
+    b.zeroize();
+    same
 }
 
 impl<T: zeroize::Zeroize> Drop for Secret<T> {

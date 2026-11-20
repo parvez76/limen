@@ -61,7 +61,7 @@ These protections are on by default. Not yet set by default: `Content-Security-P
 | Cross-site scripting | Masud HTML-escapes every interpolated value in text and attributes; unescaped output needs an explicit `raw` line | 79 | A03 | 5.3.3 |
 | Hard-coded credentials | lint rule `hardcoded-secret` | 798, 259 | A07 | 2.10.4, 6.4.1 |
 | Secrets in logs or responses | `Secret` prints `[redacted]`, has no serializer, can't be returned from a route; lint rules `secret-exposure` and `secret-type` | 532, 200, 312, 316 | A09, A04 | 7.1.1, 7.1.2, 8.3.6 |
-| Timing attacks on secrets | `Secret` comparison is constant time and doesn't reveal the length | 208 | A02 | - |
+| Timing attacks on secrets | `Secret` comparison hashes both sides (SHA-256) and compares the digests with the audited `subtle` crate: no early exit, and the secret's length isn't revealed | 208 | A02 | - |
 | Token validation | OIDC: asymmetric algorithms only, issuer, audience, expiry and token type checked; fails closed when unconfigured | 347, 287 | A07 | 3.5.3 |
 | Session security | AES-256-GCM encrypted cookies, `__Host-` prefix, `Secure`, `HttpOnly`, `SameSite=Lax`, PKCE, back-channel logout and periodic IdP re-check | 384, 613, 614, 1004 | A07 | 3.4.1, 3.4.2, 3.4.3, 3.4.4 |
 | Cross-site request forgery | state-changing session requests must come from the same origin | 352 | A01 | 4.2.2 |
@@ -70,6 +70,13 @@ These protections are on by default. Not yet set by default: `Content-Security-P
 | Clickjacking and sniffing | `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` | 1021, 693 | A05 | 14.4.4, 14.4.6, 14.4.7, 8.2.1 |
 | Vulnerable dependencies | build fails on RustSec advisories (`[security] audit = "deny"`); CycloneDX SBOM per build | 1395 | A06 | 14.2.1, 14.2.5 |
 | Memory safety | Parvez code compiles to Rust without `unsafe` blocks (the language has no `unsafe`) | 119, 787, 416 | - | - |
+
+### What `Secret` does and doesn't guarantee
+
+`Secret` keeps a value out of logs, output and JSON at compile time; that part is enforced. Its memory and timing protections are best effort, as they are in Java, .NET and every other language:
+
+- **Zeroing:** the `Secret`'s own memory is overwritten on drop with the `zeroize` crate, which uses volatile writes the compiler can't remove. Copies made from `s.expose()`, and older buffers a `String` left behind when it grew, aren't wiped. Swap, core dumps and hibernation files are outside a program's control.
+- **Constant time:** comparison hashes both sides and compares the digests with `subtle`, which adds optimization barriers. No language can guarantee that a future compiler or CPU won't introduce timing differences.
 
 ## Rules
 
@@ -84,7 +91,9 @@ The compile-time lint rules, as shown by `parvez lint --rules` and in every find
 | `secret-exposure` | `.expose()` reaching logs, output, errors, JSON or pages | 532, 200 | A09 Security Logging and Monitoring Failures | 7.1.1, 7.1.2 | 6.5 |
 | `secret-type` | a secret-named `state:` field typed `str` | 312, 316 | A04 Insecure Design | 8.3.6, 6.4.1 | 4.0 |
 
-Untrusted input comes from route parameters, `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Known limits: a method is followed only when exactly one `impl` defines that name, so calls through a trait with several implementations aren't followed; and taint doesn't flow through `state:` fields or values stored and read back later.
+Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Known limits: a method is followed only when exactly one `impl` defines that name, so calls through a trait with several implementations aren't followed; and taint doesn't flow through `state:` fields or values stored and read back later.
+
+The checks are tested against an adversarial corpus ([tests/security_corpus](tests/security_corpus)): programs that try to sneak request data, SQL and secrets past the rules through aliases, transforms, branches, loops, closures, helper chains, modules, methods and recursion, plus safe programs that must not be flagged. Every expected finding must be reported and nothing else may be; the known blind spots above are annotated there and fail the test once they start being caught, so the list stays accurate. Found a bypass or a false positive? A new corpus case is the best report.
 
 ## Code scanning (SARIF)
 

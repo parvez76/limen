@@ -1,4 +1,4 @@
-# PARVEZ v0.13.0 SPEC (AI system prompt)
+# PARVEZ v0.13.1 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -335,6 +335,7 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 | secret-exposure | 532, 200 | `s.expose()` inside `print`, `log_*`, `fail`, `assert`, `json`, `metric_inc`, an interpolated string, or a page | pass `s.expose()` only to the API that needs it: `.bind(s.expose())`, an HMAC key, a header |
 - `safe_join(base, name)?` rejects `..`, absolute paths, separators and empty names: 400 in routes, an error elsewhere.
 - Request input is followed into the functions and methods it is passed to, across modules, helper chains and recursion. The finding is on the route's call line and names the sink: "request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.prvz:6 unsanitized". Sanitize at either end with `safe_join`. A helper that only ever receives constants isn't flagged. SQL and secret checks apply everywhere.
+- Parameters typed as numbers, `bool` or `char` aren't untrusted text: `/files/{id}` with `id: i64` can go into a path.
 - A method call is followed when exactly one `impl` defines that method name. Calls through a trait with several implementations aren't followed.
 - Opt out only deliberately: `@allow_insecure("reason")` on the line before a `fn`, `route`, method or `state:`. Every build prints the reason.
 
@@ -366,9 +367,10 @@ fn admin(state, req) -> str!:
     ret "admin"
 ```
 - `print("{s}")`, `{x:?}` of a struct holding it, and panic messages show `[redacted]`. It has no `Serialize`, so it can't go into JSON or a log field, and a route returning a type that holds one is a compile error.
-- `s.matches(candidate)` compares in constant time (the time depends only on the candidate's length); `s == t` too. `s.is_empty()` checks for a configured value.
+- `s.matches(candidate)` compares in constant time: both sides are hashed to SHA-256 and the digests compared with the `subtle` crate, so the time doesn't depend on where they differ or on the secret's length. `s == t` works the same way. `s.is_empty()` checks for a configured value.
 - `s.expose()` is the only way to the value, for the API that needs it (`.bind(s.expose())`, an HMAC key, a header). The `secret-exposure` rule rejects it in output.
-- The memory is zeroed when the value is dropped. `Secret<Vec<u8>>` holds binary keys.
+- The memory is zeroed when the value is dropped (the `zeroize` crate). `Secret<Vec<u8>>` holds binary keys.
+- Limits: copies you make from `s.expose()` (a `.to_string()`, a formatted header) are ordinary values and aren't wiped, so pass `s.expose()` straight to the API that needs it. Memory freed when a value grew (a `String` that reallocated before it became a Secret) isn't wiped either; load secrets with `env_secret` or `secret(..)` so they're wrapped once. Constant time is best effort, as in every language: the compiler and CPU give no hard guarantee.
 ## Tests
 Put `test "what it checks":` blocks in any file. They compile only for `parvez test` and may use `.await` and `?`.
 ```

@@ -1,0 +1,19 @@
+# SQL assembled indirectly, plus the safe forms.
+state:
+    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(&env("DATABASE_URL", "postgres://localhost/x"))?
+
+@public("corpus")
+route GET "/q/{name}" (state, name: str) -> str!:
+    base = "SELECT * FROM users WHERE name = '"
+    q1 = base + &name + "'"
+    sqlx::query(&q1).fetch_all(&state.db).await?  # expect: sql-injection
+    q2 = "DELETE FROM t WHERE n = '" + name.as_str() + "'"
+    sqlx::query(&q2).execute(&state.db).await?  # expect: sql-injection
+    q3 = "UPDATE t SET n = '{name}'".to_string()
+    state.db.execute(q3.as_str()).await?  # expect: sql-injection
+    q4 = if name.is_empty(): "SELECT 1".to_string() else: "SELECT * FROM t WHERE n = '{name}'"
+    sqlx::query(&q4).fetch_all(&state.db).await?  # expect: sql-injection
+    sqlx::query_scalar("SELECT count(*) FROM t WHERE n = '" + &name + "'").fetch_one(&state.db).await?  # expect: sql-injection
+    ok1 = sqlx::query("SELECT * FROM t WHERE n = $1").bind(&name).fetch_all(&state.db).await?
+    ok2 = sqlx::query("SELECT * FROM t WHERE a = $1 AND b = $2").bind(&name).bind(1).fetch_all(&state.db).await?
+    ret "ok"
