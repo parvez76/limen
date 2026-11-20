@@ -7,7 +7,12 @@ target=$1
 out=$2
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-version=$(git describe --tags --exact-match 2>/dev/null || echo "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)")
+version="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+# building a tagged commit: the tag must name the same version (catches a missed bump)
+if tag=$(git describe --tags --exact-match 2>/dev/null) && [ "$tag" != "$version" ] && [ -z "$(git status --porcelain -- Cargo.toml)" ]; then
+    echo "release-build: tag $tag doesn't match Cargo.toml version $version" >&2
+    exit 1
+fi
 # fixed timestamp (the commit's) and no machine paths in the binary
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}

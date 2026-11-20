@@ -19,4 +19,5 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
+      - run: sh -n install.sh
       - run: cargo test --release --locked

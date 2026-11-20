@@ -1972,3 +1972,113 @@ fn security_header_overrides() {
     assert!(r.contains("strict-transport-security: max-age=31536000\r\n"), "{r}");
     assert!(err.contains("PARVEZ_HSTS is not a valid header value; using the default"), "{err}");
 }
+
+/// A tiny release server: `/latest` redirects to the tag, `/dl/<tag>/<file>` serves files.
+fn release_server(files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let mut parts = req.split_whitespace();
+            let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or("").to_string());
+            let head = method == "HEAD";
+            let resp: Vec<u8> = if path == "/latest" {
+                b"HTTP/1.1 302 Found\r\nLocation: /tag/v9.9.9\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+            } else if path.starts_with("/tag/") {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+            } else if let Some(body) = files.lock().unwrap().get(&path).cloned() {
+                let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                if !head {
+                    r.extend(body);
+                }
+                r
+            } else {
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+            };
+            let _ = s.write_all(&resp);
+        }
+    });
+    port
+}
+
+#[test]
+fn upgrade_verifies_before_replacing() {
+    use sha2::Digest;
+    let Some(target) = (match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-musl"),
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        _ => None,
+    }) else {
+        return;
+    };
+    let dir = scratch("upgrade017");
+    // a fake v9.9.9 release whose "binary" is a script
+    let name = format!("parvez-v9.9.9-{target}");
+    std::fs::create_dir_all(dir.join("rel").join(&name)).unwrap();
+    std::fs::write(dir.join("rel").join(&name).join("parvez"), "#!/bin/sh\necho parvez 9.9.9\n").unwrap();
+    let tgz = dir.join(format!("{name}.tar.gz"));
+    assert!(Command::new("tar").arg("-czf").arg(&tgz).arg("-C").arg(dir.join("rel")).arg(&name).status().unwrap().success());
+    let archive = std::fs::read(&tgz).unwrap();
+    let good = format!("{:x}  {name}.tar.gz\n", sha2::Sha256::digest(&archive));
+    let bad = format!("{}  {name}.tar.gz\n", "0".repeat(64));
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    files.lock().unwrap().insert(format!("/dl/v9.9.9/{name}.tar.gz"), archive);
+    files.lock().unwrap().insert("/dl/v9.9.9/SHA256SUMS".to_string(), bad.into_bytes());
+    let port = release_server(files.clone());
+    // the installed copy, and a PATH with only curl and tar (no `gh`: the fake has no attestation)
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let exe = dir.join("bin/parvez");
+    std::fs::copy(env!("CARGO_BIN_EXE_parvez"), &exe).unwrap();
+    std::fs::create_dir_all(dir.join("tools")).unwrap();
+    for tool in ["curl", "tar", "gzip"] {
+        let found = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|d| d.join(tool)).find(|p| p.is_file()).unwrap();
+        let _ = std::os::unix::fs::symlink(found, dir.join("tools").join(tool));
+    }
+    let run = |args: &[&str]| {
+        Command::new(&exe)
+            .args(args)
+            .env("PATH", dir.join("tools"))
+            .env("PARVEZ_DOWNLOAD_BASE", format!("http://127.0.0.1:{port}/dl"))
+            .env("PARVEZ_LATEST_URL", format!("http://127.0.0.1:{port}/latest"))
+            .output()
+            .unwrap()
+    };
+    let out = run(&["upgrade", "--check"]);
+    assert!(text(&out.stdout).contains("-> v9.9.9 is available"), "{}{}", text(&out.stdout), text(&out.stderr));
+    // a tampered download: refused, binary untouched
+    let before = std::fs::read(&exe).unwrap();
+    let out = run(&["upgrade"]);
+    assert!(!out.status.success() && text(&out.stderr).contains("checksum mismatch"), "{}", text(&out.stderr));
+    assert!(std::fs::read(&exe).unwrap() == before, "binary changed after a failed check");
+    // the real thing
+    files.lock().unwrap().insert("/dl/v9.9.9/SHA256SUMS".to_string(), good.into_bytes());
+    let out = run(&["upgrade"]);
+    assert!(out.status.success() && text(&out.stderr).contains("checksum OK"), "{}", text(&out.stderr));
+    let v = Command::new(&exe).arg("--version").output().unwrap();
+    assert_eq!(text(&v.stdout).trim(), "parvez 9.9.9");
+    // bad version strings never reach the network
+    let out = Command::new(env!("CARGO_BIN_EXE_parvez")).args(["upgrade", "--version", "v1.0.0/../../x"]).output().unwrap();
+    assert!(text(&out.stderr).contains("isn't a release version"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn doctor_reports_the_toolchain() {
+    let out = parvez().arg("doctor").output().unwrap();
+    let so = text(&out.stdout);
+    assert!(so.contains("ok    rustc ") && so.contains("ok    cargo ") && so.contains("ok    git version"), "{so}");
+    assert!(so.contains("ok    C linker") || so.contains("ok    Xcode command line tools"), "{so}");
+    // without Rust on PATH it fails with the fix
+    let empty = scratch("doctor017");
+    let out = parvez().arg("doctor").env("PATH", &empty).output().unwrap();
+    let so = text(&out.stdout);
+    assert!(!out.status.success() && so.contains("FAIL  Rust isn't installed") && so.contains("sh.rustup.rs"), "{so}");
+    if cfg!(target_os = "linux") {
+        assert!(so.contains("FAIL  no C linker"), "{so}");
+    }
+}

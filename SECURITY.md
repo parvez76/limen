@@ -24,14 +24,16 @@ Please give us a chance to ship the fix before disclosing. If a deadline matters
 
 ## Supported versions
 
-Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrade by installing the new release (see [Verifying a release](#verifying-a-release)) or with `git pull && cargo install --path . --locked`, then rebuild your services, because fixes to generated code and runtime only reach a service when it's rebuilt.
+Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrade with `parvez upgrade`, which verifies the release before replacing the binary, or with `cargo install` if you built from source, then rebuild your services, because fixes to generated code and runtime only reach a service when it's rebuilt.
 
 | Version | Security fixes |
 |---|---|
-| 0.16.x | yes |
-| < 0.16 | no |
+| 0.17.x | yes |
+| < 0.17 | no |
 
 ## Verifying a release
+
+The installer (`install.sh`, served at https://parvez76.github.io/project-parvez/install.sh) and `parvez upgrade` do the checks below automatically: the archive must match `SHA256SUMS`, and when the GitHub CLI is installed its build attestation must verify, or nothing is installed. To check a download by hand:
 
 Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a `v*` tag is pushed. The tests must pass first. Each archive then gets a GitHub build attestation: a keyless Sigstore signature tying the file to the exact commit and workflow run that produced it. The release also lists `SHA256SUMS`.
 
@@ -39,13 +41,13 @@ Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.git
 # 1. checksum
 sha256sum -c SHA256SUMS --ignore-missing
 # 2. provenance: built from this repository by the release workflow
-gh attestation verify parvez-v0.16.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/project-parvez
+gh attestation verify parvez-v0.17.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/project-parvez
 ```
 
 Builds are reproducible: the workflow rebuilds the Linux binary from scratch in a different directory and refuses to publish if a single byte differs. You can check a release yourself with the same Rust version:
 
 ```bash
-git clone https://github.com/parvez76/project-parvez && cd project-parvez && git checkout v0.16.0
+git clone https://github.com/parvez76/project-parvez && cd project-parvez && git checkout v0.17.0
 .github/release-build.sh x86_64-unknown-linux-musl /tmp/rebuild   # prints the archive's SHA-256
 grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 ```
@@ -53,10 +55,10 @@ grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 Release tags from v0.16.0 on are signed with the project's SSH signing key, listed in [`.github/allowed_signers`](.github/allowed_signers) (fingerprint `SHA256:FRGXW2DjW+ITeT31kbI1ZZTrpXsglQBuWgcIS4/q4JA`). GitHub shows them as Verified; to check locally:
 
 ```bash
-git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.16.0
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.17.0
 ```
 
-Installing from source (`cargo install --git https://github.com/parvez76/project-parvez --tag v0.16.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
+Installing from source (`cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
 
@@ -141,7 +143,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.16.0 --locked
+      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

@@ -15,6 +15,7 @@ mod scaffold;
 mod parser;
 mod sarif;
 mod security;
+mod selfmgmt;
 mod typescript;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -63,6 +64,20 @@ enum Cmd {
         #[arg(long)]
         rules: bool,
     },
+    /// Update parvez to the newest release (or --version vX.Y.Z), verified against
+    /// the release's SHA256SUMS and, with the `gh` CLI, its build attestation.
+    Upgrade {
+        #[arg(long)]
+        version: Option<String>,
+        /// only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// reinstall the same version, or replace a cargo-installed binary
+        #[arg(long)]
+        force: bool,
+    },
+    /// Check the setup: Rust toolchain, git, advisory database, targets, PATH.
+    Doctor,
     /// Create a new project: parvez.toml, main.prvz with a route and a test, ui/, .gitignore.
     New { name: String },
     /// Format .prvz and .msd files in place (a directory is searched recursively).
@@ -145,6 +160,8 @@ fn real_main() -> Result<()> {
         }
         Cmd::New { name } => scaffold::new_project(&std::env::current_dir()?, &name)?,
         Cmd::Routes { file, json } => print_routes(&file, json)?,
+        Cmd::Upgrade { version, check, force } => selfmgmt::upgrade(version, check, force)?,
+        Cmd::Doctor => selfmgmt::doctor()?,
         Cmd::Lint { file, sarif, output, rules } => {
             if rules {
                 for r in security::RULES {
@@ -426,6 +443,10 @@ fn compile(file: &Path, mode: Mode) -> Result<Option<PathBuf>> {
                 eprintln!("{e}");
             }
             let path = file.display();
+            // a setup problem, not a program error: say how to fix it
+            if errors.iter().any(|e| e.contains("linker `cc` not found") || e.contains("linker `cc` failed") && e.contains("No such file")) {
+                bail!("{path}: Rust can't find a C linker (`cc`) on this machine; run `parvez doctor` for the command that installs it");
+            }
             bail!("{path}: {} error(s). Generated Rust: `parvez show --map {path}`", errors.len())
         }
     }

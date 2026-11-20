@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parvez: secure services, Python-dense syntax, Rust binaries</title>
+<meta name="description" content="Parvez is a token-dense language that compiles to Rust, with security checks built into the compiler.">
+<style>
+  :root { color-scheme: light dark; --fg: #1d1f23; --bg: #fbfbfa; --muted: #5d6470; --code: #f0f1f3; --accent: #1a7f37; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e6e8eb; --bg: #15171a; --muted: #9aa3ad; --code: #22262b; --accent: #4ac26b; } }
+  body { margin: 0; font: 17px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); }
+  main { max-width: 46rem; margin: 0 auto; padding: 3.5rem 1.25rem 4rem; }
+  h1 { font-size: 2.4rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
+  .tag { color: var(--muted); margin: 0 0 2.25rem; font-size: 1.15rem; }
+  h2 { font-size: 1.15rem; margin: 2.25rem 0 .6rem; }
+  pre { background: var(--code); padding: .9rem 1rem; border-radius: 8px; overflow-x: auto; font-size: .92rem; margin: .4rem 0; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  ul { padding-left: 1.2rem; } li { margin: .3rem 0; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); font-size: .92rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Parvez</h1>
+  <p class="tag">Python-dense syntax. Rust-grade binaries. Security the compiler enforces.</p>
+
+  <h2>Install</h2>
+  <p>Linux (x86_64, ARM64) and macOS (Apple silicon):</p>
+  <pre><code>curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh</code></pre>
+  <p class="muted">The installer checks the download against the release's SHA256SUMS (and its signed build attestation when the <code>gh</code> CLI is installed), puts <code>parvez</code> in <code>~/.parvez/bin</code>, and offers to set up the Rust toolchain if it's missing. Read it first: <a href="install.sh">install.sh</a>.</p>
+
+  <h2>Start</h2>
+  <pre><code>parvez doctor              # check the setup
+parvez new hello && cd hello
+parvez test main.prvz      # tests
+parvez run main.prvz       # http://localhost:8080</code></pre>
+  <p>Later, <code>parvez upgrade</code> moves to the newest release, verified the same way.</p>
+
+  <h2>Secure by default</h2>
+  <ul>
+    <li>Every route and page declares <code>@guard</code> or <code>@public</code>, or it doesn't compile.</li>
+    <li>SQL, shell and path injection, followed across functions, modules, traits and stored state, are compile errors with the fix.</li>
+    <li><code>Secret</code> values can't reach logs, output or JSON.</li>
+    <li>Strict Content-Security-Policy, HSTS, safe errors, limits and timeouts in every service.</li>
+    <li>Signed, reproducible releases.</li>
+  </ul>
+
+  <p class="muted"><a href="https://github.com/parvez76/project-parvez">Source on GitHub</a> · <a href="https://github.com/parvez76/project-parvez/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/project-parvez/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
+</main>
+</body>
+</html>
