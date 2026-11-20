@@ -1,0 +1,50 @@
+# Request data parked in `state:` and used later, elsewhere.
+state:
+    last: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    names: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new())
+    queued: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    copied: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    greeting: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+
+fn remember(state, n: &str):
+    *state.queued.lock().unwrap() = n.to_string()
+
+@public("corpus")
+route POST "/s/{name}" (state, name: str) -> str!:
+    *state.last.lock().unwrap() = name.clone()
+    g = state.names.lock().unwrap()
+    g.push(name.clone())
+    remember(state, &name)
+    *state.greeting.lock().unwrap() = "hello".to_string()
+    ret "ok"
+
+@public("corpus")
+route GET "/s1" (state) -> str!:
+    saved = state.last.lock().unwrap().clone()
+    ret std::fs::read_to_string(saved)?  # expect: path-traversal
+
+@public("corpus")
+route GET "/s2" (state) -> str!:
+    for n in state.names.lock().unwrap().iter():
+        std::fs::remove_file(n)?  # expect: path-traversal
+    ret "ok"
+
+@public("corpus")
+route GET "/s3" (state) -> str!:
+    v = state.last.lock().unwrap().clone()
+    *state.copied.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route GET "/s4" (state) -> str!:
+    c = state.copied.lock().unwrap().clone()
+    ret std::fs::read_to_string(c)?  # expect: path-traversal
+
+@public("corpus")
+route GET "/s5" (state) -> str!:
+    hi = state.greeting.lock().unwrap().clone()
+    ret std::fs::read_to_string("/srv/{hi}.txt")?
+
+every 1m (state):
+    job = state.queued.lock().unwrap().clone()
+    Command::new("sh").arg("-c").arg(job).status()  # expect: command-injection

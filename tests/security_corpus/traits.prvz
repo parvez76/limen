@@ -1,0 +1,37 @@
+# Calls through traits: dyn values, generics, state-held trait objects, and exact types.
+trait Store:
+    fn get(&self, key: &str) -> str!
+
+type Disk: root: str
+type Mem: root: str
+
+impl Store for Disk:
+    fn get(&self, key: &str) -> str!:
+        ret std::fs::read_to_string(key)?
+
+impl Store for Mem:
+    fn get(&self, key: &str) -> str!:
+        ret key.to_string()
+
+fn fetch<S: Store>(s: &S, key: &str) -> str!:
+    ret s.get(key)
+
+fn fetch_dyn(s: &dyn Store, key: &str) -> str!:
+    ret s.get(key)
+
+state:
+    store: std::sync::Arc<dyn Store> = std::sync::Arc::new(Disk(root: "/srv"))
+    mem: Mem = Mem(root: "")
+
+@public("corpus")
+route GET "/t/{name}" (state, name: str) -> str!:
+    d = Disk(root: "/srv")
+    a = d.get(&name)?  # expect: path-traversal
+    b = fetch(&d, &name)?  # expect: path-traversal
+    c = fetch_dyn(&d, &name)?  # expect: path-traversal
+    e = state.store.get(&name)?  # expect: path-traversal
+    m = Mem(root: "")
+    f = m.get(&name)?
+    g = state.mem.get(&name)?
+    h = d.get("/etc/app.conf")?
+    ret a

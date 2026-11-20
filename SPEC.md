@@ -1,4 +1,4 @@
-# PARVEZ v0.14.0 SPEC (AI system prompt)
+# PARVEZ v0.15.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -336,7 +336,8 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 - `safe_join(base, name)?` rejects `..`, absolute paths, separators and empty names: 400 in routes, an error elsewhere.
 - Request input is followed into the functions and methods it is passed to, across modules, helper chains and recursion. The finding is on the route's call line and names the sink: "request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.prvz:6 unsanitized". Sanitize at either end with `safe_join`. A helper that only ever receives constants isn't flagged. SQL and secret checks apply everywhere.
 - Parameters typed as numbers, `bool` or `char` aren't untrusted text: `/files/{id}` with `id: i64` can go into a path.
-- A method call is followed when exactly one `impl` defines that method name. Calls through a trait with several implementations aren't followed.
+- Method calls follow the receiver's type: a known type (`Disk(..)`, a typed parameter or `state:` field, `Disk::new(..)`) goes to its `impl`; a `dyn Trait`, `Arc<dyn Trait>` or generic `S: Trait` goes to every implementation. When the type isn't known locally, the call is followed only if exactly one `impl` defines that method name.
+- Request data stored in a `state:` field (`*state.f.lock().unwrap() = x`, `state.f.lock().unwrap().push(x)`, a lock guard, or a helper that stores its argument) taints every later read of that field, in any route, `every` worker or function. The finding names where it was stored: "request input stored in `state.last` (at app.prvz:14) reaches ...".
 - Opt out only deliberately: `@allow_insecure("reason")` on the line before a `fn`, `route`, method or `state:`. Every build prints the reason.
 
 Services are hardened automatically (nothing to write):

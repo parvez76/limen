@@ -28,8 +28,8 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 | Version | Security fixes |
 |---|---|
-| 0.14.x | yes |
-| < 0.14 | no |
+| 0.15.x | yes |
+| < 0.15 | no |
 
 ## Scope
 
@@ -93,7 +93,7 @@ The compile-time lint rules, as shown by `parvez lint --rules` and in every find
 | `secret-exposure` | `.expose()` reaching logs, output, errors, JSON or pages | 532, 200 | A09 Security Logging and Monitoring Failures | 7.1.1, 7.1.2 | 6.5 |
 | `secret-type` | a secret-named `state:` field typed `str` | 312, 316 | A04 Insecure Design | 8.3.6, 6.4.1 | 4.0 |
 
-Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Known limits: a method is followed only when exactly one `impl` defines that name, so calls through a trait with several implementations aren't followed; and taint doesn't flow through `state:` fields or values stored and read back later.
+Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Method calls are resolved by the receiver's type, so calls through a `dyn Trait`, `Arc<dyn Trait>` or a generic bounded by a trait follow every implementation. Request data stored in a `state:` field taints every later read of it, in any route, worker or function, and the finding says where it was stored. Known limits: data kept in an ordinary object's field by a method (`job.set_path(name)`, then `job.path`) isn't followed; a method call on a value whose type isn't known locally (an element of an untyped list) is followed only when exactly one `impl` defines that name; and second-order flows (stored in a database by one request, read back by another) aren't tracked.
 
 The checks are tested against an adversarial corpus ([tests/security_corpus](tests/security_corpus)): programs that try to sneak request data, SQL and secrets past the rules through aliases, transforms, branches, loops, closures, helper chains, modules, methods and recursion, plus safe programs that must not be flagged. Every expected finding must be reported and nothing else may be; the known blind spots above are annotated there and fail the test once they start being caught, so the list stays accurate. Found a bypass or a false positive? A new corpus case is the best report.
 
@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.14.0 --locked
+      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.15.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

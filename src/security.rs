@@ -176,26 +176,73 @@ pub fn lint(prog: &Program) -> Report {
             guards.extend(r.guards.iter().filter_map(|g| fx.resolve(module, g)));
         }
     }
-    let mut l = Linter::new(&fx, &[]);
+    // `state:` fields that end up holding request data, to a fixed point
+    // (a stored value copied into another field taints that one too)
+    let mut run = analyze(&fx, &items, &guards);
+    for _ in 0..32 {
+        let mut stored = (*fx.stored).clone();
+        for (field, at) in &run.writes {
+            stored.entry(field.clone()).or_insert_with(|| at.clone());
+        }
+        if stored.len() == fx.stored.len() {
+            break;
+        }
+        fx.stored = std::rc::Rc::new(stored);
+        run = analyze(&fx, &items, &guards);
+    }
+    // One finding per (line, rule): e.g. `api_token = "ghp_..."` trips both the
+    // secret-name and key-shape checks. Name checks run first, so the kept
+    // message names the binding to fix. The sort is stable.
+    let mut findings = run.findings;
+    findings.sort_by_key(|f| f.line);
+    let mut seen = HashSet::new();
+    findings.retain(|f| seen.insert((f.line, f.rule)));
+    let mut suppressed = run.suppressed;
+    suppressed.sort_by_key(|(f, _)| f.line);
+    Report { findings, allowed: run.allowed, suppressed }
+}
+
+struct Run {
+    findings: Vec<Finding>,
+    allowed: Vec<(usize, String)>,
+    suppressed: Vec<(Finding, String)>,
+    /// (state field, "file:line") where request data was stored
+    writes: Vec<(String, String)>,
+}
+
+/// One pass over every item with the current knowledge of tainted state fields.
+fn analyze(fx: &Fx, items: &[(&[String], &Item)], guards: &HashSet<String>) -> Run {
+    let mut l = Linter::new(fx, &[]);
     let mut allowed = Vec::new();
     let mut suppressed = Vec::new();
-    for (module, item) in &items {
+    let mut waived_writes = Vec::new();
+    for (module, item) in items {
         l.module = module.to_vec();
         match item {
             Item::Const { name, value, line, .. } => {
                 l.secret_binding(name, value, *line);
-                l.expr(value, *line, &Cx::default());
+                l.expr(value, *line, &fx.cx());
             }
             Item::Fn(f) => {
-                let guard = fx.resolve(module, &f.name).is_some_and(|k| guards.contains(&k));
-                l.function(f, guard, &mut allowed, &mut suppressed)
+                let key = qualify(module, &f.name);
+                let guard = guards.contains(&key);
+                l.function(&key, f, guard, &mut allowed, &mut suppressed, &mut waived_writes)
             }
-            Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, false, &mut allowed, &mut suppressed)),
-            Item::Trait(t) => t.methods.iter().for_each(|m| l.function(m, false, &mut allowed, &mut suppressed)),
-            Item::Every(e) => l.block(&e.body, &mut Cx::default()),
+            Item::Impl(i) => i.methods.iter().for_each(|m| {
+                l.function(&qualify(module, &format!("{}::{}", i.ty, m.name)), m, false, &mut allowed, &mut suppressed, &mut waived_writes)
+            }),
+            Item::Trait(t) => t.methods.iter().for_each(|m| {
+                l.function(&qualify(module, &format!("{}::{}", t.name, m.name)), m, false, &mut allowed, &mut suppressed, &mut waived_writes)
+            }),
+            Item::Every(e) => l.block(&e.body, &mut fx.cx()),
             Item::Route(r) => {
-                let mut cx = Cx::default();
+                let mut cx = fx.cx();
                 cx.taint.extend(r.params.iter().filter(|(_, t)| carries_text(t)).map(|(n, _)| n.clone()));
+                for (n, t) in &r.params {
+                    if let Some(d) = fx.desc(t, &HashMap::new()) {
+                        cx.types.insert(n.clone(), d);
+                    }
+                }
                 // `req` exposes headers, params and the raw body; a socket's `conn` yields client messages
                 if r.req {
                     cx.taint.insert("req".into());
@@ -205,17 +252,18 @@ pub fn lint(prog: &Program) -> Report {
                 }
                 if let Some(why) = &r.allow_insecure {
                     allowed.push((r.line, why.clone()));
-                    let mut s = Linter::new(&fx, module);
+                    let mut s = Linter::new(fx, module);
                     s.block(&r.body, &mut cx);
                     suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
+                    waived_writes.extend(s.writes);
                     continue;
                 }
                 l.block(&r.body, &mut cx);
             }
             Item::State(st) => {
-                let mut s = Linter::new(&fx, module);
+                let mut s = Linter::new(fx, module);
                 let l = if st.allow_insecure.is_some() { &mut s } else { &mut l };
-                let mut cx = Cx::default();
+                let mut cx = fx.cx();
                 for (name, ty, value, line) in &st.fields {
                     let lower = name.to_lowercase();
                     if matches!(ty, Type::Named(t, a) if t == "str" && a.is_empty()) && SECRET_NAMES.iter().any(|n| lower.contains(n)) {
@@ -232,15 +280,10 @@ pub fn lint(prog: &Program) -> Report {
             _ => {}
         }
     }
-    // One finding per (line, rule): e.g. `api_token = "ghp_..."` trips both the
-    // secret-name and key-shape checks. Name checks run first, so the kept
-    // message names the binding to fix. The sort is stable.
-    let mut findings = l.findings;
-    findings.sort_by_key(|f| f.line);
-    let mut seen = HashSet::new();
-    findings.retain(|f| seen.insert((f.line, f.rule)));
-    suppressed.sort_by_key(|(f, _)| f.line);
-    Report { findings, allowed, suppressed }
+    // data stored by waived code is still request data when other code reads it
+    let mut writes = l.writes;
+    writes.extend(waived_writes);
+    Run { findings: l.findings, allowed, suppressed, writes }
 }
 
 /// Where untrusted data entering one parameter of a function ends up.
@@ -258,13 +301,48 @@ struct Sink {
 /// helper chains and recursion are followed.
 struct Fx<'a> {
     files: Vec<String>,
-    /// `f`, `store::f`, `Type::m`, `store::Type::m` -> (module, fn)
-    fns: HashMap<String, (&'a [String], &'a FnDef)>,
-    /// method name -> keys of methods with a receiver (resolved only when unique)
+    /// `f`, `store::f`, `Type::m`, `store::Type::m` -> the function and where it lives
+    fns: HashMap<String, FnInfo<'a>>,
+    /// method name -> keys of methods with a receiver (used when the receiver's type is unknown and the name is unique)
     methods: HashMap<String, Vec<String>>,
-    /// key -> sinks per parameter (same order as `FnDef::params`)
-    sums: HashMap<String, Vec<Vec<Sink>>>,
+    /// key -> per parameter (same order as `FnDef::params`): sinks reached and state fields written
+    sums: HashMap<String, Vec<ParamSum>>,
+    /// struct / enum names
+    user_types: HashSet<String>,
+    /// trait -> implementing types; type -> implemented traits
+    trait_impls: HashMap<String, Vec<String>>,
+    type_traits: HashMap<String, Vec<String>>,
+    /// `state:` field -> its type (a user type or `dyn Trait`), for method dispatch
+    state_types: HashMap<String, String>,
+    /// `state:` fields holding request data -> where it was stored ("file:line")
+    stored: std::rc::Rc<HashMap<String, String>>,
 }
+
+struct FnInfo<'a> {
+    module: &'a [String],
+    /// the `impl` type (or trait) a method belongs to
+    owner: Option<&'a str>,
+    /// generic parameter -> the user trait it's bounded by (`S: Store`)
+    bounds: HashMap<String, String>,
+    f: &'a FnDef,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ParamSum {
+    sinks: Vec<Sink>,
+    /// (state field, "file:line"): the parameter's value is stored there
+    writes: Vec<(String, String)>,
+}
+
+/// Wrappers a method call sees through (`Arc<dyn Store>`, `Mutex<Cache>`).
+const WRAPPERS: &[&str] = &["Box", "Arc", "Rc", "Mutex", "RwLock", "RefCell", "Cell"];
+/// Methods that store their argument into the receiver.
+const WRITE_METHODS: &[&str] = &[
+    "insert", "push", "push_back", "push_front", "extend", "append", "set", "replace", "store", "send", "try_send",
+    "put", "or_insert", "or_insert_with", "entry", "insert_str", "push_str",
+];
+/// A `let` holding one of these (after unwrap/await) is a handle into the state field.
+const GUARD_METHODS: &[&str] = &["lock", "write", "borrow_mut", "get_mut", "entry", "as_mut", "try_lock", "blocking_lock"];
 
 /// Numbers, `bool` and `char` can't hold a path, a script or SQL: parameters of
 /// those types aren't taint sources (`/files/{id}` with `id: i64` is safe).
@@ -281,9 +359,48 @@ fn qualify(module: &[String], name: &str) -> String {
 
 impl<'a> Fx<'a> {
     fn new(prog: &Program, items: &[(&'a [String], &'a Item)]) -> Fx<'a> {
-        let mut fx = Fx { files: prog.files.iter().map(|f| f.0.clone()).collect(), fns: HashMap::new(), methods: HashMap::new(), sums: HashMap::new() };
+        let mut fx = Fx {
+            files: prog.files.iter().map(|f| f.0.clone()).collect(),
+            fns: HashMap::new(),
+            methods: HashMap::new(),
+            sums: HashMap::new(),
+            user_types: HashSet::new(),
+            trait_impls: HashMap::new(),
+            type_traits: HashMap::new(),
+            state_types: HashMap::new(),
+            stored: Default::default(),
+        };
+        let mut traits: HashSet<String> = HashSet::new();
+        for (_, item) in items {
+            match item {
+                Item::Struct(st) => {
+                    fx.user_types.insert(st.name.clone());
+                }
+                Item::Enum(e) => {
+                    fx.user_types.insert(e.name.clone());
+                }
+                Item::Trait(t) => {
+                    traits.insert(t.name.clone());
+                }
+                Item::Impl(i) => {
+                    if let Some(Type::Named(t, _)) = &i.trait_ {
+                        let t = last_segment(t).to_string();
+                        fx.trait_impls.entry(t.clone()).or_default().push(i.ty.clone());
+                        fx.type_traits.entry(i.ty.clone()).or_default().push(t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let bounds_of = |gs: &[Generic], out: &mut HashMap<String, String>| {
+            for g in gs {
+                if let Some(Type::Named(b, _)) = g.bounds.iter().find(|b| matches!(b, Type::Named(n, _) if traits.contains(last_segment(n)))) {
+                    out.insert(g.name.clone(), last_segment(b).to_string());
+                }
+            }
+        };
         for (module, item) in items {
-            let mut add = |owner: Option<&str>, f: &'a FnDef| {
+            let mut add = |owner: Option<&'a str>, extra: &[Generic], f: &'a FnDef| {
                 if !f.has_body && f.body.is_empty() {
                     return;
                 }
@@ -292,16 +409,55 @@ impl<'a> Fx<'a> {
                 if f.receiver.is_some() {
                     fx.methods.entry(f.name.clone()).or_default().push(key.clone());
                 }
-                fx.fns.insert(key, (*module, f));
+                let mut bounds = HashMap::new();
+                bounds_of(extra, &mut bounds);
+                bounds_of(&f.generics, &mut bounds);
+                fx.fns.insert(key, FnInfo { module, owner, bounds, f });
             };
             match item {
-                Item::Fn(f) => add(None, f),
-                Item::Impl(i) => i.methods.iter().for_each(|m| add(Some(&i.ty), m)),
-                Item::Trait(t) => t.methods.iter().for_each(|m| add(Some(&t.name), m)),
+                Item::Fn(f) => add(None, &[], f),
+                Item::Impl(i) => i.methods.iter().for_each(|m| add(Some(&i.ty), i.generics.as_deref().unwrap_or(&[]), m)),
+                Item::Trait(t) => t.methods.iter().for_each(|m| add(Some(&t.name), &t.generics, m)),
                 _ => {}
             }
         }
+        for (_, item) in items {
+            if let Item::State(st) = item {
+                for (name, ty, _, _) in &st.fields {
+                    if let Some(d) = fx.desc(ty, &HashMap::new()) {
+                        fx.state_types.insert(name.clone(), d);
+                    }
+                }
+            }
+        }
         fx
+    }
+
+    /// A fresh context that knows which state fields hold request data.
+    fn cx(&self) -> Cx {
+        Cx { stored: self.stored.clone(), ..Cx::default() }
+    }
+
+    /// The type a method call on a value of type `t` dispatches on: a user type
+    /// name, or `dyn Trait` (also for a generic bounded by a user trait).
+    fn desc(&self, t: &Type, bounds: &HashMap<String, String>) -> Option<String> {
+        match t {
+            Type::Ref(x, _) => self.desc(x, bounds),
+            Type::Named(n, args) => {
+                let base = last_segment(n);
+                if WRAPPERS.contains(&base) && args.len() == 1 {
+                    return self.desc(&args[0], bounds);
+                }
+                if let Some(tr) = n.strip_prefix("dyn ") {
+                    return Some(format!("dyn {}", last_segment(tr)));
+                }
+                if let Some(tr) = bounds.get(n) {
+                    return Some(format!("dyn {tr}"));
+                }
+                self.user_types.contains(base).then(|| base.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// `name` as written in `module`: its own items first, then the main file's,
@@ -334,27 +490,35 @@ impl<'a> Fx<'a> {
         };
         // monotone: sinks only get added, so this converges; the cap bounds pathological chains
         for _ in 0..32 {
-            let mut next: HashMap<String, Vec<Vec<Sink>>> = HashMap::new();
+            let mut next: HashMap<String, Vec<ParamSum>> = HashMap::new();
             for key in &keys {
-                let (module, f) = self.fns[key];
-                let per_param = f
+                let info = &self.fns[key];
+                let per_param = info
+                    .f
                     .params
                     .iter()
                     .map(|(p, t)| {
                         if p == "state" || !carries_text(t) {
-                            return Vec::new();
+                            return ParamSum::default();
                         }
-                        let mut probe = Linter::new(self, module);
+                        let mut probe = Linter::new(self, info.module);
+                        // probes ignore stored state: a sink fed by state isn't this parameter's
                         let mut cx = Cx::default();
+                        probe.enter(info, &mut cx);
                         cx.taint.insert(p.clone());
-                        probe.block(&f.body, &mut cx);
-                        let mut sinks: Vec<Sink> = Vec::new();
+                        probe.block(&info.f.body, &mut cx);
+                        let mut sum = ParamSum::default();
                         for s in probe.sinks {
-                            if !sinks.contains(&s) {
-                                sinks.push(s);
+                            if !sum.sinks.contains(&s) {
+                                sum.sinks.push(s);
                             }
                         }
-                        sinks
+                        for w in probe.writes {
+                            if !sum.writes.iter().any(|x| x.0 == w.0) {
+                                sum.writes.push(w);
+                            }
+                        }
+                        sum
                     })
                     .collect();
                 next.insert(key.clone(), per_param);
@@ -378,12 +542,31 @@ struct Cx {
     taint: HashSet<String>,
     /// names holding strings built by interpolation / concatenation
     dynamic: HashSet<String>,
+    /// name -> its type, for method dispatch (a user type or `dyn Trait`)
+    types: HashMap<String, String>,
+    /// name -> the state field it's a handle into (`g = state.cache.lock().unwrap()`)
+    aliases: HashMap<String, String>,
+    /// name -> the stored state field its taint came from (for messages)
+    via: HashMap<String, String>,
+    /// state fields holding request data -> where it was stored
+    stored: std::rc::Rc<HashMap<String, String>>,
+}
+
+impl Cx {
+    /// The same context minus everything that's tainted only because it was read from state.
+    fn without_stored(&self) -> Cx {
+        let mut cx = Cx { stored: Default::default(), aliases: HashMap::new(), via: HashMap::new(), ..self.clone() };
+        cx.taint.retain(|n| !self.via.contains_key(n));
+        cx
+    }
 }
 
 struct Linter<'f, 'a> {
     findings: Vec<Finding>,
     /// taint-driven sinks hit (for function summaries)
     sinks: Vec<Sink>,
+    /// request data stored into state fields: (field, "file:line")
+    writes: Vec<(String, String)>,
     fx: &'f Fx<'a>,
     module: Vec<String>,
 }
@@ -394,12 +577,36 @@ fn last_segment(name: &str) -> &str {
 
 impl<'f, 'a> Linter<'f, 'a> {
     fn new(fx: &'f Fx<'a>, module: &[String]) -> Self {
-        Linter { findings: Vec::new(), sinks: Vec::new(), fx, module: module.to_vec() }
+        Linter { findings: Vec::new(), sinks: Vec::new(), writes: Vec::new(), fx, module: module.to_vec() }
+    }
+
+    /// Parameter and `self` types for method dispatch inside a function.
+    fn enter(&self, info: &FnInfo, cx: &mut Cx) {
+        if let Some(owner) = info.owner {
+            let own = if self.fx.trait_impls.contains_key(owner) { format!("dyn {owner}") } else { owner.to_string() };
+            cx.types.insert("self".into(), own);
+        }
+        for (n, t) in &info.f.params {
+            if let Some(d) = self.fx.desc(t, &info.bounds) {
+                cx.types.insert(n.clone(), d);
+            }
+        }
     }
 
     /// `guard`: the fn is a route guard, so its `req` and path params carry request data.
-    fn function(&mut self, f: &FnDef, guard: bool, allowed: &mut Vec<(usize, String)>, suppressed: &mut Vec<(Finding, String)>) {
-        let mut cx = Cx::default();
+    fn function(
+        &mut self,
+        key: &str,
+        f: &FnDef,
+        guard: bool,
+        allowed: &mut Vec<(usize, String)>,
+        suppressed: &mut Vec<(Finding, String)>,
+        waived_writes: &mut Vec<(String, String)>,
+    ) {
+        let mut cx = self.fx.cx();
+        if let Some(info) = self.fx.fns.get(key) {
+            self.enter(info, &mut cx);
+        }
         if guard {
             cx.taint.extend(f.params.iter().filter(|(n, t)| n != "state" && carries_text(t)).map(|(n, _)| n.clone()));
         }
@@ -408,9 +615,81 @@ impl<'f, 'a> Linter<'f, 'a> {
             let mut s = Linter::new(self.fx, &self.module);
             s.block(&f.body, &mut cx);
             suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
+            waived_writes.extend(s.writes);
             return;
         }
         self.block(&f.body, &mut cx);
+    }
+
+    /// "request input", or where the stored request data came from.
+    fn source(&self, args: &[&Expr], cx: &Cx) -> String {
+        let direct = cx.without_stored();
+        if args.iter().any(|a| tainted(a, &direct)) {
+            return "request input".into();
+        }
+        match args.iter().find_map(|a| stored_from(a, cx)) {
+            Some(f) => format!("request input stored in `state.{f}` (at {})", cx.stored.get(&f).map(String::as_str).unwrap_or("?")),
+            None => "request input".into(),
+        }
+    }
+
+    /// Where a method call can land: the `impl` of the receiver's type, every
+    /// implementation of a `dyn Trait` / bounded generic, or (type unknown) the
+    /// one user method with that name.
+    fn method_targets(&self, recv: &Expr, m: &str, cx: &Cx) -> Vec<String> {
+        let fx = self.fx;
+        let in_type = |ty: &str| -> Option<String> {
+            fx.resolve(&self.module, &format!("{ty}::{m}")).or_else(|| {
+                fx.type_traits.get(ty)?.iter().find_map(|tr| fx.resolve(&self.module, &format!("{tr}::{m}")))
+            })
+        };
+        let mut keys: Vec<String> = match self.type_of(recv, cx) {
+            Some(t) => match t.strip_prefix("dyn ") {
+                Some(tr) => {
+                    let mut k: Vec<String> = fx.trait_impls.get(tr).into_iter().flatten().filter_map(|ty| in_type(ty)).collect();
+                    k.extend(fx.resolve(&self.module, &format!("{tr}::{m}")));
+                    k
+                }
+                None => in_type(&t).into_iter().collect(),
+            },
+            None => match fx.methods.get(m).map(Vec::as_slice) {
+                Some([key]) => vec![key.clone()],
+                _ => vec![],
+            },
+        };
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn type_of(&self, e: &Expr, cx: &Cx) -> Option<String> {
+        match e {
+            Expr::Ident(n) => cx.types.get(n).cloned(),
+            Expr::Field(x, f) if matches!(&**x, Expr::Ident(s) if s == "state") => self.fx.state_types.get(f).cloned(),
+            Expr::Ref(x, _) | Expr::Try(x) | Expr::Await(x) | Expr::Unary(_, x) => self.type_of(x, cx),
+            Expr::Method(x, m, _, _)
+                if matches!(
+                    m.as_str(),
+                    "clone" | "as_ref" | "as_mut" | "unwrap" | "expect" | "lock" | "read" | "write" | "borrow" | "borrow_mut" | "blocking_lock"
+                ) =>
+            {
+                self.type_of(x, cx)
+            }
+            Expr::StructLit(n, _) => {
+                let b = last_segment(n);
+                self.fx.user_types.contains(b).then(|| b.to_string())
+            }
+            // `Disk::new(..)` returning Self / Disk
+            Expr::Call(n, _, _) => {
+                let (t, _) = n.rsplit_once("::")?;
+                let t = last_segment(t);
+                let key = self.fx.resolve(&self.module, n)?;
+                let ret = self.fx.fns.get(&key)?.f.ret.as_ref()?;
+                let returns_self = matches!(ret, Type::Named(r, _) if r == "Self" || last_segment(r) == t);
+                (returns_self && self.fx.user_types.contains(t)).then(|| t.to_string())
+            }
+            _ => None,
+        }
     }
 
     fn push(&mut self, line: usize, rule: &'static str, msg: String, fix: &'static str) {
@@ -428,7 +707,7 @@ impl<'f, 'a> Linter<'f, 'a> {
     /// sinks that parameter leads to (from the function's summary).
     fn through_call(&mut self, key: &str, shown: &str, args: &[Expr], line: usize, cx: &Cx) {
         let Some(sums) = self.fx.sums.get(key) else { return };
-        let Some((_, f)) = self.fx.fns.get(key) else { return };
+        let Some(FnInfo { f, .. }) = self.fx.fns.get(key) else { return };
         let mut positional = 0;
         for a in args {
             let idx = match a {
@@ -439,15 +718,17 @@ impl<'f, 'a> Linter<'f, 'a> {
                 }
             };
             let value = if let Expr::Named(_, v) = a { v } else { a };
-            let Some(sinks) = idx.and_then(|i| sums.get(i)) else { continue };
-            if sinks.is_empty() || !tainted(value, cx) {
+            let Some(sum) = idx.and_then(|i| sums.get(i)) else { continue };
+            if (sum.sinks.is_empty() && sum.writes.is_empty()) || !tainted(value, cx) {
                 continue;
             }
-            for s in sinks.clone() {
-                let msg = format!("request input passed to `{shown}(..)` reaches {} unsanitized", s.what);
+            let src = self.source(&[value], cx);
+            for s in sum.sinks.clone() {
+                let msg = format!("{src} passed to `{shown}(..)` reaches {} unsanitized", s.what);
                 self.sinks.push(s.clone());
                 self.push(line, s.rule, msg, s.fix);
             }
+            self.writes.extend(sum.writes.iter().cloned());
         }
     }
 
@@ -469,14 +750,26 @@ impl<'f, 'a> Linter<'f, 'a> {
                     }
                 }
             }
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let { name, value, ty, .. } => {
                 self.secret_binding(name, value, line);
                 self.expr(value, line, cx);
                 if tainted(value, cx) {
                     cx.taint.insert(name.clone());
+                    if let Some(f) = stored_from(value, cx).filter(|_| !tainted(value, &cx.without_stored())) {
+                        cx.via.insert(name.clone(), f);
+                    }
                 }
                 if is_dynamic(value, cx) {
                     cx.dynamic.insert(name.clone());
+                }
+                if let Some(t) = ty.as_ref().and_then(|t| self.fx.desc(t, &HashMap::new())).or_else(|| self.type_of(value, cx)) {
+                    cx.types.insert(name.clone(), t);
+                }
+                // `g = state.cache.lock().unwrap()`: writes through `g` land in the field
+                if is_guard(value)
+                    && let Some(f) = state_root(value, cx)
+                {
+                    cx.aliases.insert(name.clone(), f);
                 }
             }
             Stmt::Assign { target, value, .. } => {
@@ -485,6 +778,13 @@ impl<'f, 'a> Linter<'f, 'a> {
                 }
                 self.expr(target, line, cx);
                 self.expr(value, line, cx);
+                // `*state.last.lock().unwrap() = name` / `*g = name` / `state.x = name`
+                if !matches!(target, Expr::Ident(_))
+                    && let Some(f) = state_root(target, cx)
+                    && tainted(value, cx)
+                {
+                    self.writes.push((f, self.fx.locate(line)));
+                }
                 if let Expr::Ident(n) = target {
                     if tainted(value, cx) {
                         cx.taint.insert(n.clone());
@@ -525,6 +825,9 @@ impl<'f, 'a> Linter<'f, 'a> {
                 let mut inner = cx.clone();
                 if tainted(iter, cx) {
                     inner.taint.insert(var.clone());
+                    if let Some(f) = stored_from(iter, cx).filter(|_| !tainted(iter, &cx.without_stored())) {
+                        inner.via.insert(var.clone(), f);
+                    }
                 }
                 self.block(body, &mut inner);
             }
@@ -557,6 +860,12 @@ impl<'f, 'a> Linter<'f, 'a> {
             }
             Expr::Method(recv, m, _, args) => {
                 self.method_rules(recv, m, args, line, cx);
+                if WRITE_METHODS.contains(&m.as_str())
+                    && args.iter().any(|a| tainted(a, cx))
+                    && let Some(f) = state_root(recv, cx)
+                {
+                    self.writes.push((f, self.fx.locate(line)));
+                }
                 self.expr(recv, line, cx);
                 let recv_tainted = tainted(recv, cx);
                 for a in args {
@@ -651,7 +960,7 @@ impl<'f, 'a> Linter<'f, 'a> {
                 Some(a) if tainted(a, cx) => self.taint_sink(
                     line,
                     "command-injection",
-                    "the program run by `Command::new` is built from request input".into(),
+                    format!("the program run by `Command::new` is built from {}", self.source(&[a], cx)),
                     "`Command::new(..)`",
                     FIX_CMD,
                 ),
@@ -667,7 +976,8 @@ impl<'f, 'a> Linter<'f, 'a> {
         let fs_call = name.contains("fs::") || name.starts_with("File::") || name.contains("::File::");
         let fs_name = FS_FNS.contains(&seg) || FS_FNS.iter().any(|f| name.ends_with(f));
         if fs_call && fs_name && args.iter().any(|a| tainted(a, cx)) {
-            self.taint_sink(line, "path-traversal", format!("request input reaches `{name}(..)` unsanitized"), &format!("`{name}(..)`"), FIX_PATH);
+            let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+            self.taint_sink(line, "path-traversal", format!("{src} reaches `{name}(..)` unsanitized"), &format!("`{name}(..)`"), FIX_PATH);
         }
         if let Some(key) = self.fx.resolve(&self.module, name) {
             self.through_call(&key, name, args, line, cx);
@@ -692,18 +1002,20 @@ impl<'f, 'a> Linter<'f, 'a> {
             });
             let tainted_arg = args.iter().any(|a| tainted(a, cx));
             if tainted_arg {
-                self.taint_sink(line, "command-injection", "a shell (`sh -c` style) receives a script built from request input".into(), "a shell script (`sh -c`)", FIX_CMD);
+                let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+                self.taint_sink(line, "command-injection", format!("a shell (`sh -c` style) receives a script built from {src}"), "a shell script (`sh -c`)", FIX_CMD);
             } else if dynamic_arg {
                 self.push(line, "command-injection", "a shell (`sh -c` style) receives a dynamic script".into(), FIX_CMD);
             }
         }
         if m == "open" && chain_mentions(recv, "OpenOptions") && args.iter().any(|a| tainted(a, cx)) {
-            self.taint_sink(line, "path-traversal", "request input reaches `OpenOptions::open(..)` unsanitized".into(), "`OpenOptions::open(..)`", FIX_PATH);
+            let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+            self.taint_sink(line, "path-traversal", format!("{src} reaches `OpenOptions::open(..)` unsanitized"), "`OpenOptions::open(..)`", FIX_PATH);
         }
-        // `x.helper(..)` on a user type: followed when exactly one impl defines `helper`
-        if let Some([key]) = self.fx.methods.get(m).map(Vec::as_slice) {
-            let key = key.clone();
-            self.through_call(&key, &format!(".{m}"), args, line, cx);
+        // `x.helper(..)` on a user type, a `dyn Trait` or a bounded generic
+        for key in self.method_targets(recv, m, cx) {
+            let shown = key.rsplit("::").take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("::");
+            self.through_call(&key, &shown, args, line, cx);
         }
     }
 
@@ -776,7 +1088,8 @@ fn tainted(e: &Expr, cx: &Cx) -> bool {
     match e {
         Expr::If(c, a, b) => [c, a, b].iter().any(|x| tainted(x, cx)),
         Expr::LetPat(_, x) => tainted(x, cx),
-        Expr::Ident(n) => cx.taint.contains(n),
+        Expr::Ident(n) => cx.taint.contains(n) || cx.aliases.get(n).is_some_and(|f| cx.stored.contains_key(f)),
+        Expr::Field(x, f) if matches!(&**x, Expr::Ident(s) if s == "state") => cx.stored.contains_key(f),
         Expr::Call(n, _, _) if n == "safe_join" => false,
         Expr::Call(_, _, args) => args.iter().any(|a| tainted(a, cx)),
         Expr::Method(x, _, _, args) => tainted(x, cx) || args.iter().any(|a| tainted(a, cx)),
@@ -794,6 +1107,45 @@ fn tainted(e: &Expr, cx: &Cx) -> bool {
         Expr::Catch { expr, .. } => tainted(expr, cx),
         Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) => false,
     }
+}
+
+/// The `state:` field an expression reads or writes through: `state.f`,
+/// `state.f.lock().unwrap()`, `*g` / `g.insert(..)` for a guard alias of it.
+fn state_root(e: &Expr, cx: &Cx) -> Option<String> {
+    match e {
+        Expr::Field(x, f) if matches!(&**x, Expr::Ident(s) if s == "state") => Some(f.clone()),
+        Expr::Field(x, _) | Expr::Unary(_, x) | Expr::Method(x, ..) | Expr::Index(x, _) | Expr::Try(x) | Expr::Await(x) | Expr::Ref(x, _) => {
+            state_root(x, cx)
+        }
+        Expr::Ident(n) => cx.aliases.get(n).cloned(),
+        _ => None,
+    }
+}
+
+/// `state.f.lock().unwrap()`, `.write().await`, `.borrow_mut()`, `.entry(k)`: a handle, not a copy.
+fn is_guard(e: &Expr) -> bool {
+    match e {
+        Expr::Try(x) | Expr::Await(x) => is_guard(x),
+        Expr::Method(x, m, ..) if matches!(m.as_str(), "unwrap" | "expect") => is_guard(x),
+        Expr::Method(_, m, ..) => GUARD_METHODS.contains(&m.as_str()),
+        _ => false,
+    }
+}
+
+/// The stored state field an expression's taint comes from, if any.
+fn stored_from(e: &Expr, cx: &Cx) -> Option<String> {
+    let mut found = None;
+    visit_expr(e, &mut |x| {
+        if found.is_some() {
+            return;
+        }
+        found = match x {
+            Expr::Field(y, f) if matches!(&**y, Expr::Ident(s) if s == "state") && cx.stored.contains_key(f) => Some(f.clone()),
+            Expr::Ident(n) => cx.via.get(n).cloned().or_else(|| cx.aliases.get(n).filter(|f| cx.stored.contains_key(*f)).cloned()),
+            _ => None,
+        };
+    });
+    found
 }
 
 /// Is the root of this method chain `Command::new("sh" | "bash" | ...)`?
