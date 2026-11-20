@@ -219,9 +219,23 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     let mut reason = false;
     let mut guards: Vec<String> = Vec::new();
+    let mut public: Option<String> = None;
     while let Some((i, text)) = iter.next() {
         let line = start + i;
         if text.trim().is_empty() || text.trim_start().starts_with('#') {
+            continue;
+        }
+        if text.starts_with("@public") {
+            let toks: Vec<Tok> = lex_from(text, line)?.into_iter().map(|t| t.tok).collect();
+            public = Some(match &toks[..] {
+                [Tok::At, Tok::Ident(k), Tok::Newline, Tok::Eof] if k == "public" => String::new(),
+                [Tok::At, Tok::Ident(k), Tok::LParen, Tok::Str(why), Tok::RParen, Tok::Newline, Tok::Eof]
+                    if k == "public" && !why.trim().is_empty() =>
+                {
+                    why.clone()
+                }
+                _ => bail!("line {line}: expected @public or @public(\"reason\") on its own line"),
+            });
             continue;
         }
         if text.starts_with("@guard") {
@@ -259,7 +273,7 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
             reason = true;
             continue;
         }
-        if !reason && guards.is_empty() && text.starts_with("import ") {
+        if !reason && guards.is_empty() && public.is_none() && text.starts_with("import ") {
             items.extend(parser::parse_items(lex_from(text, line)?)?);
             continue;
         }
@@ -284,6 +298,7 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
         }
         route.page = true;
         route.guards = std::mem::take(&mut guards);
+        route.public = public.take();
         route.body = vec![Located {
             line,
             stmt: Stmt::Let {
@@ -410,8 +425,8 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
         items.push(Item::Route(route));
         reason = false;
     }
-    if !guards.is_empty() {
-        bail!("line {}: expected a page after @guard(...)", start + src.lines().count());
+    if !guards.is_empty() || public.is_some() {
+        bail!("line {}: expected a page after @guard(...) / @public", start + src.lines().count());
     }
     if reason {
         bail!(
@@ -450,16 +465,16 @@ mod tests {
             "    while x:\n        p y",
             "    div:\n        if x:\n            p a\n    elif y:\n        p b",
         ] {
-            assert!(parse(&format!("page GET \"/\" -> html:\n{body}"), 1).is_err(), "{body}");
+            assert!(parse(&format!("@public\npage GET \"/\" -> html:\n{body}"), 1).is_err(), "{body}");
         }
-        let two = "@allow_unsafe_html(\"reviewed fragment\")\npage GET \"/a\" -> html:\n    raw {x}\npage GET \"/b\" -> html:\n    raw {x}";
-        assert!(parse(two, 1).unwrap_err().to_string().contains("line 5"));
+        let two = "@public\n@allow_unsafe_html(\"reviewed fragment\")\npage GET \"/a\" -> html:\n    raw {x}\n@public\npage GET \"/b\" -> html:\n    raw {x}";
+        assert!(parse(two, 1).unwrap_err().to_string().contains("line 7"));
         assert!(parse(&two.replace("reviewed fragment", " "), 1).is_err());
     }
 
     #[test]
     fn control_blocks_nest_inside_elements() {
-        let src = "page GET \"/\" -> html:\n    ul:\n        for d in &ds:\n            li {d}\n            if d.a:\n                em a\n            elif d.b:\n                em b\n            else:\n                em c\n    p end";
+        let src = "@public\npage GET \"/\" -> html:\n    ul:\n        for d in &ds:\n            li {d}\n            if d.a:\n                em a\n            elif d.b:\n                em b\n            else:\n                em c\n    p end";
         let items = parse(src, 1).unwrap();
         let Item::Route(r) = &items[0] else { panic!() };
         let kinds: Vec<_> = r.body.iter().map(|l| match &l.stmt {
@@ -476,7 +491,7 @@ mod tests {
 
     #[test]
     fn format_specs_svg_canvas_and_data_attributes() {
-        let src = "page GET \"/\" -> html:\n    p {cpu:.1}% {n:>4}\n    svg(viewBox=\"0 0 100 20\" xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"):\n        polyline(points=\"{pts}\" fill=\"none\" stroke=\"#0a7\" stroke-width=\"2\")\n        text(x=\"2\" y=\"12\" font-size=\"8\") {label}\n    canvas(id=\"chart\" width=\"300\" height=\"80\" data-series=\"{series}\") no canvas\n";
+        let src = "@public\npage GET \"/\" -> html:\n    p {cpu:.1}% {n:>4}\n    svg(viewBox=\"0 0 100 20\" xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"):\n        polyline(points=\"{pts}\" fill=\"none\" stroke=\"#0a7\" stroke-width=\"2\")\n        text(x=\"2\" y=\"12\" font-size=\"8\") {label}\n    canvas(id=\"chart\" width=\"300\" height=\"80\" data-series=\"{series}\") no canvas\n";
         let items = parse(src, 1).unwrap();
         let Item::Route(r) = &items[0] else { panic!() };
         let values: Vec<String> = r.body.iter().filter_map(|l| match &l.stmt {
@@ -505,13 +520,13 @@ mod tests {
             "    foreignObject x",
             "    a(href=\"{x}\") go",
         ] {
-            assert!(parse(&format!("page GET \"/\" -> html:\n{bad}"), 1).is_err(), "{bad}");
+            assert!(parse(&format!("@public\npage GET \"/\" -> html:\n{bad}"), 1).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn guards_attach_to_the_next_page() {
-        let items = parse("@guard(auth::staff)\n@guard(audit)\npage GET \"/a\" (auth) -> html:\n    p {auth.email}\npage GET \"/b\" -> html:\n    p b", 1).unwrap();
+        let items = parse("@guard(auth::staff)\n@guard(audit)\npage GET \"/a\" (auth) -> html:\n    p {auth.email}\n@public\npage GET \"/b\" -> html:\n    p b", 1).unwrap();
         let Item::Route(a) = &items[0] else { panic!() };
         let Item::Route(b) = &items[1] else { panic!() };
         assert_eq!(a.guards, ["auth::staff", "audit"]);
@@ -522,9 +537,18 @@ mod tests {
     }
 
     #[test]
+    fn pages_declare_an_access_policy() {
+        let items = parse("@public(\"marketing page\")\npage GET \"/\" -> html:\n    p hi", 1).unwrap();
+        let Item::Route(r) = &items[0] else { panic!() };
+        assert_eq!(r.public.as_deref(), Some("marketing page"));
+        assert!(parse("@public(\" \")\npage GET \"/\" -> html:\n    p hi", 1).is_err());
+        assert!(parse("@public\n", 1).is_err());
+    }
+
+    #[test]
     fn mutated_templates_parse_without_panics() {
         let seed =
-            "import models\npage GET \"/a\" -> html:\n    main:\n        for x in xs:\n            if x.a:\n                button(hx-get=\"/a\" title=\"{x.y}\") {x}\n            else:\n                p no";
+            "import models\n@public\npage GET \"/a\" -> html:\n    main:\n        for x in xs:\n            if x.a:\n                button(hx-get=\"/a\" title=\"{x.y}\") {x}\n            else:\n                p no";
         for (pos, ch) in seed.char_indices() {
             for replacement in ["", "\n  ", "}", "😀", "@", "\t", "(", "\""] {
                 let mut mutated = seed.to_string();

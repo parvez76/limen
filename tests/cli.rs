@@ -299,14 +299,17 @@ state:
     notes: Mutex<[str]> = Mutex::new([])
     prefix: str = env("NOTE_PREFIX", "note")
 
+@public
 route POST "/hit" (state) -> u64:
     ret state.hits.fetch_add(1, Ordering::SeqCst) + 1
 
+@public
 route POST "/notes" (state, body: Note) -> usize:
     ~notes = state.notes.lock().unwrap()
     notes.push("{state.prefix}: {body.text}")
     ret notes.len()
 
+@public
 route GET "/notes" (state) -> [str]:
     ret state.notes.lock().unwrap().clone()
 "#,
@@ -463,6 +466,7 @@ fn security_lint_blocks_insecure_code() {
         dir.join("bad.prvz"),
         r#"state:
     api_key: str = "abc123-not-from-env"
+@public
 route GET "/u/{id}" (state, id: str) -> str!:
     q = "SELECT * FROM users WHERE id = '{id}'"
     rows = sqlx::query(&q).fetch_all(&db).await?
@@ -474,8 +478,8 @@ route GET "/u/{id}" (state, id: str) -> str!:
     let err = text(&out.stderr);
     assert!(!out.status.success());
     assert!(err.contains("bad.prvz:2: security[hardcoded-secret]: `api_key` is assigned a string literal"), "{err}");
-    assert!(err.contains("bad.prvz:5: security[sql-injection]"), "{err}");
-    assert!(err.contains("bad.prvz:6: security[path-traversal]"), "{err}");
+    assert!(err.contains("bad.prvz:6: security[sql-injection]"), "{err}");
+    assert!(err.contains("bad.prvz:7: security[path-traversal]"), "{err}");
     assert!(err.contains("= fix: never build SQL with interpolation"), "{err}");
     assert!(err.contains("3 security error(s)"), "{err}");
 
@@ -507,21 +511,26 @@ fn hardened_service_no_leaks_limits_shutdown_and_fuzz() {
         r#"@json
 type Msg: text: str
 
+@public
 route GET "/boom" -> i32!:
     n: i32 = "not a number".parse()?
     ret n
 
+@public
 route GET "/panic/{i}" (i: usize) -> i32:
     v = [10]
     ret v[i]
 
+@public
 route GET "/slow" -> str:
     tokio::time::sleep(std::time::Duration::from_secs(3)).await
     ret "late"
 
+@public
 route POST "/echo" (body: Msg) -> Msg:
     ret body
 
+@public
 route GET "/leak/{name}" (name: str) -> str!:
     fail(500, "cannot open /home/app/{name}.db (os error 2)")
 "#,
@@ -739,6 +748,7 @@ route GET "/whoami/{n}" (req, auth, n: u32) -> Who:
 route POST "/ping":
     status(204)
 
+@public
 route POST "/echo" (req, body: Who) -> Who!:
     status(201)
     ret body
@@ -792,7 +802,7 @@ fn multi_file_modules_build_serve_and_map_errors() {
     std::fs::create_dir_all(dir.join("auth")).unwrap();
     std::fs::write(
         dir.join("app.prvz"),
-        "import store\nimport auth.tokens\n\nstate:\n    hits: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)\n\nroute GET \"/items/{id}\" (id: u32) -> store::Item!:\n    ret store::find(id)?\n",
+        "import store\nimport auth.tokens\n\nstate:\n    hits: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)\n\n@public\nroute GET \"/items/{id}\" (id: u32) -> store::Item!:\n    ret store::find(id)?\n",
     )
     .unwrap();
     std::fs::write(
@@ -981,6 +991,7 @@ fn frontend_bridge_and_typed_pages() {
         dir.join("main.prvz"),
         r#"@embed_dir("dist")
 import ui.dashboard
+@public
 route GET "/api" -> models::Card:
     ret models::card()
 "#,
@@ -1003,12 +1014,14 @@ fn card() -> Card:
 "#;
     std::fs::write(dir.join("models.prvz"), model).unwrap();
     let page = r#"import models
+@public
 page GET "/card/{name}" (name: str) -> html:
     let card = models::card()
     main:
         h1 {card.title} {models::LEVEL}
         p(title="{name}") {name}
         button(hx-get="/api") {card.kind}
+@public
 @allow_unsafe_html("fragment from our static layout")
 page GET "/trusted" -> html:
     raw {"<b>ok</b>"}
@@ -1090,7 +1103,7 @@ page GET "/trusted" -> html:
     std::fs::write(dir.join("models.prvz"), model.replace("title:", "label:")).unwrap();
     let check = run_in(&dir, &["check", "main.prvz"]);
     assert!(
-        !check.status.success() && text(&check.stderr).contains("dashboard.msd:5: error[E0609]"),
+        !check.status.success() && text(&check.stderr).contains("dashboard.msd:6: error[E0609]"),
         "{}",
         text(&check.stderr)
     );
@@ -1105,7 +1118,7 @@ fn generated_typescript_passes_tsc_strict() {
     let dir = scratch("tsc8");
     std::fs::write(
         dir.join("main.prvz"),
-        "@json\ntype User:\n    id: u32\n    name: str\n    @default\n    tags: [str]\n    note: str?\n\n@json\nenum Kind: Admin, Member(str)\n\n@json\ntype Q: page: u32\n\nroute GET \"/users/{id}\" (id: u32, query: Q) -> User:\n    ret User(id: id, name: \"a\", tags: [], note: None)\n\nroute POST \"/users\" (body: User) -> Kind:\n    ret Kind::Admin\n",
+        "@json\ntype User:\n    id: u32\n    name: str\n    @default\n    tags: [str]\n    note: str?\n\n@json\nenum Kind: Admin, Member(str)\n\n@json\ntype Q: page: u32\n\n@public\nroute GET \"/users/{id}\" (id: u32, query: Q) -> User:\n    ret User(id: id, name: \"a\", tags: [], note: None)\n\n@public\nroute POST \"/users\" (body: User) -> Kind:\n    ret Kind::Admin\n",
     )
     .unwrap();
     let out = run_in(&dir, &["types", "--ts", "main.prvz", "--out", "types.ts"]);
@@ -1163,7 +1176,7 @@ fn services_log_json_with_request_ids_and_export_metrics() {
     let dir = scratch("obs9");
     std::fs::write(
         dir.join("svc.prvz"),
-        "route POST \"/orders/{id}\" (id: u32) -> str:\n    log_info(\"order placed\", order: id)\n    metric_inc(\"orders_placed\")\n    ret \"ok\"\n",
+        "@public\nroute POST \"/orders/{id}\" (id: u32) -> str:\n    log_info(\"order placed\", order: id)\n    metric_inc(\"orders_placed\")\n    ret \"ok\"\n",
     )
     .unwrap();
     let out = run_in(&dir, &["build", "svc.prvz"]);
@@ -1519,7 +1532,7 @@ fn browser_sign_in_with_session_cookies() {
         "import dash\n\nasync fn me(req) -> Claims!:\n    ret oidc_session(req).await?\n\n@guard(me)\nroute GET \"/whoami\" (auth) -> str:\n    ret auth.email.clone()\n\n@guard(me)\nroute POST \"/act\" (auth) -> str:\n    ret \"done\"\n",
     )
     .unwrap();
-    std::fs::write(dir.join("dash.msd"), "page GET \"/dash\" (req) -> html:\n    let c = me(req).await?\n    p Hello {c.email}\n    form(method=\"post\" action=\"/auth/logout\"):\n        button(type=\"submit\") Sign out\n\n@guard(me)\npage GET \"/guarded/{tab}\" (auth, tab: str) -> html:\n    h1 Welcome {auth.email}\n    p tab {tab}\n").unwrap();
+    std::fs::write(dir.join("dash.msd"), "@public\npage GET \"/dash\" (req) -> html:\n    let c = me(req).await?\n    p Hello {c.email}\n    form(method=\"post\" action=\"/auth/logout\"):\n        button(type=\"submit\") Sign out\n\n@guard(me)\npage GET \"/guarded/{tab}\" (auth, tab: str) -> html:\n    h1 Welcome {auth.email}\n    p tab {tab}\n").unwrap();
     let out = run_in(&dir, &["build", "app.prvz"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1670,4 +1683,40 @@ fn browser_sign_in_with_session_cookies() {
     let loc = header(&r, "location").pop().unwrap_or_default();
     assert!(r.starts_with("HTTP/1.1 303") && loc.starts_with(&format!("{iss}/logout?client_id=dashboard")), "{r}");
     assert!(header(&r, "set-cookie").iter().filter(|c| c.contains("Max-Age=0")).count() >= 4, "{r}");
+}
+
+/// Deny-by-default: an endpoint without @guard or @public doesn't compile, and
+/// `parvez routes` prints the complete access map for review.
+#[test]
+fn deny_by_default_and_access_map() {
+    let dir = scratch("access092");
+    std::fs::write(dir.join("open.prvz"), "route GET \"/admin/users\" -> str:\n    ret \"everyone\"\n").unwrap();
+    let out = run_in(&dir, &["check", "open.prvz"]);
+    let err = text(&out.stderr);
+    assert!(!out.status.success() && err.contains("open.prvz:1: route GET /admin/users has no access policy"), "{err}");
+    std::fs::write(
+        dir.join("app.prvz"),
+        "import ui\n\nfn staff(req) -> str!:\n    ret req.header(\"x-user\").unwrap_or_default()\n\n@public(\"load balancer health probe\")\nroute GET \"/ping\" -> str:\n    ret \"pong\"\n\n@guard(staff)\nroute POST \"/users/{id}\" (auth, id: str) -> str:\n    ret auth\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("ui.msd"), "@guard(staff)\npage GET \"/admin\" (auth) -> html:\n    p {auth}\n").unwrap();
+    let out = run_in(&dir, &["routes", "app.prvz"]);
+    let map = text(&out.stdout);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    for want in [
+        "GET     /ping",
+        "PUBLIC (load balancer health probe)",
+        "POST    /users/{id}",
+        "guard staff",
+        "app.prvz:7",
+        "/admin",
+        "ui.msd:2",
+        "/healthz",
+    ] {
+        assert!(map.contains(want), "{want}\n{map}");
+    }
+    let json: serde_json::Value = serde_json::from_slice(&run_in(&dir, &["routes", "app.prvz", "--json"]).stdout).unwrap();
+    let admin = json.as_array().unwrap().iter().find(|r| r["path"] == "/admin").unwrap();
+    assert_eq!(admin["kind"], "page");
+    assert_eq!(admin["guards"][0], "staff");
 }

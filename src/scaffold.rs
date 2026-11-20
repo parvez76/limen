@@ -55,6 +55,7 @@ type HomeQuery:
     @default
     name: str
 
+@public
 route GET "/api/status" -> Status:
     ret Status(ok: true, service: "__NAME__")
 
@@ -71,7 +72,8 @@ test "the home page escapes input":
     assert(page.text().contains("Hello, &lt;b&gt;hi&lt;/b&gt;!"), page.text())
 "#;
 
-const HOME: &str = r#"page GET "/" (query: HomeQuery) -> html:
+const HOME: &str = r#"@public
+page GET "/" (query: HomeQuery) -> html:
     let who = if query.name.is_empty(): "world" else: query.name.clone()
     html(lang="en"):
         head:

@@ -19,9 +19,11 @@ state:
     received: AtomicU64 = AtomicU64::new(0)
     env: str = env("APP_ENV", "dev")
 
+@public
 route GET "/health" -> str:
     ret "ok"
 
+@public
 route POST "/events" (state, body: Event) -> Receipt!:
     state.received.fetch_add(1, Ordering::Relaxed)
     if body.count < 0: fail(400, "count must be >= 0, got {body.count}")
@@ -30,12 +32,15 @@ route POST "/events" (state, body: Event) -> Receipt!:
     state.events.lock().unwrap().push(body)
     ret r
 
+@public
 route GET "/events" (state) -> [Event]:
     ret state.events.lock().unwrap().clone()
 
+@public
 route GET "/events/{id}" (id: str) -> Event!:
     if id == "missing": fail(404, "no event {id}")
     ret Event(id: id, kind: "demo", count: 1)
 
+@public
 route GET "/stats" (state) -> Stats:
     ret Stats(received: state.received.load(Ordering::Relaxed), stored: state.events.lock().unwrap().len(), env: state.env.clone())

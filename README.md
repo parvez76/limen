@@ -27,9 +27,11 @@ A complete JSON REST microservice ([examples/service.prvz](examples/service.prvz
 @json
 type Event: id: str, kind: str, count: i32
 
+@public
 route GET "/health" -> str:
     ret "ok"
 
+@public
 route POST "/events" (body: Event) -> Event!:
     if body.count < 0: fail(400, "count must be >= 0")
     ret body
@@ -41,6 +43,7 @@ route POST "/events" (body: Event) -> Event!:
 
 Parvez generates every line that ships, so security isn't left to each developer:
 
+- **Deny-by-default access control.** Every route, socket and page must declare `@guard(fn)` or `@public("reason")`, or it doesn't compile, so a forgotten permission check (OWASP's #1 risk, broken access control) can't ship. `parvez routes` prints the complete access map for review.
 - **Compile-time security checks.** SQL built by string interpolation, shell commands built from input, request data reaching the filesystem (`safe_join` is the fix), and hard-coded secrets are compile errors pointing at the `.prvz` line, each with the safe alternative. Opting out takes an explicit `@allow_insecure("reason")`.
 - **Hardened services.** Internal errors and panics become a generic 500, with details logged server-side only. Body size limits, timeouts, concurrency backpressure, security headers and graceful SIGTERM shutdown are always on.
 - **Supply chain.** Builds fail on dependencies with known RustSec advisories, `parvez heal` moves to patched versions, and every build writes a CycloneDX SBOM.
@@ -87,6 +90,7 @@ parvez build main.prvz --target x86_64-unknown-linux-musl
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz [--target <triple>]` | Builds a release binary (`./app`, or `./app-<triple>` when cross-compiling, e.g. static `x86_64-unknown-linux-musl`) plus `app.sha256` |
+| `parvez routes app.prvz [--json]` | Access map: every endpoint with its guards or `@public` reason, for security review |
 | `parvez new <name>` | Scaffolds a project (`parvez.toml`, `main.prvz` with tests, `ui/`) that passes `parvez test` immediately |
 | `parvez fmt [paths...] [--check]` | Formats `.prvz`/`.msd` files; every change is verified to leave the program identical |
 | `parvez heal app.prvz` | Updates to patched compatible dependency versions; reports advisories needing a major upgrade |
@@ -106,6 +110,7 @@ A service can serve a static build, JSON endpoints, and Masud HTML pages from on
 import models
 import ui.dashboard
 
+@public
 route GET "/api/summary" -> models::Summary:
     ret models::summary()
 ```
@@ -126,6 +131,7 @@ In `ui/dashboard.msd`, indentation nests elements and braces interpolate escaped
 
 ```
 import models
+@public
 page GET "/dashboard" -> html:
     let summary = models::summary()
     main:
@@ -207,7 +213,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.9.3 adds instant session revocation (OIDC back-channel logout plus a periodic IdP re-check), inline SVG, `canvas`, `data-*` and format specs in Masud, and fixes Sign out for form posts. v0.9.2 added `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
+Parvez v0.10.0 makes access control deny-by-default: every route, socket and page needs `@guard(...)` or `@public`, and `parvez routes` prints the access map (breaking: add `@public` to deliberately open endpoints). v0.9.3 added instant session revocation (OIDC back-channel logout plus a periodic IdP re-check), inline SVG, `canvas`, `data-*` and format specs in Masud, and fixes Sign out for form posts. v0.9.2 added `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
 
 ## License
 

@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn config_and_inferred_body_types() {
-        let src = "@json\ntype Hb:\n    @rename(\"v\")\n    version: str\n    id: Uuid\nroute POST \"/hb/{dev}\" (req, dev: Uuid):\n    b = match json_decode<Hb>(&req.text_body()):\n        Ok(b) -> b\n        Err(_) -> fail(400, \"bad\")\n";
+        let src = "@json\ntype Hb:\n    @rename(\"v\")\n    version: str\n    id: Uuid\n@public\nroute POST \"/hb/{dev}\" (req, dev: Uuid):\n    b = match json_decode<Hb>(&req.text_body()):\n        Ok(b) -> b\n        Err(_) -> fail(400, \"bad\")\n";
         let prog = parse(lex(src).unwrap()).unwrap();
         let cfg = FuzzConfig { params: [("dev".to_string(), "abc".to_string())].into(), headers: vec![("x-k".into(), "1".into())], ..Default::default() };
         let cs = cases_with(&prog, &cfg);
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn cases_cover_path_query_and_body() {
-        let src = "@json\ntype Ev: id: str, n: i32\n@json\ntype Q: page: u32\nroute POST \"/ev/{id}\" (id: u64, query: Q, body: Ev) -> Ev:\n    ret body\nroute GET \"/health\" -> str:\n    ret \"ok\"\n";
+        let src = "@json\ntype Ev: id: str, n: i32\n@json\ntype Q: page: u32\n@public\nroute POST \"/ev/{id}\" (id: u64, query: Q, body: Ev) -> Ev:\n    ret body\n@public\nroute GET \"/health\" -> str:\n    ret \"ok\"\n";
         let prog = parse(lex(src).unwrap()).unwrap();
         let cs = cases(&prog);
         let base = &cs[0];

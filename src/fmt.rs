@@ -412,8 +412,8 @@ mod tests {
 
     #[test]
     fn formats_layout_spacing_and_keeps_comments() {
-        let src = "import store\n# models\n@json\ntype Item:  id:i64,name : str\nfn f(a:i64,b :i64)->i64:\n  # body\n  x=a+b   # sum\n  if x>=3 :ret x\n  m = { \"a\":1 , \"b\" :2 }\n  q = sqlx::query(\"\"\"\n      SELECT 1\n        FROM t\n      \"\"\")\n      .bind(x)\n  ret x\nroute GET \"/x\" -> str:\n      ret \"a,b:c=d\"\n\n\n\ntest \"t\":\n  assert(f(1,2)==3)\n";
-        let want = "import store\n# models\n@json\ntype Item: id: i64, name: str\nfn f(a: i64, b: i64) -> i64:\n    # body\n    x = a+b  # sum\n    if x >= 3: ret x\n    m = {\"a\": 1, \"b\": 2}\n    q = sqlx::query(\"\"\"\n        SELECT 1\n          FROM t\n        \"\"\")\n        .bind(x)\n    ret x\n\nroute GET \"/x\" -> str:\n    ret \"a,b:c=d\"\n\ntest \"t\":\n    assert(f(1, 2) == 3)\n";
+        let src = "import store\n# models\n@json\ntype Item:  id:i64,name : str\nfn f(a:i64,b :i64)->i64:\n  # body\n  x=a+b   # sum\n  if x>=3 :ret x\n  m = { \"a\":1 , \"b\" :2 }\n  q = sqlx::query(\"\"\"\n      SELECT 1\n        FROM t\n      \"\"\")\n      .bind(x)\n  ret x\n@public\nroute GET \"/x\" -> str:\n      ret \"a,b:c=d\"\n\n\n\ntest \"t\":\n  assert(f(1,2)==3)\n";
+        let want = "import store\n# models\n@json\ntype Item: id: i64, name: str\nfn f(a: i64, b: i64) -> i64:\n    # body\n    x = a+b  # sum\n    if x >= 3: ret x\n    m = {\"a\": 1, \"b\": 2}\n    q = sqlx::query(\"\"\"\n        SELECT 1\n          FROM t\n        \"\"\")\n        .bind(x)\n    ret x\n\n@public\nroute GET \"/x\" -> str:\n    ret \"a,b:c=d\"\n\ntest \"t\":\n    assert(f(1, 2) == 3)\n";
         let out = format_file(Path::new("a.prvz"), src).unwrap();
         assert_eq!(out, want, "\n{out}");
         // idempotent
@@ -422,9 +422,9 @@ mod tests {
 
     #[test]
     fn masud_indentation_is_normalized_and_verified() {
-        let src = "page GET \"/\" -> html:\n  ul:\n     li a\n     li b\n  p done   \n";
+        let src = "@public\npage GET \"/\" -> html:\n  ul:\n     li a\n     li b\n  p done   \n";
         let out = format_file(Path::new("p.msd"), src).unwrap();
-        assert_eq!(out, "page GET \"/\" -> html:\n    ul:\n        li a\n        li b\n    p done\n");
-        assert!(format_file(Path::new("p.msd"), "page GET \"/\" -> html:\n    p {x\n").is_err());
+        assert_eq!(out, "@public\npage GET \"/\" -> html:\n    ul:\n        li a\n        li b\n    p done\n");
+        assert!(format_file(Path::new("p.msd"), "@public\npage GET \"/\" -> html:\n    p {x\n").is_err());
     }
 }

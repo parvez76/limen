@@ -187,6 +187,8 @@ pub struct RouteDef {
     pub conn: bool,
     /// `@guard(fn_name)` lines, run in order before the handler
     pub guards: Vec<String>,
+    /// `@public` / `@public("reason")`: deliberately served to anyone (deny-by-default)
+    pub public: Option<String>,
     /// `@body_error(400, code: "bad_request", "invalid JSON body")`
     pub body_error: Option<BodyError>,
     /// `@allow_insecure("reason")`
@@ -206,6 +208,8 @@ pub struct Attrs {
     pub allow_insecure: Option<String>,
     /// `@guard(fn_name)` (routes only)
     pub guards: Vec<String>,
+    /// `@public` / `@public("reason")` (routes only)
+    pub public: Option<String>,
     /// `@body_error(status, code: "..", "msg")` (routes only)
     pub body_error: Option<BodyError>,
     /// `@protocols(..)` / `@max_message(n)` (sockets only)

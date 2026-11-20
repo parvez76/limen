@@ -24,6 +24,7 @@ route GET "/items/{id}" (state, auth, id: i64) -> str!:
         "fallback"
     ret "{auth}:{name}"
 
+@public
 route GET "/stats" (state) -> serde_json::Value!:
     a, b = parallel(slow(1), slow(2))
     c, d = parallel(maybe(3), maybe(4))?

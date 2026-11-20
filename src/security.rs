@@ -483,32 +483,32 @@ mod tests {
 
     #[test]
     fn sql_injection() {
-        let src = "route GET \"/u/{id}\" (id: str) -> str!:\n    q = \"SELECT * FROM users WHERE id = {id}\"\n    rows = sqlx::query(&q).fetch_all(&pool).await?\n    sqlx::query(\"DELETE FROM t WHERE x = \" + id).execute(&pool).await?\n    ok = sqlx::query(\"SELECT * FROM users WHERE id = $1\").bind(id).fetch_one(&pool).await?\n    ret \"\"\n";
-        assert_eq!(rules(src), [(3, "sql-injection"), (4, "sql-injection")]);
+        let src = "@public\nroute GET \"/u/{id}\" (id: str) -> str!:\n    q = \"SELECT * FROM users WHERE id = {id}\"\n    rows = sqlx::query(&q).fetch_all(&pool).await?\n    sqlx::query(\"DELETE FROM t WHERE x = \" + id).execute(&pool).await?\n    ok = sqlx::query(\"SELECT * FROM users WHERE id = $1\").bind(id).fetch_one(&pool).await?\n    ret \"\"\n";
+        assert_eq!(rules(src), [(4, "sql-injection"), (5, "sql-injection")]);
         // interpolation into SQL is flagged outside routes too
         assert_eq!(rules("fn f(t: &str):\n    db.execute(\"DROP TABLE {t}\")\n"), [(2, "sql-injection")]);
     }
 
     #[test]
     fn command_injection() {
-        let src = "route POST \"/run\" (body: Job) -> str!:\n    Command::new(\"sh\").arg(\"-c\").arg(\"tar czf {body.name}.tgz\").output()?\n    Command::new(body.tool).output()?\n    Command::new(\"tar\").arg(\"czf\").arg(body.name).output()?\n    Command::new(\"bash\").args([\"-c\", \"echo hi\"]).output()?\n    ret \"\"\n";
-        assert_eq!(rules(src), [(2, "command-injection"), (3, "command-injection")]);
+        let src = "@public\nroute POST \"/run\" (body: Job) -> str!:\n    Command::new(\"sh\").arg(\"-c\").arg(\"tar czf {body.name}.tgz\").output()?\n    Command::new(body.tool).output()?\n    Command::new(\"tar\").arg(\"czf\").arg(body.name).output()?\n    Command::new(\"bash\").args([\"-c\", \"echo hi\"]).output()?\n    ret \"\"\n";
+        assert_eq!(rules(src), [(3, "command-injection"), (4, "command-injection")]);
     }
 
     #[test]
     fn path_traversal() {
-        let src = "route GET \"/files/{name}\" (name: str) -> str!:\n    p = \"/srv/data/{name}\"\n    a = std::fs::read_to_string(&p)?\n    b = fs::read(Path::new(\"/srv\").join(&name))?\n    ok = std::fs::read_to_string(safe_join(\"/srv/data\", &name)?)?\n    c = std::fs::read_to_string(\"/etc/app.conf\")?\n    ret a\n";
-        assert_eq!(rules(src), [(3, "path-traversal"), (4, "path-traversal")]);
+        let src = "@public\nroute GET \"/files/{name}\" (name: str) -> str!:\n    p = \"/srv/data/{name}\"\n    a = std::fs::read_to_string(&p)?\n    b = fs::read(Path::new(\"/srv\").join(&name))?\n    ok = std::fs::read_to_string(safe_join(\"/srv/data\", &name)?)?\n    c = std::fs::read_to_string(\"/etc/app.conf\")?\n    ret a\n";
+        assert_eq!(rules(src), [(4, "path-traversal"), (5, "path-traversal")]);
         // CLI tools may read user-given paths: not flagged outside routes
         assert!(rules("fn main(path: str)!:\n    x = std::fs::read_to_string(&path)?\n").is_empty());
     }
 
     #[test]
     fn hardcoded_secrets() {
-        let src = "state:\n    api_key: str = \"abc123secret\"\n    db_url: str = env(\"DATABASE_URL\")\n    jwt_secret: str = env(\"JWT_SECRET\")\nroute GET \"/\" (state) -> str:\n    ret \"\"\nfn f():\n    password = \"hunter22\"\n    token = \"\"\n    c = Cfg(client_secret: \"s3cr3t\")\n    k = \"sk_live_51HxQ2abcdef0123456789\"\n    r = \"q8Zt3LmX9vB2nR7kW4pY6sD1fG5hJ0cV8aE3uI\"\n    uuid = \"550e8400-e29b-41d4-a716-446655440000\"\n    url = \"https://api.example.com/v1/users/12345/profile\"\n";
+        let src = "state:\n    api_key: str = \"abc123secret\"\n    db_url: str = env(\"DATABASE_URL\")\n    jwt_secret: str = env(\"JWT_SECRET\")\n@public\nroute GET \"/\" (state) -> str:\n    ret \"\"\nfn f():\n    password = \"hunter22\"\n    token = \"\"\n    c = Cfg(client_secret: \"s3cr3t\")\n    k = \"sk_live_51HxQ2abcdef0123456789\"\n    r = \"q8Zt3LmX9vB2nR7kW4pY6sD1fG5hJ0cV8aE3uI\"\n    uuid = \"550e8400-e29b-41d4-a716-446655440000\"\n    url = \"https://api.example.com/v1/users/12345/profile\"\n";
         assert_eq!(
             rules(src),
-            [(2, "hardcoded-secret"), (8, "hardcoded-secret"), (10, "hardcoded-secret"), (11, "hardcoded-secret"), (12, "hardcoded-secret")]
+            [(2, "hardcoded-secret"), (9, "hardcoded-secret"), (11, "hardcoded-secret"), (12, "hardcoded-secret"), (13, "hardcoded-secret")]
         );
     }
 
@@ -529,23 +529,23 @@ mod tests {
 
     #[test]
     fn taint_flows_into_closures_over_tainted_data() {
-        let src = "route POST \"/x\" (body: Req) -> str!:\n    texts = body.files.iter().map(|f| std::fs::read_to_string(f)).collect()\n    ok = [\"a\"].iter().map(|f| std::fs::read_to_string(f)).collect()\n    q = sqlx::query(\"\"\"\n        SELECT * FROM t\n        WHERE id = $1\n        \"\"\").bind(body.id)\n    ret \"\"\n";
-        assert_eq!(rules(src), [(2, "path-traversal")]);
+        let src = "@public\nroute POST \"/x\" (body: Req) -> str!:\n    texts = body.files.iter().map(|f| std::fs::read_to_string(f)).collect()\n    ok = [\"a\"].iter().map(|f| std::fs::read_to_string(f)).collect()\n    q = sqlx::query(\"\"\"\n        SELECT * FROM t\n        WHERE id = $1\n        \"\"\").bind(body.id)\n    ret \"\"\n";
+        assert_eq!(rules(src), [(3, "path-traversal")]);
     }
 
     #[test]
     fn allow_insecure_opts_out_and_is_reported() {
-        let src = "@allow_insecure(\"internal admin tool, input is trusted\")\nroute GET \"/f/{n}\" (n: str) -> str!:\n    ret std::fs::read_to_string(&n)?\nroute GET \"/g/{n}\" (n: str) -> str!:\n    ret std::fs::read_to_string(&n)?\n";
+        let src = "@public\n@allow_insecure(\"internal admin tool, input is trusted\")\nroute GET \"/f/{n}\" (n: str) -> str!:\n    ret std::fs::read_to_string(&n)?\n@public\nroute GET \"/g/{n}\" (n: str) -> str!:\n    ret std::fs::read_to_string(&n)?\n";
         let r = lint(&parse(lex(src).unwrap()).unwrap());
-        assert_eq!(r.findings.iter().map(|f| f.line).collect::<Vec<_>>(), [5]);
-        assert_eq!(r.allowed, [(2, "internal admin tool, input is trusted".to_string())]);
+        assert_eq!(r.findings.iter().map(|f| f.line).collect::<Vec<_>>(), [7]);
+        assert_eq!(r.allowed, [(3, "internal admin tool, input is trusted".to_string())]);
         let f = &r.findings[0];
-        assert!(f.render("app.prvz").starts_with("app.prvz:5: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized\n     = fix: join untrusted"));
+        assert!(f.render("app.prvz").starts_with("app.prvz:7: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized\n     = fix: join untrusted"));
     }
 
     #[test]
     fn taint_flows_through_lets_and_match() {
-        let src = "route POST \"/x\" (body: Req) -> str!:\n    n = body.name.trim().to_string()\n    m = match body.kind:\n        k -> k\n    ret std::fs::read_to_string(m)?\n";
-        assert_eq!(rules(src), [(5, "path-traversal")]);
+        let src = "@public\nroute POST \"/x\" (body: Req) -> str!:\n    n = body.name.trim().to_string()\n    m = match body.kind:\n        k -> k\n    ret std::fs::read_to_string(m)?\n";
+        assert_eq!(rules(src), [(6, "path-traversal")]);
     }
 }

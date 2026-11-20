@@ -39,6 +39,14 @@ enum Cmd {
         #[arg(long)]
         target: Option<String>,
     },
+    /// Access map for review: every route, socket and page with its guards or @public reason.
+    Routes {
+        #[arg(default_value = "main.prvz")]
+        file: PathBuf,
+        /// machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a new project: parvez.toml, main.prvz with a route and a test, ui/, .gitignore.
     New { name: String },
     /// Format .prvz and .msd files in place (a directory is searched recursively).
@@ -120,6 +128,7 @@ fn real_main() -> Result<()> {
             eprintln!("parvez: built {}", bin.display());
         }
         Cmd::New { name } => scaffold::new_project(&std::env::current_dir()?, &name)?,
+        Cmd::Routes { file, json } => print_routes(&file, json)?,
         Cmd::Fmt { paths, check } => {
             let mut changed = Vec::new();
             for path in &paths {
@@ -638,4 +647,60 @@ fn check_target(target: &str) -> Result<()> {
         bail!("the Rust standard library for {target} is not installed; run `rustup target add {target}`");
     }
     Ok(())
+}
+
+/// `parvez routes`: who may call what. Built-in endpoints are listed too, so the
+/// map is the service's complete surface.
+fn print_routes(file: &Path, json: bool) -> Result<()> {
+    let prog = load_program(file)?;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let uses_session = prog.all_items().iter().any(|(_, i)| match i {
+        ast::Item::Fn(f) => codegen_calls(&f.body, "oidc_session"),
+        ast::Item::Route(r) => codegen_calls(&r.body, "oidc_session"),
+        ast::Item::Impl(im) => im.methods.iter().any(|m| codegen_calls(&m.body, "oidc_session")),
+        _ => false,
+    });
+    for (_, item) in prog.all_items() {
+        if let ast::Item::Route(r) = item {
+            let (fidx, line) = ast::split_line(r.line);
+            let fname = prog.files.get(fidx).map(|f| f.0.clone()).unwrap_or_else(|| file.display().to_string());
+            let kind = if r.page { "page" } else if r.socket.is_some() { "socket" } else { "route" };
+            let access = match &r.public {
+                Some(why) if why.is_empty() => "PUBLIC".to_string(),
+                Some(why) => format!("PUBLIC ({why})"),
+                None => format!("guard {}", r.guards.join(" -> ")),
+            };
+            rows.push(serde_json::json!({"method": r.method, "path": r.path, "kind": kind, "access": access,
+                "guards": r.guards, "public": r.public.is_some(), "at": format!("{fname}:{line}")}));
+        }
+    }
+    let mut builtin = vec![("GET", "/healthz", "PUBLIC (built-in health check)"), ("GET", "/readyz", "PUBLIC (built-in readiness)"),
+        ("GET", "/metrics", "PUBLIC unless PARVEZ_METRICS_TOKEN is set (built-in)")];
+    if uses_session {
+        builtin.extend([("GET", "/auth/login", "PUBLIC (built-in sign-in)"), ("GET", "/auth/callback", "PUBLIC (built-in sign-in)"),
+            ("POST", "/auth/logout", "same-origin only (built-in)"), ("POST", "/auth/backchannel-logout", "IdP-signed logout token (built-in)")]);
+    }
+    for (m, p, a) in builtin {
+        rows.push(serde_json::json!({"method": m, "path": p, "kind": "built-in", "access": a, "guards": [], "public": a.starts_with("PUBLIC"), "at": "-"}));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    let w = |k: &str| rows.iter().map(|r| r[k].as_str().unwrap_or("").len()).max().unwrap_or(0);
+    let (wm, wp, wk, wa) = (w("method").max(6), w("path").max(4), w("kind").max(4), w("access").max(6));
+    println!("{:wm$}  {:wp$}  {:wk$}  {:wa$}  AT", "METHOD", "PATH", "KIND", "ACCESS");
+    for r in &rows {
+        let g = |k: &str| r[k].as_str().unwrap_or("").to_string();
+        println!("{:wm$}  {:wp$}  {:wk$}  {:wa$}  {}", g("method"), g("path"), g("kind"), g("access"), g("at"));
+    }
+    Ok(())
+}
+
+fn codegen_calls(b: &ast::Block, name: &str) -> bool {
+    let mut found = false;
+    ast::visit_exprs(b, &mut |e| {
+        found |= matches!(e, ast::Expr::Call(n, ..) if n == name);
+    });
+    found
 }

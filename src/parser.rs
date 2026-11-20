@@ -58,7 +58,11 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
                 let reason = attrs.allow_insecure.clone();
                 let only_reason = !attrs.json && attrs.derives.is_empty();
                 let test_only = attrs.test_only;
-                let plain = only_reason && attrs.guards.is_empty() && attrs.body_error.is_none() && reason.is_none();
+                let plain = only_reason
+                    && attrs.guards.is_empty()
+                    && attrs.body_error.is_none()
+                    && reason.is_none()
+                    && attrs.public.is_none();
                 // `@test_only` alone may also mark impl / use / import / const / trait / priv items
                 let simple = match p.peek().clone() {
                     Tok::Impl if plain && test_only => Some(Item::Impl(p.parse_impl()?)),
@@ -112,6 +116,9 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
                 if attrs.body_error.is_some() && !is_route {
                     bail!("line {line}: @body_error(...) goes on a `route`");
                 }
+                if attrs.public.is_some() && !is_route {
+                    bail!("line {line}: @public goes on a `route` or `socket`");
+                }
                 match p.peek().clone() {
                     Tok::Fn | Tok::Async if only_reason => {
                         let mut f = p.parse_fn()?;
@@ -125,6 +132,7 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
                         }
                         rt.allow_insecure = reason;
                         rt.guards = attrs.guards.clone();
+                        rt.public = attrs.public.clone();
                         rt.body_error = attrs.body_error.clone();
                         items.push(Item::Route(rt));
                     }
@@ -260,6 +268,26 @@ pub fn validate(prog: &Program) -> Result<()> {
         _ => None,
     }) {
         bail!("line {}: `fn main` belongs in the main file, not in an imported module", f.line);
+    }
+    // Deny-by-default access control (OWASP A01): every endpoint states who may call it.
+    for (_, r) in &routes {
+        let kind = if r.page { "page" } else if r.socket.is_some() { "socket" } else { "route" };
+        match (r.guards.is_empty(), &r.public) {
+            (true, None) => bail!(
+                "line {}: {kind} {} {} has no access policy. Add @guard(fn) to require sign-in or another check, \
+                 or @public(\"why anyone may call it\") to serve it to everyone (Parvez denies by default)",
+                r.line,
+                r.method,
+                r.path
+            ),
+            (false, Some(_)) => bail!(
+                "line {}: {kind} {} {} has both @guard and @public; keep one",
+                r.line,
+                r.method,
+                r.path
+            ),
+            _ => {}
+        }
     }
     let app_state = Type::Ref(Box::new(Type::Named("AppState".into(), vec![])), false);
     let req_ty = Type::Ref(Box::new(Type::Named("Req".into(), vec![])), false);
@@ -818,6 +846,18 @@ impl Parser {
             match self.ident("decorator name after `@`")?.as_str() {
                 "json" => attrs.json = true,
                 "test_only" => attrs.test_only = true,
+                "public" => {
+                    // `@public` or `@public("why anyone may call this")`
+                    let mut why = String::new();
+                    if self.eat(&Tok::LParen) {
+                        why = match self.next() {
+                            Tok::Str(s) if !s.trim().is_empty() => s,
+                            _ => bail!("line {line}: @public(\"reason\") needs a non-empty reason, or write plain @public"),
+                        };
+                        self.expect(Tok::RParen, "`)`")?;
+                    }
+                    attrs.public = Some(why);
+                }
                 "protocols" => {
                     self.expect(Tok::LParen, "`(\"proto\", ...)` after @protocols")?;
                     while !self.eat(&Tok::RParen) {
@@ -896,7 +936,7 @@ impl Parser {
                         }
                     }
                 }
-                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @body_error(..), @allow_insecure(\"reason\"), @test_only)"),
+                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @public, @body_error(..), @allow_insecure(\"reason\"), @test_only)"),
             }
             self.expect(Tok::Newline, "newline after decorator")?;
             self.skip_newlines();
@@ -1009,6 +1049,7 @@ impl Parser {
             socket: if is_socket { Some(SocketOpts::default()) } else { None },
             conn,
             guards: vec![],
+            public: None,
             body_error: None,
             ret,
             fallible,
@@ -2036,28 +2077,28 @@ mod tests {
 
     #[test]
     fn routes() {
-        let p = prog("route GET \"/health\" -> str:\n    ret \"ok\"\nroute POST \"/users/{id}/events\" (id: u64, body: Event) -> Event!:\n    ret body\n");
+        let p = prog("@public\nroute GET \"/health\" -> str:\n    ret \"ok\"\n@public\nroute POST \"/users/{id}/events\" (id: u64, body: Event) -> Event!:\n    ret body\n");
         let Item::Route(r) = &p.items[1] else { panic!() };
         assert_eq!((r.method.as_str(), r.path.as_str(), r.params.len(), r.fallible), ("POST", "/users/{id}/events", 2, true));
         let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
-        assert!(err("route GET \"/a/{id}\" -> str:\n    ret \"\"\n").contains("needs a typed parameter"));
-        assert!(err("route GET \"/a\" (x: i32):\n    ret\n").contains("must be a path param"));
-        assert!(err("route GET \"/a\":\n    ret\nroute GET \"/a\":\n    ret\n").contains("duplicate route"));
-        assert!(err("route GET \"/a\":\n    ret\nfn main():\n    ret\n").contains("Parvez generates `main`"));
-        assert!(err("route FETCH \"/a\":\n    ret\n").contains("unknown HTTP method"));
+        assert!(err("@public\nroute GET \"/a/{id}\" -> str:\n    ret \"\"\n").contains("needs a typed parameter"));
+        assert!(err("@public\nroute GET \"/a\" (x: i32):\n    ret\n").contains("must be a path param"));
+        assert!(err("@public\nroute GET \"/a\":\n    ret\n@public\nroute GET \"/a\":\n    ret\n").contains("duplicate route"));
+        assert!(err("@public\nroute GET \"/a\":\n    ret\nfn main():\n    ret\n").contains("Parvez generates `main`"));
+        assert!(err("@public\nroute FETCH \"/a\":\n    ret\n").contains("unknown HTTP method"));
     }
 
     #[test]
     fn state_block_and_state_param() {
-        let p = prog("state:\n    hits: AtomicU64 = AtomicU64::new(0)\n    env: str = env(\"APP\", \"dev\")\nroute GET \"/a/{id}\" (state, id: str) -> str:\n    ret state.env.clone()\n");
+        let p = prog("state:\n    hits: AtomicU64 = AtomicU64::new(0)\n    env: str = env(\"APP\", \"dev\")\n@public\nroute GET \"/a/{id}\" (state, id: str) -> str:\n    ret state.env.clone()\n");
         let Item::State(s) = &p.items[0] else { panic!() };
         assert_eq!((s.fields.len(), s.fields[1].0.as_str(), s.fields[1].3), (2, "env", 3));
         let Item::Route(r) = &p.items[1] else { panic!() };
         assert!(r.state && r.params.len() == 1);
         let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
-        assert!(err("route GET \"/a\" (state) -> str:\n    ret \"\"\n").contains("no `state:` block"));
+        assert!(err("@public\nroute GET \"/a\" (state) -> str:\n    ret \"\"\n").contains("no `state:` block"));
         assert!(err("state:\n    a: i32 = 1\nfn main():\n    ret\n").contains("has none"));
-        assert!(err("state:\n    a: i32 = 1\nstate:\n    b: i32 = 1\nroute GET \"/\":\n    ret\n").contains("only one"));
+        assert!(err("state:\n    a: i32 = 1\nstate:\n    b: i32 = 1\n@public\nroute GET \"/\":\n    ret\n").contains("only one"));
     }
 
     #[test]
@@ -2100,7 +2141,7 @@ mod tests {
         let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
         assert!(err("@guard(nope)\nroute GET \"/\" -> str:\n    ret \"\"\n").contains("no `fn nope`"));
         assert!(err("fn g(x: i32) -> str!:\n    ret \"\"\n@guard(g)\nroute GET \"/\":\n    ret\n").contains("may only take untyped"));
-        assert!(err("route GET \"/\" (auth):\n    ret\n").contains("no @guard"));
+        assert!(err("@public\nroute GET \"/\" (auth):\n    ret\n").contains("no @guard"));
         assert!(err("@guard(g)\nfn f():\n    ret\n").contains("goes on a `route`"));
         assert!(err("type E:\n    @omit_none\n    a: i32\n").contains("needs an optional field"));
     }
@@ -2113,20 +2154,20 @@ mod tests {
         assert!(matches!(&f.body[0].stmt, Stmt::LetTuple { names, .. } if names == &[("n".to_string(), false), ("s".to_string(), true)]));
         assert!(matches!(&f.body[1].stmt, Stmt::Let { value: Expr::Char(c), .. } if c == "!"));
         assert!(matches!(&f.body[2].stmt, Stmt::Let { value: Expr::Method(..), .. }));
-        let p = prog("@protocols(\"ro.v1\")\n@max_message(1024)\nsocket \"/ws/{id}\" (id: str, conn):\n    ret\n");
+        let p = prog("@public\n@protocols(\"ro.v1\")\n@max_message(1024)\nsocket \"/ws/{id}\" (id: str, conn):\n    ret\n");
         let Item::Route(r) = &p.items[0] else { panic!() };
         assert!(r.conn && r.fallible);
         assert_eq!(r.socket, Some(SocketOpts { protocols: vec!["ro.v1".into()], max_message: Some("1024".into()) }));
         let err = |src: &str| parse(lex(src).unwrap()).unwrap_err().to_string();
-        assert!(err("route GET \"/x\" (conn):\n    ret\n").contains("only exists in a `socket`"));
-        assert!(err("socket \"/x\":\n    ret\n").contains("a socket takes `conn`"));
-        assert!(err("@protocols(\"a\")\nroute GET \"/x\":\n    ret\n").contains("go on a `socket`"));
+        assert!(err("@public\nroute GET \"/x\" (conn):\n    ret\n").contains("only exists in a `socket`"));
+        assert!(err("@public\nsocket \"/x\":\n    ret\n").contains("a socket takes `conn`"));
+        assert!(err("@public\n@protocols(\"a\")\nroute GET \"/x\":\n    ret\n").contains("go on a `socket`"));
         // whole-program checks see module routes, guards and stray `state`/`main`
         let module = |src: &str| Module { path: vec!["m".into()], items: parse_items(lex(src).unwrap()).unwrap() };
         let mk = |main: &str, m: &str| Program { items: parse_items(lex(main).unwrap()).unwrap(), modules: vec![module(m)], files: vec![] };
         assert!(validate(&mk("fn x():\n    ret\n", "fn g(req) -> str!:\n    ret \"a\"\n@guard(g)\nroute GET \"/a\" (auth) -> str:\n    ret auth\n")).is_ok());
         assert!(validate(&mk("fn x():\n    ret\n", "state:\n    a: i32 = 1\n")).unwrap_err().to_string().contains("main file"));
-        assert!(validate(&mk("route GET \"/a\":\n    ret\n", "route GET \"/a\":\n    ret\n")).unwrap_err().to_string().contains("duplicate route"));
+        assert!(validate(&mk("@public\nroute GET \"/a\":\n    ret\n", "@public\nroute GET \"/a\":\n    ret\n")).unwrap_err().to_string().contains("duplicate route"));
     }
 
     #[test]
@@ -2148,13 +2189,27 @@ mod tests {
     }
 
     #[test]
+    fn deny_by_default_access_policy() {
+        let err = |src: &str| lex(src).and_then(parse).map(|_| ()).unwrap_err().to_string();
+        let e = err("route GET \"/x\" -> str:\n    ret \"x\"\n");
+        assert!(e.contains("line 1: route GET /x has no access policy") && e.contains("@public(\"why anyone may call it\")"), "{e}");
+        assert!(err("socket \"/ws\" (conn):\n    ret\n").contains("socket GET /ws has no access policy"));
+        assert!(err("fn g(req) -> str!:\n    ret \"a\"\n@guard(g)\n@public\nroute GET \"/x\" -> str:\n    ret \"x\"\n").contains("both @guard and @public"));
+        assert!(err("@public(\"\")\nroute GET \"/x\" -> str:\n    ret \"x\"\n").contains("non-empty reason"));
+        assert!(err("@public\nfn f():\n    ret\n").contains("@public goes on a `route`"));
+        let p = prog("@public(\"health probe for the load balancer\")\nroute GET \"/ping\" -> str:\n    ret \"pong\"\n");
+        let Item::Route(r) = &p.items[0] else { panic!() };
+        assert_eq!(r.public.as_deref(), Some("health probe for the load balancer"));
+    }
+
+    #[test]
     fn v091_errors() {
         for (src, msg) in [
             ("trait S:\n    async fn f(&self):\n        ret\n", "async trait method can't have a default body"),
             ("every 5x:\n    ret\n", "unknown time unit"),
             ("every 10ms:\n    ret\n", "at least 100ms"),
             ("priv route GET \"/\":\n    ret\n", "`priv` goes before"),
-            ("@test_only\nroute GET \"/\":\n    ret\n", "@test_only goes on helpers"),
+            ("@public\n@test_only\nroute GET \"/\":\n    ret\n", "@test_only goes on helpers"),
             ("every 1s:\n    ret\nfn main():\n    ret\n", "run inside a service"),
             ("type P<T, T>: x: T\n", "declared twice"),
         ] {
