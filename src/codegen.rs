@@ -1585,6 +1585,7 @@ impl Gen {
         self.line("async fn main() -> anyhow::Result<()> {");
         self.indent += 1;
         self.line("let app = build_app().await?;");
+        self.line("policies(); // check PARVEZ_CSP / PARVEZ_HSTS now, not on the first request");
         self.line("let port = std::env::var(\"PORT\").unwrap_or_else(|_| \"8080\".into());");
         self.line("let addr = format!(\"0.0.0.0:{port}\");");
         self.line("let listener = tokio::net::TcpListener::bind(&addr).await?;");
@@ -4012,7 +4013,79 @@ async fn json_errors(res: axum::response::Response) -> axum::response::Response 
     h.insert("x-frame-options", axum::http::HeaderValue::from_static("DENY"));
     h.insert("cache-control", axum::http::HeaderValue::from_static("no-store"));
     h.insert("referrer-policy", axum::http::HeaderValue::from_static("no-referrer"));
+    // a handler that sets its own policy keeps it
+    let html = h
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| c.starts_with("text/html"));
+    if !h.contains_key("content-security-policy")
+        && let Some(v) = if html { &policies().csp_html } else { &policies().csp_api }
+    {
+        h.insert("content-security-policy", v.clone());
+    }
+    if !h.contains_key("strict-transport-security")
+        && let Some(v) = &policies().hsts
+    {
+        h.insert("strict-transport-security", v.clone());
+    }
     res
+}
+
+struct Policies {
+    csp_html: Option<axum::http::HeaderValue>,
+    csp_api: Option<axum::http::HeaderValue>,
+    hsts: Option<axum::http::HeaderValue>,
+}
+
+/// Content-Security-Policy and Strict-Transport-Security, read once at startup.
+/// Pages: scripts only from this origin (no inline script, no eval), no plugins,
+/// no framing, no <base> hijack, forms post only here (and to the identity
+/// provider, for sign-out). Inline styles stay allowed: htmx injects one, and
+/// `style=` attributes are common. Everything else (JSON, files): `default-src 'none'`.
+/// PARVEZ_CSP replaces the page policy; PARVEZ_HSTS replaces `max-age=31536000`.
+/// Either set to `off` drops the header.
+fn policies() -> &'static Policies {
+    static P: std::sync::OnceLock<Policies> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        // an invalid override falls back to the default: a typo must not drop the protection
+        let header = |v: Option<String>, default: String, var: &str| match v.map(|v| axum::http::HeaderValue::from_str(&v)) {
+            Some(Ok(h)) => Some(h),
+            Some(Err(_)) => {
+                plog("error", &format!("{var} is not a valid header value; using the default"), Vec::new());
+                axum::http::HeaderValue::from_str(&default).ok()
+            }
+            None => axum::http::HeaderValue::from_str(&default).ok(),
+        };
+        let issuer = std::env::var("PARVEZ_OIDC_ISSUER")
+            .ok()
+            .map(|i| i.split('/').take(3).collect::<Vec<_>>().join("/"))
+            .filter(|o: &String| o.starts_with("https://") || o.starts_with("http://"));
+        let form_action = match &issuer {
+            Some(o) => format!("'self' {o}"),
+            None => "'self'".to_string(),
+        };
+        let page = format!(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+             object-src 'none'; base-uri 'self'; form-action {form_action}; frame-ancestors 'none'"
+        );
+        let csp = std::env::var("PARVEZ_CSP").ok();
+        let off = |v: &Option<String>| v.as_deref().is_some_and(|x| x.trim().eq_ignore_ascii_case("off"));
+        let (csp_html, csp_api) = if off(&csp) {
+            (None, None)
+        } else {
+            (
+                header(csp.filter(|c| !c.trim().is_empty()), page, "PARVEZ_CSP"),
+                header(None, "default-src 'none'; frame-ancestors 'none'".into(), "PARVEZ_CSP"),
+            )
+        };
+        let hsts_env = std::env::var("PARVEZ_HSTS").ok();
+        let hsts = if off(&hsts_env) {
+            None
+        } else {
+            header(hsts_env.filter(|v| !v.trim().is_empty()), "max-age=31536000".into(), "PARVEZ_HSTS")
+        };
+        Policies { csp_html, csp_api, hsts }
+    })
 }
 
 /// Runtime limit from env, falling back to the default baked in at build time.

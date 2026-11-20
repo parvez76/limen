@@ -28,8 +28,8 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 | Version | Security fixes |
 |---|---|
-| 0.13.x | yes |
-| < 0.13 | no |
+| 0.14.x | yes |
+| < 0.14 | no |
 
 ## Scope
 
@@ -50,7 +50,7 @@ Out of scope:
 
 ## What Parvez enforces
 
-These protections are on by default. Not yet set by default: `Content-Security-Policy` and `Strict-Transport-Security` (set them at your reverse proxy for now). Where a check is a compile error, the program doesn't build until it is fixed or explicitly waived. References: [CWE](https://cwe.mitre.org), [OWASP Top 10 2021](https://owasp.org/Top10/), [OWASP ASVS 4.0.3](https://owasp.org/www-project-application-security-verification-standard/).
+These protections are on by default. Where a check is a compile error, the program doesn't build until it is fixed or explicitly waived. References: [CWE](https://cwe.mitre.org), [OWASP Top 10 2021](https://owasp.org/Top10/), [OWASP ASVS 4.0.3](https://owasp.org/www-project-application-security-verification-standard/).
 
 | Protection | How | CWE | OWASP | ASVS |
 |---|---|---|---|---|
@@ -67,6 +67,8 @@ These protections are on by default. Not yet set by default: `Content-Security-P
 | Cross-site request forgery | state-changing session requests must come from the same origin | 352 | A01 | 4.2.2 |
 | Error details | internal errors and panics become a generic 500; details stay in server logs | 209 | A04 | 7.4.1 |
 | Resource exhaustion | body size limit, request timeout, concurrency backpressure | 400, 770 | A04 | - |
+| Script injection in pages | `Content-Security-Policy` on HTML: scripts only from the service's own origin (no inline scripts, event-handler attributes or `eval`), no plugins, no framing, no `<base>` hijack, forms post only to the service (and the identity provider, for sign-out). Other responses get `default-src 'none'` | 79, 1021 | A03, A05 | 14.4.3 |
+| Downgrade to HTTP | `Strict-Transport-Security: max-age=31536000` (browsers ignore it over plain HTTP, so local development is unaffected) | 319 | A02 | 14.4.5 |
 | Clickjacking and sniffing | `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` | 1021, 693 | A05 | 14.4.4, 14.4.6, 14.4.7, 8.2.1 |
 | Vulnerable dependencies | build fails on RustSec advisories (`[security] audit = "deny"`); CycloneDX SBOM per build | 1395 | A06 | 14.2.1, 14.2.5 |
 | Memory safety | Parvez code compiles to Rust without `unsafe` blocks (the language has no `unsafe`) | 119, 787, 416 | - | - |
@@ -112,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.13.0 --locked
+      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.14.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

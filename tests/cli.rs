@@ -1603,6 +1603,17 @@ fn browser_sign_in_with_session_cookies() {
     // signed in: page renders (escaped), API works, tampering is rejected
     let r = get("/dash", &format!("Accept: text/html\r\nCookie: {session}\r\n"));
     assert!(r.starts_with("HTTP/1.1 200") && r.contains("Hello ada&lt;b&gt;@adn.test"), "{r}");
+    // security headers: strict CSP on pages (forms may post to the IdP for sign-out), none on data, HSTS
+    assert_eq!(
+        header(&r, "content-security-policy"),
+        [format!(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self' {iss}; frame-ancestors 'none'"
+        )],
+        "{r}"
+    );
+    assert_eq!(header(&r, "strict-transport-security"), ["max-age=31536000"]);
+    let api = get("/whoami", &format!("Cookie: {session}\r\n"));
+    assert_eq!(header(&api, "content-security-policy"), ["default-src 'none'; frame-ancestors 'none'"], "{api}");
     assert_eq!(get("/whoami", &format!("Cookie: {session}\r\n")).rsplit("\r\n\r\n").next().unwrap(), "ada<b>@adn.test");
     let r = get("/guarded/a%3Cb", &format!("Accept: text/html\r\nCookie: {session}\r\n"));
     assert!(r.starts_with("HTTP/1.1 200") && r.contains("<h1>Welcome ada&lt;b&gt;@adn.test</h1><p>tab a&lt;b</p>"), "{r}");
@@ -1920,4 +1931,44 @@ fn security_corpus() {
     assert!(missed.is_empty(), "bypasses (expected but not reported): {missed:?}");
     assert!(extra.is_empty(), "false positives (reported but not expected): {extra:?}");
     assert!(caught_known.is_empty(), "now caught, change `known-miss` to `expect`: {caught_known:?}");
+}
+
+#[test]
+fn security_header_overrides() {
+    let dir = scratch("headers013");
+    std::fs::write(dir.join("app.prvz"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
+    let out = run_in(&dir, &["build", "app.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let serve = |env: &[(&str, &str)]| -> (String, String) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut cmd = Command::new(dir.join("app"));
+        cmd.env("PORT", port.to_string()).env("PARVEZ_LOG", "on").env_remove("PARVEZ_CSP").env_remove("PARVEZ_HSTS");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut server = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(std::time::Instant::now() < deadline, "server did not start");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let r = http_raw(port, b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+        server.kill().unwrap();
+        let mut err = String::new();
+        std::io::Read::read_to_string(server.stderr.as_mut().unwrap(), &mut err).unwrap();
+        server.wait().unwrap();
+        (r.to_lowercase(), err)
+    };
+    // text/plain: the data policy and default HSTS
+    let (r, _) = serve(&[]);
+    assert!(r.contains("content-security-policy: default-src 'none'; frame-ancestors 'none'") && r.contains("strict-transport-security: max-age=31536000\r\n"), "{r}");
+    // overrides
+    let (r, _) = serve(&[("PARVEZ_HSTS", "max-age=63072000; includeSubDomains; preload")]);
+    assert!(r.contains("strict-transport-security: max-age=63072000; includesubdomains; preload"), "{r}");
+    let (r, _) = serve(&[("PARVEZ_CSP", "off"), ("PARVEZ_HSTS", "off")]);
+    assert!(!r.contains("content-security-policy") && !r.contains("strict-transport-security"), "{r}");
+    // an invalid override keeps the default and says so at startup
+    let (r, err) = serve(&[("PARVEZ_HSTS", "bad\u{1}value")]);
+    assert!(r.contains("strict-transport-security: max-age=31536000\r\n"), "{r}");
+    assert!(err.contains("PARVEZ_HSTS is not a valid header value; using the default"), "{err}");
 }

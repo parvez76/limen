@@ -1,4 +1,4 @@
-# PARVEZ v0.13.1 SPEC (AI system prompt)
+# PARVEZ v0.14.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -342,7 +342,9 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 Services are hardened automatically (nothing to write):
 - An unexpected error or panic returns 500 `{"error":"internal server error"}`. Details go to stderr only, and the server keeps running.
 - Limits: body 2 MB (413), timeout 30 s (503), max 512 concurrent requests (then queue, then 503). Change the defaults in `parvez.toml` with `[service] body_limit_bytes`, `timeout_secs` and `max_concurrency`, or at runtime with `PARVEZ_BODY_LIMIT_BYTES`, `PARVEZ_TIMEOUT_SECS` and `PARVEZ_MAX_CONCURRENCY`.
-- Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+- Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and `Strict-Transport-Security: max-age=31536000`.
+- HTML responses (pages, embedded `.html` files) carry `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self' <identity provider>; frame-ancestors 'none'`. Put scripts in files under `@embed_dir` (e.g. `/assets/app.js`), not inline `<script>` blocks or `onclick=` attributes. htmx works as is. Other responses get `default-src 'none'; frame-ancestors 'none'`.
+- `PARVEZ_CSP` replaces the page policy and `PARVEZ_HSTS` the HSTS value (e.g. `max-age=63072000; includeSubDomains; preload`); `off` drops the header. An invalid value is reported at startup and the default is kept.
 - SIGINT and SIGTERM trigger a graceful shutdown: in-flight requests finish, then the process exits 0.
 
 Supply chain (on `parvez build` and `parvez run`):
