@@ -1,0 +1,5 @@
+# The parser and the security analysis recurse over the syntax tree; the CLI runs
+# them on a 64 MB stack. WebAssembly's default is 1 MB: give it 32 MB (memory is
+# only used when needed). tests/wasm.mjs runs the adversarial corpus to prove it.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=33554432"]

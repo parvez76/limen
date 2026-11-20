@@ -21,6 +21,11 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - run: sh -n install.sh
       - run: cargo test --release --locked
+      - name: Playground (WebAssembly) matches the CLI on the adversarial corpus
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
+          node playground/test.mjs playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm
 
   windows:
     runs-on: windows-latest

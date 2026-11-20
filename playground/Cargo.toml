@@ -1,0 +1,26 @@
+# The browser playground: Parvez's parser, security checks and Rust generator
+# compiled to WebAssembly. It compiles the compiler's own source files (see
+# src/lib.rs), so the playground can't drift from `parvez`.
+[package]
+name = "parvez-playground"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+serde_json = "1.0.154"
+toml = "1.2.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

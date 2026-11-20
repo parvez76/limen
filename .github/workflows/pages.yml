@@ -1,10 +1,10 @@
-# Publishes site/ (plus install.sh from the repo root) to
-# https://parvez76.github.io/parvez/ on every push to main.
+# Publishes site/ (plus the installers, and the playground's compiler built from
+# this repository) to https://parvez76.github.io/parvez/ on every push to main.
 name: pages
 on:
   push:
     branches: [main]
-    paths: [install.sh, install.ps1, site/**, .github/workflows/pages.yml]
+    paths: [install.sh, install.ps1, site/**, src/**, playground/**, tests/security_corpus/**, Cargo.toml, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:
@@ -28,11 +28,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - name: Build the playground compiler
+        run: cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
+      - name: The playground must match the CLI on the adversarial corpus
+        run: node playground/test.mjs playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm
       - name: Assemble
         run: |
           set -eu
           mkdir -p _site
           cp -r site/. _site/
+          cp playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm _site/play/parvez.wasm
+          mkdir -p _site/play/presets
+          for c in flows sql secrets traits stores objects_db deep_chain state_chain known_miss; do
+            cp "tests/security_corpus/$c.prvz" _site/play/presets/
+          done
           cp install.sh install.ps1 _site/
           (cd _site && sha256sum install.sh > install.sh.sha256 && sha256sum install.ps1 > install.ps1.sha256)
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0

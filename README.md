@@ -4,6 +4,8 @@
 
 Parvez is a small language for backend services and DevOps tools. You write a few lines. The compiler refuses the route nobody guarded, the secret headed for a log, and the query pasted together from strings. What you get back is one native binary.
 
+**[Try it in your browser](https://parvez76.github.io/parvez/play/)**: the real compiler, compiled to WebAssembly. No install.
+
 ## Picture this
 
 It's Friday afternoon. You asked your AI agent for one more admin endpoint, and it wrote one. It reads fine. It also forgot the permission check, the kind of line a tired reviewer skims past.

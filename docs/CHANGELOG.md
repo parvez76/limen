@@ -2,6 +2,9 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
+## Unreleased
+- Playground: https://parvez76.github.io/parvez/play/ runs the real parser, security checks and Rust generator in the browser (WebAssembly, built from this repository; no third-party code). Examples include the adversarial corpus; Share links carry the code in the URL. CI and the Pages build require it to report exactly what the CLI reports on the corpus.
+
 ## v0.18.0
 - Windows support (beta): `irm https://parvez76.github.io/parvez/install.ps1 | iex` installs a verified x64 build to `%USERPROFILE%\.parvez\bin` and adds it to the user PATH without admin rights. Releases include `x86_64-pc-windows-msvc`. CI builds and tests the compiler, the installer, `doctor`, `new`, `test` and `upgrade` on Windows.
 - `parvez doctor` checks for the Visual Studio C++ build tools on Windows; `parvez upgrade` replaces the running `parvez.exe` safely.

@@ -7,3 +7,5 @@ Adversarial programs for the security checks. `tests/cli.rs` (`security_corpus`)
 - Any other finding is a false positive and fails the test.
 
 Add a case whenever a bypass or a false positive is found.
+
+The [playground](https://parvez76.github.io/parvez/play/) is held to the same corpus: `playground/test.mjs` runs every single-file case through the WebAssembly build, and CI and the Pages build fail if it reports anything different from the CLI.

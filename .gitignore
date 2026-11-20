@@ -5,3 +5,4 @@
 /service
 # SBOMs written by `parvez build`
 /*.sbom.json
+/playground/target
