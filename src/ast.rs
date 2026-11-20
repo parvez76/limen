@@ -18,6 +18,35 @@ pub struct Module {
 
 impl Program {
     /// Every item with the module path it lives in (empty = main file).
+    /// Module paths imported only with `@test_only import` (every import of them).
+    pub fn test_only_modules(&self) -> std::collections::BTreeSet<Vec<String>> {
+        let mut imports: std::collections::HashMap<Vec<String>, bool> = std::collections::HashMap::new();
+        for (_, item) in self.all_items() {
+            if let Item::Import(i) = item {
+                *imports.entry(i.path.clone()).or_insert(true) &= i.flags.test_only;
+            }
+        }
+        imports.into_iter().filter(|(_, t)| *t).map(|(p, _)| p).collect()
+    }
+
+    /// Items that exist only in `parvez test` builds: `test` blocks, `@test_only`
+    /// items and everything in a test-only module.
+    pub fn is_test_scope(&self, module: &[String], item: &Item, test_mods: &std::collections::BTreeSet<Vec<String>>) -> bool {
+        let flagged = match item {
+            Item::Fn(x) => x.flags.test_only,
+            Item::Struct(x) => x.flags.test_only,
+            Item::Enum(x) => x.flags.test_only,
+            Item::Impl(x) => x.flags.test_only,
+            Item::Trait(x) => x.flags.test_only,
+            Item::Use(x) => x.flags.test_only,
+            Item::Import(x) => x.flags.test_only,
+            Item::Const { flags, .. } => flags.test_only,
+            Item::Test(_) => true,
+            _ => false,
+        };
+        flagged || test_mods.iter().any(|m| module.starts_with(m))
+    }
+
     pub fn all_items(&self) -> Vec<(&[String], &Item)> {
         let mut v: Vec<(&[String], &Item)> = self.items.iter().map(|i| (&[][..], i)).collect();
         for m in &self.modules {
@@ -46,6 +75,7 @@ pub struct TestDef {
 /// `import a.b`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportDef {
+    pub flags: Flags,
     pub path: Vec<String>,
     pub line: usize,
 }
@@ -57,6 +87,7 @@ pub enum Item {
         ty: Type,
         value: Expr,
         line: usize,
+        flags: Flags,
     },
     Embed {
         dir: String,
@@ -73,6 +104,46 @@ pub enum Item {
     Import(ImportDef),
     /// `test "name":` block (compiled only for `parvez test`)
     Test(TestDef),
+    /// `trait Name:` with method signatures and optional default bodies
+    Trait(TraitDef),
+    /// `every 1h (state):` scheduled background worker
+    Every(EveryDef),
+}
+
+/// `priv` (module-private) and `@test_only` (built only for `parvez test` / `check`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Flags {
+    pub private: bool,
+    pub test_only: bool,
+}
+
+/// A generic parameter: `T` or `T: Clone + Store`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Generic {
+    pub name: String,
+    pub bounds: Vec<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDef {
+    pub name: String,
+    pub generics: Vec<Generic>,
+    /// methods; `has_body == false` for required signatures
+    pub methods: Vec<FnDef>,
+    pub line: usize,
+    pub flags: Flags,
+}
+
+/// `every 1h (state):` -> a worker that runs the body once per period.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EveryDef {
+    /// period in milliseconds
+    pub period_ms: u64,
+    /// the period as written, e.g. `1h` (logs, metrics)
+    pub label: String,
+    pub state: bool,
+    pub body: Block,
+    pub line: usize,
 }
 
 /// `state:` block: shared resources built once at server start.
@@ -93,6 +164,7 @@ pub struct UseDef {
     /// Rust path as written, e.g. `serde::{Serialize, Deserialize}`
     pub path: String,
     pub line: usize,
+    pub flags: Flags,
 }
 
 /// `route POST "/events/{id}" (id: str, body: Event) -> Event!:`
@@ -138,6 +210,8 @@ pub struct Attrs {
     pub body_error: Option<BodyError>,
     /// `@protocols(..)` / `@max_message(n)` (sockets only)
     pub socket: SocketOpts,
+    /// `@test_only`
+    pub test_only: bool,
 }
 
 /// `@protocols("ro.v1")`, `@max_message(8388608)` on a `socket`.
@@ -166,19 +240,23 @@ pub struct FieldAttrs {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub name: String,
+    pub generics: Vec<Generic>,
     pub fields: Vec<(String, Type)>,
     /// same length as `fields`
     pub field_attrs: Vec<FieldAttrs>,
     pub line: usize,
     pub attrs: Attrs,
+    pub flags: Flags,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef {
     pub name: String,
+    pub generics: Vec<Generic>,
     pub variants: Vec<Variant>,
     pub line: usize,
     pub attrs: Attrs,
+    pub flags: Flags,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,9 +277,17 @@ pub enum VariantData {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDef {
+    /// the implementing type's base name (`Page` in `impl Page<T>:`)
     pub ty: String,
+    /// its type arguments (`[T]`)
+    pub ty_args: Vec<Type>,
+    /// `impl<T: X> ...`: explicit generics; otherwise inferred from the type's declaration
+    pub generics: Option<Vec<Generic>>,
+    /// `impl Store for Mem:`
+    pub trait_: Option<Type>,
     pub methods: Vec<FnDef>,
     pub line: usize,
+    pub flags: Flags,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -216,9 +302,10 @@ pub enum Receiver {
     MutValue,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FnDef {
     pub name: String,
+    pub generics: Vec<Generic>,
     pub is_async: bool,
     pub receiver: Option<Receiver>,
     pub params: Vec<(String, Type)>,
@@ -229,6 +316,9 @@ pub struct FnDef {
     pub line: usize,
     /// `@allow_insecure("reason")`
     pub allow_insecure: Option<String>,
+    /// false for a trait method signature without a body
+    pub has_body: bool,
+    pub flags: Flags,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -369,6 +459,16 @@ pub enum Expr {
     Spawn(Box<ClosureBody>),
     /// `name: value` inside call args, e.g. `fail(401, code: "x", "msg")`
     Named(String, Box<Expr>),
+    /// `e as T`
+    Cast(Box<Expr>, Type),
+    /// `{"k": v, ...}` -> HashMap (or a JSON object inside `json(...)`)
+    Map(Vec<(Expr, Expr)>),
+    /// `e catch err: handler` -- `?`/`fail` inside `e` land in the handler
+    Catch {
+        expr: Box<Expr>,
+        binding: Option<String>,
+        handler: Box<ClosureBody>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -466,6 +566,15 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             }
         }
         Expr::Closure { body: b, .. } | Expr::Spawn(b) => body(b, f),
+        Expr::Cast(x, _) => visit_expr(x, f),
+        Expr::Map(kvs) => kvs.iter().for_each(|(k, v)| {
+            visit_expr(k, f);
+            visit_expr(v, f);
+        }),
+        Expr::Catch { expr, handler, .. } => {
+            visit_expr(expr, f);
+            body(handler, f);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Ident(_) => {}
     }
 }

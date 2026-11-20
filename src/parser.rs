@@ -10,24 +10,32 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     loop {
         p.skip_newlines();
+        let private = matches!(p.peek(), Tok::Ident(k) if k == "priv");
+        if private {
+            p.next();
+            let line = p.line();
+            let item = match p.peek() {
+                Tok::Fn | Tok::Async => Item::Fn(p.parse_fn()?),
+                Tok::Type => Item::Struct(p.parse_struct()?),
+                Tok::Enum => Item::Enum(p.parse_enum()?),
+                Tok::Ident(k) if k == "trait" => Item::Trait(p.parse_trait()?),
+                Tok::Ident(k) if k == "const" => p.parse_const()?,
+                t => bail!("line {line}: `priv` goes before `fn`, `type`, `enum`, `trait` or `const`, found {t:?}"),
+            };
+            items.push(item);
+            set_flags(items.last_mut().unwrap(), |f| f.private = true);
+            continue;
+        }
         match p.peek() {
             Tok::Eof => break,
             Tok::Fn | Tok::Async => items.push(Item::Fn(p.parse_fn()?)),
+            Tok::Ident(k) if k == "trait" && matches!(p.peek_at(1), Tok::Ident(_)) => items.push(Item::Trait(p.parse_trait()?)),
+            Tok::Ident(k) if k == "every" && matches!(p.peek_at(1), Tok::Int(_)) => items.push(Item::Every(p.parse_every()?)),
             Tok::Type => items.push(Item::Struct(p.parse_struct()?)),
             Tok::Enum => items.push(Item::Enum(p.parse_enum()?)),
             Tok::Impl => items.push(Item::Impl(p.parse_impl()?)),
             Tok::Use => items.push(Item::Use(p.parse_use()?)),
-            Tok::Ident(k) if k == "const" => {
-                let line = p.line();
-                p.next();
-                let name = p.ident("constant name")?;
-                p.expect(Tok::Colon, "constant type")?;
-                let ty = p.parse_type()?;
-                p.expect(Tok::Assign, "`=`")?;
-                let value = p.parse_expr()?;
-                p.end_stmt()?;
-                items.push(Item::Const { name, ty, value, line });
-            }
+            Tok::Ident(k) if k == "const" => items.push(p.parse_const()?),
             Tok::At if matches!(p.peek_at(1), Tok::Ident(k) if k == "embed_dir") => {
                 let line = p.line();
                 p.next();
@@ -49,6 +57,50 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
                 let attrs = p.parse_attrs()?;
                 let reason = attrs.allow_insecure.clone();
                 let only_reason = !attrs.json && attrs.derives.is_empty();
+                let test_only = attrs.test_only;
+                let plain = only_reason && attrs.guards.is_empty() && attrs.body_error.is_none() && reason.is_none();
+                // `@test_only` alone may also mark impl / use / import / const / trait / priv items
+                let simple = match p.peek().clone() {
+                    Tok::Impl if plain && test_only => Some(Item::Impl(p.parse_impl()?)),
+                    Tok::Use if plain && test_only => Some(Item::Use(p.parse_use()?)),
+                    Tok::Ident(k) if k == "import" && plain && test_only => Some(p.parse_import()?),
+                    Tok::Ident(k) if k == "const" && plain && test_only => Some(p.parse_const()?),
+                    Tok::Ident(k) if k == "trait" && plain && test_only => Some(Item::Trait(p.parse_trait()?)),
+                    Tok::Ident(k) if k == "priv" => {
+                        p.next();
+                        let mut item = match p.peek() {
+                            Tok::Fn | Tok::Async if only_reason => {
+                                let mut f = p.parse_fn()?;
+                                f.allow_insecure = reason.clone();
+                                Item::Fn(f)
+                            }
+                            Tok::Type if reason.is_none() => {
+                                let mut s = p.parse_struct()?;
+                                s.attrs = attrs.clone();
+                                Item::Struct(s)
+                            }
+                            Tok::Enum if reason.is_none() => {
+                                let mut e = p.parse_enum()?;
+                                e.attrs = attrs.clone();
+                                Item::Enum(e)
+                            }
+                            t => bail!("line {line}: `priv` after decorators goes before `fn`, `type` or `enum`, found {t:?}"),
+                        };
+                        set_flags(&mut item, |f| f.private = true);
+                        Some(item)
+                    }
+                    _ => None,
+                };
+                if let Some(mut item) = simple {
+                    if test_only {
+                        set_flags(&mut item, |f| f.test_only = true);
+                    }
+                    items.push(item);
+                    continue;
+                }
+                if test_only && matches!(p.peek(), Tok::Ident(r) if r == "route" || r == "socket" || r == "state") {
+                    bail!("line {line}: @test_only goes on helpers (`fn`, `type`, `enum`, `impl`, `trait`, `const`, `use`, `import`), not on routes or `state:`");
+                }
                 let is_route = matches!(p.peek(), Tok::Ident(r) if r == "route" || r == "socket");
                 let is_socket = matches!(p.peek(), Tok::Ident(r) if r == "socket");
                 if attrs.socket != SocketOpts::default() && !is_socket {
@@ -100,6 +152,9 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
                         t
                     ),
                 }
+                if test_only {
+                    set_flags(items.last_mut().unwrap(), |f| f.test_only = true);
+                }
             }
             Tok::Ident(r) if r == "route" => items.push(Item::Route(p.parse_route()?)),
             Tok::Ident(r) if r == "socket" && matches!(p.peek_at(1), Tok::Str(_)) => items.push(Item::Route(p.parse_route()?)),
@@ -113,25 +168,31 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
                 let body = p.parse_block()?;
                 items.push(Item::Test(TestDef { name, body, line }));
             }
-            Tok::Ident(r) if r == "import" && matches!(p.peek_at(1), Tok::Ident(_)) => {
-                let line = p.line();
-                p.next();
-                let mut path = vec![p.ident("module name after `import`")?];
-                while p.eat(&Tok::Dot) {
-                    path.push(p.ident("module name after `.`")?);
-                }
-                p.end_stmt()?;
-                items.push(Item::Import(ImportDef { path, line }));
-            }
+            Tok::Ident(r) if r == "import" && matches!(p.peek_at(1), Tok::Ident(_)) => items.push(p.parse_import()?),
             Tok::Ident(r) if r == "state" && p.peek_at(1) == &Tok::Colon => items.push(Item::State(p.parse_state()?)),
             t => bail!(
-                "line {}: expected `fn`, `type`, `enum`, `impl`, `use`, `import` or `route` at top level, found {:?}",
+                "line {}: expected `fn`, `type`, `enum`, `trait`, `impl`, `use`, `import`, `route` or `every` at top level, found {:?}",
                 p.line(),
                 t
             ),
         }
     }
     Ok(items)
+}
+
+/// Applies `f` to an item's `priv` / `@test_only` flags; items without flags are rejected earlier.
+fn set_flags(item: &mut Item, f: impl FnOnce(&mut Flags)) {
+    match item {
+        Item::Fn(x) => f(&mut x.flags),
+        Item::Struct(x) => f(&mut x.flags),
+        Item::Enum(x) => f(&mut x.flags),
+        Item::Impl(x) => f(&mut x.flags),
+        Item::Trait(x) => f(&mut x.flags),
+        Item::Use(x) => f(&mut x.flags),
+        Item::Import(x) => f(&mut x.flags),
+        Item::Const { flags, .. } => f(flags),
+        Item::Embed { .. } | Item::Route(_) | Item::State(_) | Item::Test(_) | Item::Every(_) => {}
+    }
 }
 
 /// Parses a single-file program and runs the whole-program checks.
@@ -219,6 +280,36 @@ pub fn validate(prog: &Program) -> Result<()> {
                 }
                 if pname == "state" && states.is_empty() {
                     bail!("line {}: guard `{g}` takes `state` but there is no `state:` block", f.line);
+                }
+            }
+        }
+    }
+    let test_mods = prog.test_only_modules();
+    for (m, item) in &all {
+        let in_test_mod = test_mods.iter().any(|t| m.starts_with(t));
+        match item {
+            Item::Every(e) => {
+                if routes.is_empty() && !embedded {
+                    bail!("line {}: `every` workers run inside a service; this program has no `route`s", e.line);
+                }
+                if e.state && states.is_empty() {
+                    bail!("line {}: worker takes `state` but there is no `state:` block", e.line);
+                }
+                if in_test_mod {
+                    bail!("line {}: a @test_only module can't start `every` workers", e.line);
+                }
+            }
+            Item::Route(r) if in_test_mod => {
+                bail!("line {}: a @test_only module can't define routes (they would vanish from `parvez build`)", r.line);
+            }
+            _ => {}
+        }
+    }
+    for (_, r) in &routes {
+        for g in &r.guards {
+            if let Some((_, f)) = fns.iter().find(|(n, _)| n == g || n.ends_with(&format!("::{g}"))) {
+                if f.flags.test_only {
+                    bail!("line {}: @guard({g}) is @test_only, so production builds would have no guard", r.line);
                 }
             }
         }
@@ -383,6 +474,7 @@ impl Parser {
         let line = self.line();
         self.expect(Tok::Type, "`type`")?;
         let name = self.ident("type name")?;
+        let generics = self.parse_generics()?;
         self.expect(Tok::Colon, "`:` after type name")?;
         let mut fields = Vec::new();
         let mut field_attrs = Vec::new();
@@ -419,7 +511,7 @@ impl Parser {
         if fields.is_empty() {
             bail!("line {}: type `{name}` has no fields", self.line());
         }
-        Ok(StructDef { name, fields, field_attrs, line, attrs: Attrs::default() })
+        Ok(StructDef { name, generics, fields, field_attrs, line, attrs: Attrs::default(), flags: Flags::default() })
     }
 
     /// `@rename("x")`, `@default`, `@omit_none` lines before a field.
@@ -451,6 +543,7 @@ impl Parser {
         let line = self.line();
         self.expect(Tok::Enum, "`enum`")?;
         let name = self.ident("enum name")?;
+        let generics = self.parse_generics()?;
         self.expect(Tok::Colon, "`:` after enum name")?;
         let block = self.eat(&Tok::Newline);
         if block {
@@ -478,7 +571,7 @@ impl Parser {
         if variants.is_empty() {
             bail!("line {line}: enum `{name}` has no variants");
         }
-        Ok(EnumDef { name, variants, line, attrs: Attrs::default() })
+        Ok(EnumDef { name, generics, variants, line, attrs: Attrs::default(), flags: Flags::default() })
     }
 
     fn parse_variant(&mut self) -> Result<Variant> {
@@ -510,7 +603,12 @@ impl Parser {
     fn parse_impl(&mut self) -> Result<ImplDef> {
         let line = self.line();
         self.expect(Tok::Impl, "`impl`")?;
-        let ty = self.ident("type name after `impl`")?;
+        let generics = if self.peek() == &Tok::Lt { Some(self.parse_generics()?) } else { None };
+        let first = self.parse_type()?;
+        let (trait_, target) = if self.eat(&Tok::For) { (Some(first), self.parse_type()?) } else { (None, first) };
+        let Type::Named(ty, ty_args) = target else {
+            bail!("line {line}: `impl` needs a named type, e.g. `impl Page<T>:` or `impl Store for Mem:`");
+        };
         self.expect(Tok::Colon, "`:` after impl type")?;
         self.expect(Tok::Newline, "newline after `impl Type:`")?;
         self.skip_newlines();
@@ -525,9 +623,15 @@ impl Parser {
                 }
                 Tok::Eof => break,
                 Tok::Fn | Tok::Async => methods.push(self.parse_fn()?),
+                Tok::Ident(k) if k == "priv" => {
+                    self.next();
+                    let mut f = self.parse_fn()?;
+                    f.flags.private = true;
+                    methods.push(f);
+                }
                 Tok::At => {
                     let attrs = self.parse_attrs()?;
-                    if attrs.json || !attrs.derives.is_empty() {
+                    if attrs.json || !attrs.derives.is_empty() || attrs.test_only {
                         bail!("line {}: only @allow_insecure can decorate a method", self.line());
                     }
                     let mut f = self.parse_fn()?;
@@ -537,7 +641,10 @@ impl Parser {
                 t => bail!("line {}: only `fn` is allowed inside `impl`, found {:?}", self.line(), t),
             }
         }
-        Ok(ImplDef { ty, methods, line })
+        if trait_.is_some() && methods.iter().any(|m| m.flags.private) {
+            bail!("line {line}: trait methods can't be `priv`");
+        }
+        Ok(ImplDef { ty, ty_args, generics, trait_, methods, line, flags: Flags::default() })
     }
 
     fn skip_newlines_if(&mut self, yes: bool) {
@@ -547,10 +654,16 @@ impl Parser {
     }
 
     fn parse_fn(&mut self) -> Result<FnDef> {
+        self.parse_fn_sig(false)
+    }
+
+    /// `fn`; with `sig_ok`, a signature line without a body (trait methods).
+    fn parse_fn_sig(&mut self, sig_ok: bool) -> Result<FnDef> {
         let line = self.line();
         let is_async = self.eat(&Tok::Async);
         self.expect(Tok::Fn, "`fn` (after `async`)")?;
         let name = self.ident("function name")?;
+        let generics = self.parse_generics()?;
         self.expect(Tok::LParen, "`(`")?;
         let receiver = self.parse_receiver()?;
         if receiver.is_some() && !self.eat(&Tok::Comma) && self.peek() != &Tok::RParen {
@@ -574,8 +687,127 @@ impl Parser {
         }
         let ret = if self.eat(&Tok::Arrow) { Some(self.parse_type()?) } else { None };
         let fallible = self.eat(&Tok::Bang);
+        if sig_ok && matches!(self.peek(), Tok::Newline | Tok::Dedent | Tok::Eof) {
+            self.end_stmt()?;
+            return Ok(FnDef { name, generics, is_async, receiver, params, ret, fallible, line, has_body: false, ..Default::default() });
+        }
         let body = self.parse_block()?;
-        Ok(FnDef { name, is_async, receiver, params, ret, fallible, body, line, allow_insecure: None })
+        Ok(FnDef { name, generics, is_async, receiver, params, ret, fallible, body, line, has_body: true, ..Default::default() })
+    }
+
+    /// `<T, U: Clone + Store>` after a type or function name (empty when absent).
+    fn parse_generics(&mut self) -> Result<Vec<Generic>> {
+        let mut out = Vec::new();
+        if !self.eat(&Tok::Lt) {
+            return Ok(out);
+        }
+        loop {
+            let name = self.ident("generic parameter name, e.g. `T`")?;
+            let mut bounds = Vec::new();
+            if self.eat(&Tok::Colon) {
+                loop {
+                    bounds.push(self.parse_type()?);
+                    if !self.eat(&Tok::Plus) {
+                        break;
+                    }
+                }
+            }
+            if out.iter().any(|g: &Generic| g.name == name) {
+                bail!("line {}: generic parameter `{name}` is declared twice", self.line());
+            }
+            out.push(Generic { name, bounds });
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::Gt, "`,` or `>` after generic parameters")?;
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// `trait Name[<T>]:` NEWLINE INDENT (fn signature | fn with default body)+ DEDENT
+    fn parse_trait(&mut self) -> Result<TraitDef> {
+        let line = self.line();
+        self.next(); // `trait`
+        let name = self.ident("trait name")?;
+        let generics = self.parse_generics()?;
+        self.expect(Tok::Colon, "`:` after trait name")?;
+        self.expect(Tok::Newline, "newline after `trait Name:`")?;
+        self.skip_newlines();
+        self.expect(Tok::Indent, "indented method signatures")?;
+        let mut methods = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Dedent => {
+                    self.next();
+                    break;
+                }
+                Tok::Eof => break,
+                Tok::Fn | Tok::Async => {
+                    let f = self.parse_fn_sig(true)?;
+                    if f.is_async && f.has_body {
+                        bail!("line {}: an async trait method can't have a default body yet; declare the signature and implement it in each `impl`", f.line);
+                    }
+                    methods.push(f);
+                }
+                t => bail!("line {}: only `fn` signatures are allowed inside `trait`, found {:?}", self.line(), t),
+            }
+        }
+        if methods.is_empty() {
+            bail!("line {line}: trait `{name}` has no methods");
+        }
+        Ok(TraitDef { name, generics, methods, line, flags: Flags::default() })
+    }
+
+    /// `every 30s (state):` / `every 1h:` -- units ms, s, m, h, d
+    fn parse_every(&mut self) -> Result<EveryDef> {
+        let line = self.line();
+        self.next(); // `every`
+        let Tok::Int(n) = self.next() else { unreachable!() };
+        let unit = self.ident("a time unit right after the number: ms, s, m, h or d (e.g. `every 30s:`)")?;
+        let factor: u64 = match unit.as_str() {
+            "ms" => 1,
+            "s" => 1_000,
+            "m" => 60_000,
+            "h" => 3_600_000,
+            "d" => 86_400_000,
+            u => bail!("line {line}: unknown time unit `{u}` (use ms, s, m, h or d)"),
+        };
+        let count: u64 = n.replace('_', "").parse().map_err(|_| anyhow::anyhow!("line {line}: period too large"))?;
+        let period_ms = count.checked_mul(factor).filter(|ms| *ms >= 100).ok_or_else(|| anyhow::anyhow!("line {line}: the period must be at least 100ms"))?;
+        let mut state = false;
+        if self.eat(&Tok::LParen) {
+            match self.next() {
+                Tok::Ident(s) if s == "state" => state = true,
+                t => bail!("line {line}: a worker takes only `(state)`, found {t:?}"),
+            }
+            self.expect(Tok::RParen, "`)`")?;
+        }
+        let body = self.parse_block()?;
+        Ok(EveryDef { period_ms, label: format!("{n}{unit}"), state, body, line })
+    }
+
+    fn parse_const(&mut self) -> Result<Item> {
+        let line = self.line();
+        self.next(); // `const`
+        let name = self.ident("constant name")?;
+        self.expect(Tok::Colon, "constant type")?;
+        let ty = self.parse_type()?;
+        self.expect(Tok::Assign, "`=`")?;
+        let value = self.parse_expr()?;
+        self.end_stmt()?;
+        Ok(Item::Const { name, ty, value, line, flags: Flags::default() })
+    }
+
+    fn parse_import(&mut self) -> Result<Item> {
+        let line = self.line();
+        self.next(); // `import`
+        let mut path = vec![self.ident("module name after `import`")?];
+        while self.eat(&Tok::Dot) {
+            path.push(self.ident("module name after `.`")?);
+        }
+        self.end_stmt()?;
+        Ok(Item::Import(ImportDef { path, line, flags: Flags::default() }))
     }
 
     /// `@json` / `@derive(Hash, Eq)` lines before a `type` or `enum`.
@@ -585,6 +817,7 @@ impl Parser {
             let line = self.line();
             match self.ident("decorator name after `@`")?.as_str() {
                 "json" => attrs.json = true,
+                "test_only" => attrs.test_only = true,
                 "protocols" => {
                     self.expect(Tok::LParen, "`(\"proto\", ...)` after @protocols")?;
                     while !self.eat(&Tok::RParen) {
@@ -663,7 +896,7 @@ impl Parser {
                         }
                     }
                 }
-                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @body_error(..), @allow_insecure(\"reason\"))"),
+                other => bail!("line {line}: unknown decorator `@{other}` (known: @json, @derive(...), @guard(fn), @body_error(..), @allow_insecure(\"reason\"), @test_only)"),
             }
             self.expect(Tok::Newline, "newline after decorator")?;
             self.skip_newlines();
@@ -704,7 +937,7 @@ impl Parser {
             path = format!("{path} as {}", self.ident("alias after `as`")?);
         }
         self.end_stmt()?;
-        Ok(UseDef { path, line })
+        Ok(UseDef { path, line, flags: Flags::default() })
     }
 
     /// `route METHOD "/path/{p}" [(params)] [-> T][!]:` block, or
@@ -863,6 +1096,13 @@ impl Parser {
                 let args = self.type_list(Tok::RParen)?;
                 let ret = if self.eat(&Tok::Arrow) { Some(Box::new(self.parse_type()?)) } else { None };
                 Type::Fn(args, ret)
+            }
+            Tok::Ident(d) if d == "dyn" && matches!(self.peek_at(1), Tok::Ident(_)) => {
+                self.next();
+                match self.parse_type()? {
+                    Type::Named(n, args) => Type::Named(format!("dyn {n}"), args),
+                    _ => bail!("line {}: `dyn` needs a trait name, e.g. `Arc<dyn Store>`", self.line()),
+                }
             }
             Tok::Ident(_) => {
                 let mut name = self.ident("type")?;
@@ -1114,7 +1354,22 @@ impl Parser {
     // ---------- expressions ----------
 
     pub fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_bin(0)
+        let e = self.parse_bin(0)?;
+        // `expr catch [err]: handler` -- lowest precedence, ends the expression
+        let is_catch = matches!(self.peek(), Tok::Ident(c) if c == "catch")
+            && (self.peek_at(1) == &Tok::Colon || (matches!(self.peek_at(1), Tok::Ident(_)) && self.peek_at(2) == &Tok::Colon));
+        if !is_catch {
+            return Ok(e);
+        }
+        self.next();
+        let binding = if let Tok::Ident(b) = self.peek().clone() {
+            self.next();
+            Some(b)
+        } else {
+            None
+        };
+        let handler = self.parse_block()?;
+        Ok(Expr::Catch { expr: Box::new(e), binding, handler: Box::new(ClosureBody::Block(handler)) })
     }
 
     fn bin_op(&self) -> Option<(u8, &'static str)> {
@@ -1182,7 +1437,15 @@ impl Parser {
                 let m = self.eat(&Tok::Tilde);
                 Ok(Expr::Ref(Box::new(self.parse_unary()?), m))
             }
-            _ => self.parse_postfix(),
+            _ => {
+                let mut e = self.parse_postfix()?;
+                // `e as T` binds tighter than binary operators
+                while matches!(self.peek(), Tok::Ident(a) if a == "as") {
+                    self.next();
+                    e = Expr::Cast(Box::new(e), self.parse_type()?);
+                }
+                Ok(e)
+            }
         }
     }
 
@@ -1384,6 +1647,21 @@ impl Parser {
                 Expr::If(Box::new(c), Box::new(a), Box::new(self.parse_expr()?))
             }
             Tok::Match => self.parse_match(line)?,
+            Tok::LBrace => {
+                // `{"key": value, ...}` map literal (newlines allowed inside the braces)
+                let mut kvs = Vec::new();
+                while !self.eat(&Tok::RBrace) {
+                    let k = self.parse_bin(0)?;
+                    self.expect(Tok::Colon, "`:` between a map key and its value")?;
+                    let v = self.parse_expr()?;
+                    kvs.push((k, v));
+                    if !self.eat(&Tok::Comma) {
+                        self.expect(Tok::RBrace, "`,` or `}` in a map literal")?;
+                        break;
+                    }
+                }
+                Expr::Map(kvs)
+            }
             Tok::LBracket => {
                 let mut items = Vec::new();
                 while !self.eat(&Tok::RBracket) {
@@ -1849,6 +2127,40 @@ mod tests {
         assert!(validate(&mk("fn x():\n    ret\n", "fn g(req) -> str!:\n    ret \"a\"\n@guard(g)\nroute GET \"/a\" (auth) -> str:\n    ret auth\n")).is_ok());
         assert!(validate(&mk("fn x():\n    ret\n", "state:\n    a: i32 = 1\n")).unwrap_err().to_string().contains("main file"));
         assert!(validate(&mk("route GET \"/a\":\n    ret\n", "route GET \"/a\":\n    ret\n")).unwrap_err().to_string().contains("duplicate route"));
+    }
+
+    #[test]
+    fn v091_items_and_expressions() {
+        let p = prog("@json\ntype Page<T: Clone>: items: [T], total: i64\ntrait Store:\n    async fn get(&self, id: i64) -> str?!\n    fn name(&self) -> str:\n        ret \"s\"\nimpl Store for Mem:\n    async fn get(&self, id: i64) -> str?!:\n        ret None\npriv fn helper() -> i64:\n    ret 1 as i64\n@test_only\nfn fake():\n    m = {\"a\": 1, \"b\": 2}\n    x = load()? catch e: 0\n");
+        let Item::Struct(st) = &p.items[0] else { panic!() };
+        assert_eq!(st.generics[0].name, "T");
+        assert_eq!(st.generics[0].bounds.len(), 1);
+        let Item::Trait(t) = &p.items[1] else { panic!() };
+        assert!(!t.methods[0].has_body && t.methods[1].has_body);
+        let Item::Impl(i) = &p.items[2] else { panic!() };
+        assert!(i.trait_.is_some() && i.ty == "Mem");
+        let Item::Fn(h) = &p.items[3] else { panic!() };
+        assert!(h.flags.private && matches!(&h.body[0].stmt, Stmt::Ret(Some(Expr::Cast(..)))));
+        let Item::Fn(f) = &p.items[4] else { panic!() };
+        assert!(f.flags.test_only);
+        assert!(matches!(&f.body[0].stmt, Stmt::Let { value: Expr::Map(kv), .. } if kv.len() == 2));
+        assert!(matches!(&f.body[1].stmt, Stmt::Let { value: Expr::Catch { binding: Some(b), .. }, .. } if b == "e"));
+    }
+
+    #[test]
+    fn v091_errors() {
+        for (src, msg) in [
+            ("trait S:\n    async fn f(&self):\n        ret\n", "async trait method can't have a default body"),
+            ("every 5x:\n    ret\n", "unknown time unit"),
+            ("every 10ms:\n    ret\n", "at least 100ms"),
+            ("priv route GET \"/\":\n    ret\n", "`priv` goes before"),
+            ("@test_only\nroute GET \"/\":\n    ret\n", "@test_only goes on helpers"),
+            ("every 1s:\n    ret\nfn main():\n    ret\n", "run inside a service"),
+            ("type P<T, T>: x: T\n", "declared twice"),
+        ] {
+            let err = lex(src).and_then(parse).map(|_| ()).unwrap_err().to_string();
+            assert!(err.contains(msg), "{src:?}: {err}");
+        }
     }
 
     #[test]

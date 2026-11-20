@@ -1,0 +1,65 @@
+import store
+@test_only
+import testkit
+
+use std::sync::Arc
+use std::sync::atomic::{AtomicU64, Ordering}
+
+state:
+    repo: Arc<dyn store::Store> = store::mem()
+    ticks: AtomicU64 = AtomicU64::new(0)
+
+every 200ms (state):
+    state.ticks.fetch_add(1, Ordering::SeqCst)
+
+fn owner(req) -> str!:
+    id = req.param("id").unwrap_or_default()
+    if id == "7": fail(404, code: "not_found", "item not found")
+    ret id
+
+@guard(owner)
+route GET "/items/{id}" (state, auth, id: i64) -> str!:
+    name = store::lookup(state.repo.as_ref(), id).await catch e:
+        log_warn("lookup failed", err: e.to_string())
+        "fallback"
+    ret "{auth}:{name}"
+
+route GET "/stats" (state) -> serde_json::Value!:
+    a, b = parallel(slow(1), slow(2))
+    c, d = parallel(maybe(3), maybe(4))?
+    counts = {"a": a, "b": b}
+    ret json({"sum": a + b + c + d, "counts": counts, "ticks": state.ticks.load(Ordering::SeqCst) > 0, "tags": ["x", "y"], "ratio": (a as f64) / 4.0})
+
+async fn slow(n: i64) -> i64:
+    ret n * 10
+
+async fn maybe(n: i64) -> i64!:
+    ret n
+
+fn parse_or_zero(s: &str) -> i64:
+    ret s.parse<i64>()? catch: 0
+
+test "generics, traits, catch, casts":
+    p = store::page_of(&[1, 2, 3])
+    assert_eq(p.len(), 3)
+    assert_eq(p.first(), Some(&1))
+    assert_eq(store::answer(), 42)
+    assert_eq(parse_or_zero("12"), 12)
+    assert_eq(parse_or_zero("x"), 0)
+    assert_eq(testkit::fake_name(), "fake")
+
+test "dyn trait mock and guard path params":
+    app = test_app().await?
+    r = app.get("/items/1").await?
+    assert_eq(r.text(), "1:bolt")
+    assert_eq(app.get("/items/2").await?.text(), "2:none")
+    assert_eq(app.get("/items/-5").await?.text(), "-5:fallback")
+    assert_eq(app.get("/items/7").await?.status, 404)
+
+test "parallel and json":
+    app = test_app().await?
+    v: serde_json::Value = app.get("/stats").await?.json()?
+    assert_eq(v["sum"], 37)
+    assert_eq(v["counts"]["b"], 20)
+    assert_eq(v["tags"][1], "y")
+    assert_eq(v["ratio"], 2.5)

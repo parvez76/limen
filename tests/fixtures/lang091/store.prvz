@@ -1,0 +1,46 @@
+use std::sync::Arc
+use std::collections::HashMap
+
+@json
+type Item: id: i64, name: str
+
+@json
+type Page<T>: items: [T], total: i64
+
+impl Page<T>:
+    fn first(&self) -> Option<&T>:
+        ret self.items.first()
+
+    fn len(&self) -> i64:
+        ret self.items.len() as i64
+
+trait Store:
+    async fn get(&self, id: i64) -> Item?!
+    fn name(&self) -> str:
+        ret "store"
+
+type Mem: items: HashMap<i64, Item>
+
+impl Store for Mem:
+    async fn get(&self, id: i64) -> Item?!:
+        if id < 0: fail(400, code: "bad_id", "negative id {id}")
+        ret self.items.get(&id).cloned()
+
+priv fn secret_helper() -> i64:
+    ret 41
+
+fn answer() -> i64:
+    ret secret_helper() + 1
+
+fn page_of<T: Clone>(xs: &[T]) -> Page<T>:
+    ret Page(items: xs.to_vec(), total: xs.len() as i64)
+
+fn mem() -> Arc<dyn Store>:
+    ~m = HashMap::new()
+    m.insert(1, Item(id: 1, name: "bolt"))
+    ret Arc::new(Mem(items: m))
+
+async fn lookup(s: &dyn Store, id: i64) -> str!:
+    ret match s.get(id).await?:
+        Some(i) -> i.name
+        None -> "none"

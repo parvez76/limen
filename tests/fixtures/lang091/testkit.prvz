@@ -1,0 +1,11 @@
+use sha2::{Digest, Sha256}
+
+@allow_insecure("not needed: test module is never linted")
+fn fake_name() -> str:
+    ret "fake"
+
+fn fixture_key() -> str:
+    ret "fixture-only-not-a-real-key-zq81"
+
+fn digest() -> str:
+    ret hex::encode(Sha256::digest("x".as_bytes()))

@@ -71,7 +71,9 @@ cargo install --path .
 | `parvez types --ts app.prvz --out types.ts` | Exports TypeScript request, response, and JSON model types across imports |
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
-| `parvez build app.prvz` | Builds a release binary and writes it to `./app` |
+| `parvez build app.prvz [--target <triple>]` | Builds a release binary (`./app`, or `./app-<triple>` when cross-compiling, e.g. static `x86_64-unknown-linux-musl`) plus `app.sha256` |
+| `parvez new <name>` | Scaffolds a project (`parvez.toml`, `main.prvz` with tests, `ui/`) that passes `parvez test` immediately |
+| `parvez fmt [paths...] [--check]` | Formats `.prvz`/`.msd` files; every change is verified to leave the program identical |
 | `parvez heal app.prvz` | Updates to patched compatible dependency versions; reports advisories needing a major upgrade |
 | `parvez fuzz app.prvz` | Starts the service and fires malformed/edge-case requests at every route; fails on crash, hang or leak |
 | `parvez test app.prvz [filter]` | Runs `test "..."` blocks, with in-process HTTP tests via `test_app()` |
@@ -146,6 +148,13 @@ Run `parvez types --ts --out web/types.ts` before building the frontend. Build t
 | `status(204)` / `fail(401, code: "X", "msg")` | Any status / `{"error", "code"}` contracts |
 | `\|x\| x * 2` / `loop:` / `spawn work()` / `"""SQL"""` / `(a, b)` | closures / `loop` / `tokio::spawn` / dedented multi-line string / tuples |
 | `state:` / `hits: AtomicU64 = AtomicU64::new(0)` / `(state)` | `Arc<AppState>` built at startup, injected via axum `State` |
+| `type Page<T>: items: [T]` / `fn f<T: Clone>(x: T)` | generic structs and functions |
+| `trait Store:` / `impl Store for Pg:` / `Arc<dyn Store>` | traits (async methods via `async-trait`), usable as `dyn` |
+| `{"k": v}` / `json({"k": v, "n": [1]})` | `HashMap::from([..])` / `serde_json::json!({..})` |
+| `x = load(id) catch e: fallback` / `n as f64` | `match load(id) { Ok(v) => v, Err(e) => .. }` / `n as f64` |
+| `a, b = parallel(f(), g())?` / `every 1h (state):` | `tokio::try_join!` / an interval worker with logged errors |
+| `priv fn helper()` / `@test_only import testkit` | module-private items / `#[cfg(test)]` code and dev-dependencies |
+| `oidc_session(req)` in a page guard | Browser sign-in (code + PKCE), encrypted session cookies, refresh, CSRF |
 
 There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue`.
 
@@ -183,7 +192,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.9.1 includes Masud v0.1 (with `for`/`if`), tests, observability and OIDC. For traits, generics on your own types, `as` casts, or Rust macros, use `parvez show` to continue in Rust.
+Parvez v0.9.1 adds generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
 
 ## License
 

@@ -61,7 +61,12 @@ const FIX_SECRET: &str = "load secrets at runtime with `env(\"NAME\")` (e.g. in 
 pub fn lint(prog: &Program) -> Report {
     let mut l = Linter { findings: Vec::new() };
     let mut allowed = Vec::new();
-    for (_, item) in prog.all_items() {
+    let test_mods = prog.test_only_modules();
+    for (module, item) in prog.all_items() {
+        // test code never ships (fixture keys, fake IdPs): `parvez build` strips it
+        if prog.is_test_scope(module, item, &test_mods) {
+            continue;
+        }
         match item {
             Item::Const { name, value, line, .. } => {
                 l.secret_binding(name, value, *line);
@@ -69,6 +74,8 @@ pub fn lint(prog: &Program) -> Report {
             }
             Item::Fn(f) => l.function(f, &mut allowed),
             Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, &mut allowed)),
+            Item::Trait(t) => t.methods.iter().for_each(|m| l.function(m, &mut allowed)),
+            Item::Every(e) => l.block(&e.body, &mut Cx::default()),
             Item::Route(r) => {
                 if let Some(why) = &r.allow_insecure {
                     allowed.push((r.line, why.clone()));
@@ -278,6 +285,22 @@ impl Linter {
                     self.block(&arm.body, &mut inner);
                 }
             }
+            Expr::Cast(x, _) => self.expr(x, line, cx),
+            Expr::Map(kvs) => {
+                for (k, v) in kvs {
+                    if let Expr::Str(p) = k
+                        && let [StrPart::Lit(name)] = p.as_slice()
+                    {
+                        self.secret_binding(name, v, line);
+                    }
+                    self.expr(k, line, cx);
+                    self.expr(v, line, cx);
+                }
+            }
+            Expr::Catch { expr, handler, .. } => {
+                self.expr(expr, line, cx);
+                self.closure_body(handler, line, &mut cx.clone());
+            }
             Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Ident(_) => {}
         }
     }
@@ -413,6 +436,9 @@ fn tainted(e: &Expr, cx: &Cx) -> bool {
         Expr::Tuple(xs) => xs.iter().any(|x| tainted(x, cx)),
         Expr::Named(_, x) => tainted(x, cx),
         Expr::Closure { .. } | Expr::Spawn(_) => false,
+        Expr::Cast(x, _) => tainted(x, cx),
+        Expr::Map(kvs) => kvs.iter().any(|(k, v)| tainted(k, cx) || tainted(v, cx)),
+        Expr::Catch { expr, .. } => tainted(expr, cx),
         Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) => false,
     }
 }

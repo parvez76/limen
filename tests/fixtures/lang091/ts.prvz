@@ -1,0 +1,4 @@
+import store
+
+route GET "/p" -> store::Page<store::Item>:
+    ret store::page_of(&[store::Item(id: 1, name: "a")])

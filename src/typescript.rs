@@ -24,11 +24,13 @@ fn option_inner(ty: &Type) -> Option<&Type> {
     }
 }
 
-struct Names(BTreeMap<String, String>);
+/// model names, plus the generic parameters of the model being declared
+struct Names(BTreeMap<String, String>, Vec<String>);
 impl Names {
     fn ty(&self, module: &[String], ty: &Type, input: bool) -> Result<String> {
         let recurse = |t: &Type| self.ty(module, t, input);
         Ok(match ty {
+            Type::Named(n, args) if args.is_empty() && self.1.contains(n) => n.clone(),
             Type::Ref(t, _) => recurse(t)?,
             Type::List(t) => format!("Array<{}>", recurse(t)?),
             Type::Tuple(ts) if ts.is_empty() => "null".into(),
@@ -38,6 +40,10 @@ impl Names {
                 let model = self.0.get(&qualified(module, n)).or_else(|| self.0.get(n));
                 match (n.as_str(), args.as_slice()) {
                     (_, []) if model.is_some() => format!("{}{}", model.unwrap(), if input { "Input" } else { "" }),
+                    (_, args) if model.is_some() => {
+                        let a = args.iter().map(recurse).collect::<Result<Vec<_>>>()?;
+                        format!("{}{}<{}>", model.unwrap(), if input { "Input" } else { "" }, a.join(", "))
+                    }
                     (
                         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
                         | "usize" | "f32" | "f64",
@@ -76,7 +82,7 @@ pub fn generate(prog: &Program) -> Result<String> {
             bail!("duplicate @json model {name}");
         }
     }
-    let mut names = Names(BTreeMap::new());
+    let mut names = Names(BTreeMap::new(), Vec::new());
     let mut used: BTreeSet<String> = ["Routes", "Array", "Record"].map(String::from).into();
     for (q, (_, _, short)) in &models {
         let unique = models.values().filter(|(_, _, n)| n == short).count() == 1;
@@ -98,7 +104,14 @@ pub fn generate(prog: &Program) -> Result<String> {
     }
     let mut out = String::new();
     for (q, (module, item, _)) in &models {
-        let name = &names.0[q];
+        let name = &names.0[q].clone();
+        let generics: Vec<String> = match item {
+            Item::Struct(s) => s.generics.iter().map(|g| g.name.clone()).collect(),
+            Item::Enum(e) => e.generics.iter().map(|g| g.name.clone()).collect(),
+            _ => vec![],
+        };
+        names.1 = generics.clone();
+        let params = if generics.is_empty() { String::new() } else { format!("<{}>", generics.join(", ")) };
         let mut output = String::new();
         for input in [false, true] {
             let decl = match item {
@@ -172,17 +185,15 @@ pub fn generate(prog: &Program) -> Result<String> {
                 _ => unreachable!(),
             };
             if !input {
-                writeln!(out, "export type {name} = {decl};")?;
+                writeln!(out, "export type {name}{params} = {decl};")?;
                 output = decl;
             } else {
-                writeln!(
-                    out,
-                    "export type {name}Input = {};\n",
-                    if decl == output { name } else { &decl }
-                )?;
+                let same = format!("{name}{params}");
+                writeln!(out, "export type {name}Input{params} = {};\n", if decl == output { &same } else { &decl })?;
             }
         }
     }
+    names.1.clear();
     out.push_str("export interface Routes {\n");
     for (module, item) in items {
         if let Item::Route(r) = item {

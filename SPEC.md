@@ -93,7 +93,18 @@ route POST "/hb" (state, req, auth, body: Beat)!:  # auth = the last guard's ret
 - `req` methods: `header(name) -> str?`, `raw_body() -> &[u8]` (exact bytes, e.g. for signatures), `text_body() -> str`, `client_ip() -> str`, `method()`, `path()`, `query_string()`.
 - Set `PARVEZ_TRUST_PROXY=1` behind a reverse proxy so `client_ip()` uses `X-Real-IP` / `X-Forwarded-For`.
 - A route with `req` still accepts `body: T`: it's parsed from the raw bytes, and invalid JSON gives 422. `@body_error(400, code: "bad_request", "invalid JSON body")` on a route sets that response instead.
-- `req.param("id")` reads a path parameter (useful in guards). `@guard(auth::verify)` can name a guard in another module.
+- `req.param("id")` reads a path parameter, so ownership/tenancy checks live in a reusable guard instead of every handler:
+```
+type DeviceOp: op: Operator, device: Uuid
+async fn require_device(state, req) -> DeviceOp!:
+    op = require_engineer(state, req).await?
+    id = req.param("id").unwrap_or_default()
+    if not visible(state, &op, &id).await?: fail(404, code: "not_found", "device not found")
+    ret DeviceOp(op: op, device: id.parse<Uuid>()?)
+@guard(require_device)
+route GET "/devices/{id}" (state, auth, id: str) -> Device!:   # auth.device is already checked
+```
+- `@guard(auth::verify)` can name a guard in another module.
 
 ### WebSockets
 ```
@@ -139,6 +150,15 @@ state:
     db: PgPool = PgPool::connect(&env("DATABASE_URL")).await?
     spawn retention(db.clone())          # e.g. an async fn with `loop:` + tokio::time::interval
 ```
+Periodic work is declarative with `every` (units `ms s m h d`, at least 100ms), at the top level of any service file:
+```
+every 1h (state):                        # `(state)` is optional
+    deleted = sqlx::query("DELETE FROM events WHERE at < now() - interval '30 days'").execute(&state.db).await?
+    log_info("cleanup", rows: deleted.rows_affected())
+```
+The first run is one period after start. Runs never overlap; an error or panic is logged (`every 1h failed` in `/metrics`) and the next period runs again. Workers don't run under `parvez test` (call the logic as a function there).
+
+Run futures concurrently with `parallel`: `a, b = parallel(fetch_a(), fetch_b())` waits for all (`tokio::join!`); `a, b = parallel(x(), y())?` requires every result to be `Ok` and returns the first error otherwise (`tokio::try_join!`). Pass the futures without `.await`.
 
 ## Embedded frontend and TypeScript
 
@@ -185,6 +205,34 @@ page GET "/help" -> html:
 | `fn(A, B) -> R` | `impl Fn(A, B) -> R` (fn params and returns) |
 | `Self`, `Name<A, B>`, `a::B` | same (passed through) |
 
+## Generics, traits and visibility
+```
+@json
+type Page<T>: items: [T], total: i64       # generic types (bounds: `type Sorted<T: Ord>: ...`)
+
+impl Page<T>:                              # generics come from the type's declaration
+    fn first(&self) -> Option<&T>:
+        ret self.items.first()
+
+fn page_of<T: Clone>(xs: &[T]) -> Page<T>:
+    ret Page(items: xs.to_vec(), total: xs.len() as i64)
+
+trait Store:                               # always Send + Sync, so it works in services and `state:`
+    async fn get(&self, id: i64) -> Item?! # a signature: implement it in each `impl`
+    fn name(&self) -> str:                 # a default body (sync methods only)
+        ret "store"
+
+impl Store for Postgres:
+    async fn get(&self, id: i64) -> Item?!:
+        ...
+
+state:
+    repo: Arc<dyn Store> = Arc::new(Postgres(...))   # swap in a fake Store in tests
+```
+- Use a trait either generically (`fn f<S: Store>(s: &S)`) or as `dyn Store` (`&dyn Store`, `Arc<dyn Store>`). Async trait methods are supported through `async-trait`.
+- `parvez types --ts` exports generic `@json` types as `export type Page<T> = {...}`.
+- `priv fn helper()` / `priv type` / `priv enum` / `priv trait` / `priv const` (and `priv fn` inside `impl`) are visible only inside their own file; everything else in a module is public. Calling a `priv` item from another file is a compile error at that line.
+
 ## Statements
 ```
 x = 10            # let x = 10;          immutable by default
@@ -229,6 +277,17 @@ label = match code:
 - `?` propagates an error. Use it only inside a `!` function. `x.await` awaits a future (only inside `async fn` and routes).
 - Generic calls: `json_decode<Event>(raw)`, `s.parse<i32>()` (or Rust's `::<T>`).
 - JSON: `json_encode(x)?` gives a `str` (`json_pretty` for indented output). `json_decode<T>(raw)?` or `e: T = json_decode(raw)?` parses into `T`. Both return Results, so add `?`.
+- Maps: `{"a": 1, "b": 2}` is a `HashMap` (`{}` is an empty one); keys and values are any expressions, string literals become `String`. Newlines are allowed inside the braces.
+- `json({"sub": id, "n": 3, "tags": ["x"], "ratio": a as f64 / 2.0})` builds a `serde_json::Value` with mixed value types (nested maps and lists allowed); `json(x)` converts any serializable value.
+- Casts: `x as i64`, `n as f64` (binds tighter than `+ - * /`).
+- `catch` recovers from an error instead of failing the whole handler:
+```
+name = lookup(id).await catch e:         # a Result-returning call: Err(e) runs the handler
+    log_warn("lookup failed", err: e.to_string())
+    "unknown"                             # the handler's last expression is the value
+port = env("PORT").parse<i32>()? catch: 8080   # `?` and fail(..) inside the left side land in the handler
+```
+  The handler runs in the enclosing function, so it may `ret`, `fail(...)` or use `?` itself.
 
 ## Strings
 - `"text {expr} {expr:?} {x:.2}"` interpolates any expression, with an optional Rust format spec after `:`. Write `{{` and `}}` for literal braces. A string literal can't appear inside `{...}`; assign it to a variable first.
@@ -240,8 +299,8 @@ label = match code:
 - Values move. Pass `&x` to `&T` params, iterate with `for u in &users:`, and use `.clone()` when you need a copy. Methods with `&~self` need a `~` binding.
 - Integer literals default to `i32`. Annotate when you need another type: `x: u64 = 5`.
 - A fallible call in a non-`!` fn needs explicit handling, e.g. `.unwrap_or(0)` or `.is_err()`.
-- Casts (`as`) don't exist yet. Use typed literals (`x: u64 = 5`) or `.into()` / `T::from(x)` / `.try_into()?`.
-- Not supported yet: traits, generics on your own types, macros (`vec!`, `json!`). If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
+- `as` casts numbers (truncating like Rust); use `.try_into()?` when a value may not fit.
+- Not supported: Rust macros (`vec!` - use `[..]`; `json!` - use `json({..})`), lifetimes, `unsafe`. For those, run `parvez show f.prvz -o f.rs` and continue in Rust.
 
 ## Security (enforced at compile time)
 Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `= fix: ...`). Write the safe form from the start:
@@ -278,7 +337,8 @@ test "orders need an api key":
 ```
 - `assert(cond)` and `assert(cond, "msg {x}")` fail with `file.prvz:LINE: ...`, as does `assert_eq(a, b)`.
 - A response has `.status`, `.text()`, `.json<T>()` and `.header(name)`. Besides `get` and `post`, `app.request(method, path)` takes `.header(k, v)`, `.json(&v)` and `.body(b)`, then `.send()`.
-- `parvez test f.prvz [name-filter]` runs every test in the program, including imported modules, and exits non-zero on failure.
+- `parvez test f.prvz [name-filter]` runs every test in the program, including imported modules, and exits non-zero on failure. Failures point at `.prvz` lines (`panicked at tests.prvz:42:`).
+- **Test-only code:** `@test_only` before a `fn`, `type`, `enum`, `impl`, `trait`, `const` or `use` (or `@test_only import testkit` for a whole module of helpers, fakes and fixtures) compiles it only for `parvez test` and `parvez check`. `parvez build` strips it, crates it alone uses become `[dev-dependencies]`, and it isn't security-linted as production code (fixture keys are fine). A guard, route or `every` worker can't be test-only.
 
 ## Observability (every service, automatic)
 - **Request id:** a valid incoming `x-request-id` is propagated; otherwise one is generated. It's returned on every response and attached to every log line.
@@ -307,7 +367,31 @@ route GET "/admin/devices" (auth) -> str:
   - `PARVEZ_OIDC_AUDIENCE`: the expected `aud`. **Required:** when it's unset every request fails closed with 401, because another client's token from the same realm would otherwise pass.
   - `PARVEZ_OIDC_JWKS_URL`: optional; by default it's taken from discovery.
 - **Checks:** the signature, using asymmetric algorithms only (`none` and HMAC are rejected), plus issuer, audience, `exp` and `nbf` with 60 s leeway, a non-empty `sub`, and `typ`: when `typ` is present it must be `Bearer`, so Keycloak ID and refresh tokens (same signing key) are rejected. Signing keys are cached for 10 minutes, and an unknown key ID triggers one refetch to handle key rotation. Any failure returns 401 `{"code":"unauthenticated"}`.
+- `PARVEZ_OIDC_LEEWAY_SECS` (default 60) is the allowed clock skew. If the signing keys can't be fetched and none are cached, the answer is 503 `idp_unavailable` (an outage, not a bad token).
 - **`Claims`:** `sub`, `email`, `name`, `username` and `roles` (merged from `realm_access.roles`, `resource_access.<audience>.roles` (only this API's own client) and `roles`). `email` falls back to `preferred_username`, and `name` falls back to `email`, plus `has_role(r)`, `claim(name)` and `raw`.
+
+## Browser sign-in (Masud pages)
+`oidc_session(req)` returns the same `Claims` as `oidc(req)`, for people in a browser and for API clients alike: a request with `Authorization: Bearer` is validated as with `oidc`, otherwise the encrypted session cookie is used.
+```
+async fn require_staff(req) -> Claims!:
+    c = oidc_session(req).await?
+    if not c.has_role("RemoteOps.Engineer"): fail(403, code: "forbidden", "engineers only")
+    ret c
+
+# ui/dash.msd
+page GET "/dash" (req) -> html:
+    let c = require_staff(req).await?
+    p Signed in as {c.email}
+    form(method="post" action="/auth/logout"):
+        button(type="submit") Sign out
+```
+- Using `oidc_session` adds `GET /auth/login?next=/path`, `GET /auth/callback` and `POST /auth/logout`. Sign-in is the authorization code flow with PKCE (S256), a random `state`, and an encrypted 10-minute login cookie; `next` only accepts local paths.
+- The session (access + refresh token) is an AES-256-GCM encrypted cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, plus `Secure` and the `__Host-` prefix on https. Large sessions are split over several cookies. An expired access token is refreshed transparently; the session ends after `PARVEZ_SESSION_MAX_AGE_SECS` (default 8 h) or when refresh fails.
+- Not signed in: a browser navigation is redirected to `/auth/login`, an htmx request gets `HX-Redirect`, an API client gets 401 `{"code":"unauthenticated"}`.
+- CSRF: a cookie-authenticated request other than GET/HEAD must carry this site's `Origin` (or `Sec-Fetch-Site: same-origin`), otherwise 403 `csrf`.
+- Logout clears the cookies and redirects to the IdP's `end_session_endpoint` (register `PARVEZ_PUBLIC_URL/` as a post-logout redirect URI).
+- Environment: `PARVEZ_OIDC_CLIENT_ID` (the browser client, e.g. `remoteops-dashboard`), `PARVEZ_OIDC_CLIENT_SECRET` (confidential clients), `PARVEZ_PUBLIC_URL` (what users open; https, or http://localhost for development; the redirect URI is `PARVEZ_PUBLIC_URL/auth/callback`), `PARVEZ_SESSION_KEY` (64 hex characters: `openssl rand -hex 32`), plus the `PARVEZ_OIDC_*` settings above. Without them nobody can sign in, and the `/auth` routes log why.
+- Every service with Masud pages answers failing browser navigations with a small HTML error page instead of JSON.
 
 ## Errors (fix loop)
 Syntax and rustc errors both point at `.prvz` lines:
@@ -321,9 +405,11 @@ app.prvz:6: error[E0308]: mismatched types
 
 ## CLI
 - `parvez test f.prvz [filter]`: runs the `test` blocks.
-- `parvez check f.prvz`: fast type and borrow check with mapped errors and no binary. Use it in edit loops.
+- `parvez check f.prvz`: fast type and borrow check with mapped errors and no binary, including `test` blocks and `@test_only` code. Use it in edit loops.
 - `parvez run f.prvz [-- args]`: builds and executes.
-- `parvez build f.prvz`: produces `./f`, a release binary.
+- `parvez build f.prvz [--target <triple>]`: produces `./f`, a release binary, and `./f.sha256` (`sha256sum -c f.sha256` verifies it). `--target x86_64-unknown-linux-musl` builds a static Linux binary, `--target aarch64-unknown-linux-gnu` an ARM one; the output is `./f-<triple>`. A missing target says which `rustup target add` to run; another CPU architecture needs its cross linker (or `cargo-zigbuild`, which Parvez uses automatically when installed).
+- `parvez new <name>`: creates `<name>/` with `parvez.toml`, `main.prvz` (a route and two tests), `ui/home.msd`, `.gitignore` and a README. `parvez test main.prvz` passes immediately.
+- `parvez fmt [paths...]`: formats `.prvz` and `.msd` files in place (directories recursively): 4-space indentation, canonical spacing, one blank line between top-level items, comments kept. Each change is verified to leave the program identical. `--check` lists files that would change and exits 1 (for CI).
 - `parvez show f.prvz [-o f.rs] [--map]`: prints or writes the Rust.
 - `parvez heal f.prvz`: updates dependencies to the newest compatible versions, then re-scans and re-checks. It reports advisories that need a major upgrade (pin those in parvez.toml).
 - `parvez fuzz f.prvz`: builds and starts the service, then sends type-aware malformed and edge-case requests (bad types, boundary numbers, 100 KB strings, traversal and SQL payloads, 3 MB and 50k-deep bodies, wrong methods) to every route. It fails on a crash, a hang, or a leak of internals (panic text, `.rs:` paths, OS errors).

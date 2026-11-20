@@ -10,6 +10,8 @@ mod fuzz;
 mod lexer;
 mod masud;
 mod mcp;
+mod fmt;
+mod scaffold;
 mod parser;
 mod security;
 mod typescript;
@@ -29,8 +31,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Transpile + `cargo build --release`; copies the binary to the current directory.
-    Build { file: PathBuf },
+    /// Transpile + `cargo build --release`; copies the binary (and `<binary>.sha256`) to the current directory.
+    Build {
+        file: PathBuf,
+        /// cross-compile, e.g. x86_64-unknown-linux-musl (static) or aarch64-unknown-linux-gnu;
+        /// the binary is written as `<name>-<target>`
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Create a new project: parvez.toml, main.prvz with a route and a test, ui/, .gitignore.
+    New { name: String },
+    /// Format .prvz and .msd files in place (a directory is searched recursively).
+    Fmt {
+        #[arg(default_value = ".")]
+        paths: Vec<PathBuf>,
+        /// report files that would change and exit 1 instead of writing (CI)
+        #[arg(long)]
+        check: bool,
+    },
     /// Fast type/borrow check (`cargo check`) with .prvz-mapped errors. No binary.
     Check { file: PathBuf },
     /// Run the program's `test "..."` blocks (compile errors mapped to .prvz lines).
@@ -93,9 +111,26 @@ fn main() {
 
 fn real_main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Build { file } => {
+        Cmd::Build { file, target } => {
+            if let Some(t) = target {
+                check_target(&t)?;
+                TARGET.set(t).expect("target is set once");
+            }
             let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
             eprintln!("parvez: built {}", bin.display());
+        }
+        Cmd::New { name } => scaffold::new_project(&std::env::current_dir()?, &name)?,
+        Cmd::Fmt { paths, check } => {
+            let mut changed = Vec::new();
+            for path in &paths {
+                changed.extend(fmt::run(path, check)?);
+            }
+            if check && !changed.is_empty() {
+                for f in &changed {
+                    eprintln!("parvez: would reformat {}", f.display());
+                }
+                std::process::exit(1);
+            }
         }
         Cmd::Check { file } => {
             compile(&file, Mode::Check)?;
@@ -343,19 +378,28 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     let proj = cwd.join(".parvez_build").join(&name);
     std::fs::create_dir_all(proj.join("src"))?;
 
-    let deps = deps::dependencies(&generated.deps, deps::load_overrides(file)?.as_ref());
-    for c in deps::unpinned(&deps) {
+    let overrides = deps::load_overrides(file)?;
+    let deps = deps::dependencies(&generated.deps, overrides.as_ref());
+    let dev_deps = deps::dependencies(&generated.dev_deps, overrides.as_ref());
+    for c in deps::unpinned(&deps).into_iter().chain(deps::unpinned(&dev_deps)) {
         eprintln!("parvez: note: crate `{c}` is not in the known list; using latest (pin it in parvez.toml)");
     }
-    write_if_changed(&proj.join("Cargo.toml"), &deps::manifest(&name, deps))?;
+    write_if_changed(&proj.join("Cargo.toml"), &deps::manifest(&name, deps, dev_deps))?;
     write_if_changed(&proj.join("src/main.rs"), code)?;
     if !proj.join("target").exists() {
         eprintln!("parvez: first build of `{name}`: fetching and compiling dependencies...");
     }
 
+    let target = TARGET.get().filter(|_| mode == Mode::Release);
+    let zig = target.is_some_and(|t| needs_cross_linker(t)) && which("cargo-zigbuild");
+    let mut release: Vec<&str> = vec![if zig { "zigbuild" } else { "build" }, "--release", "--quiet", "--message-format=json"];
+    if let Some(t) = target {
+        release.extend(["--target", t.as_str()]);
+    }
     let args: &[&str] = match mode {
-        Mode::Release => &["build", "--release", "--quiet", "--message-format=json"],
-        Mode::Check => &["check", "--quiet", "--message-format=json"],
+        Mode::Release => &release,
+        // --all-targets: also type-check `test` blocks and `@test_only` helpers
+        Mode::Check => &["check", "--all-targets", "--quiet", "--message-format=json"],
         Mode::Test => &["test", "--no-run", "--quiet", "--message-format=json"],
     };
     let out = Command::new("cargo")
@@ -371,6 +415,16 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
         if errors.is_empty() {
             // Not a compile error (network, toolchain, ...): show cargo's own output.
             std::io::stderr().write_all(&out.stderr)?;
+            if let Some(t) = target
+                && String::from_utf8_lossy(&out.stderr).contains("link")
+            {
+                bail!(
+                    "cargo build failed for {path} (target {t}): no linker for that target. Install its cross toolchain \
+                     (e.g. `sudo apt install gcc-aarch64-linux-gnu` and set CARGO_TARGET_{}_LINKER), or install \
+                     `cargo-zigbuild` + zig and parvez uses it automatically",
+                    t.to_uppercase().replace('-', "_")
+                );
+            }
             bail!("cargo build failed for {path}");
         }
         return Ok(Outcome::Errors(errors));
@@ -387,14 +441,26 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
         return Ok(Outcome::Built(None));
     }
     advisory_gate(file, &proj)?;
-    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    let dest = cwd.join(&exe);
+    let exe_suffix = if target.is_some_and(|t| t.contains("windows")) { ".exe" } else if target.is_some() { "" } else { std::env::consts::EXE_SUFFIX };
+    let exe = format!("{name}{exe_suffix}");
+    let built = match target {
+        Some(t) => proj.join("target").join(t).join("release").join(&exe),
+        None => proj.join("target/release").join(&exe),
+    };
+    let out_name = match target {
+        Some(t) => format!("{name}-{t}{exe_suffix}"),
+        None => exe.clone(),
+    };
+    let dest = cwd.join(&out_name);
     // Copy beside the target, then rename: replacing a running binary in
     // place fails ("text file busy"); a rename swaps it atomically.
-    let tmp = cwd.join(format!(".{exe}.parvez-tmp"));
-    std::fs::copy(proj.join("target/release").join(&exe), &tmp)
-        .with_context(|| format!("copying binary to {}", tmp.display()))?;
+    let tmp = cwd.join(format!(".{out_name}.parvez-tmp"));
+    std::fs::copy(&built, &tmp).with_context(|| format!("copying binary to {}", tmp.display()))?;
     std::fs::rename(&tmp, &dest).with_context(|| format!("installing binary at {}", dest.display()))?;
+    // `<binary>.sha256` in `sha256sum` format: `sha256sum -c app.sha256` verifies it
+    let digest = sha256_hex(&std::fs::read(&dest)?);
+    std::fs::write(cwd.join(format!("{out_name}.sha256")), format!("{digest}  {out_name}\n"))?;
+    eprintln!("parvez: sha256 {digest}  {out_name}");
     let sbom = cwd.join(format!("{name}.sbom.json"));
     match audit::write_sbom(&proj, &name, &sbom) {
         Ok(n) => eprintln!("parvez: sbom {} ({n} components)", sbom.display()),
@@ -526,4 +592,50 @@ mod tests {
         assert!(code.contains("fn main() -> anyhow::Result<()> {"));
         assert!(code.contains("struct User {"));
     }
+}
+
+/// `--target` for the current `parvez build` (set once from the command line).
+static TARGET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn which(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(program).is_file()))
+}
+
+/// Host triple from `rustc -vV`.
+fn host_triple() -> Option<String> {
+    let out = Command::new("rustc").arg("-vV").output().ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("host: ").map(String::from))
+}
+
+/// A different CPU architecture (or OS) needs a cross linker; musl on the same
+/// arch links with the host toolchain (Rust ships its own musl CRT).
+fn needs_cross_linker(target: &str) -> bool {
+    let arch = |t: &str| t.split('-').next().unwrap_or("").to_string();
+    let os = |t: &str| t.split('-').nth(2).unwrap_or("").to_string();
+    let linker_var = format!("CARGO_TARGET_{}_LINKER", target.to_uppercase().replace('-', "_"));
+    match host_triple() {
+        Some(h) => (arch(&h) != arch(target) || os(&h) != os(target)) && std::env::var_os(linker_var).is_none(),
+        None => false,
+    }
+}
+
+/// Fails early, with the fix, when the Rust standard library for `target` is missing.
+fn check_target(target: &str) -> Result<()> {
+    if !target.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') || target.is_empty() {
+        bail!("invalid target triple {target:?}");
+    }
+    let Ok(out) = Command::new("rustup").args(["target", "list", "--installed"]).output() else {
+        return Ok(()); // no rustup: let cargo report it
+    };
+    let installed = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() && !installed.lines().any(|l| l.trim() == target) {
+        bail!("the Rust standard library for {target} is not installed; run `rustup target add {target}`");
+    }
+    Ok(())
 }

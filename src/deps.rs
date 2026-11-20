@@ -18,6 +18,8 @@ use toml::{Table, Value};
 const KNOWN: &[(&str, &str, &str, &[&str], bool)] = &[
     ("percent_encoding", "percent-encoding", "2", &[], true),
     ("anyhow", "anyhow", "1", &[], true),
+    ("async_trait", "async-trait", "0.1", &[], true),
+    ("aes_gcm", "aes-gcm", "0.10", &[], true),
     ("tokio", "tokio", "1", &["full"], true),
     ("axum", "axum", "0.8", &[], true),
     ("serde", "serde", "1", &["derive"], true),
@@ -169,7 +171,7 @@ pub fn unpinned(deps: &Table) -> Vec<String> {
     deps.iter().filter(|(_, v)| v.as_str() == Some("*")).map(|(k, _)| k.clone()).collect()
 }
 
-pub fn manifest(name: &str, deps: Table) -> String {
+pub fn manifest(name: &str, deps: Table, dev_deps: Table) -> String {
     let mut doc = Table::new();
     let mut pkg = Table::new();
     pkg.insert("name".into(), Value::String(format!("prvz-{name}")));
@@ -181,6 +183,10 @@ pub fn manifest(name: &str, deps: Table) -> String {
     bin.insert("path".into(), Value::String("src/main.rs".into()));
     doc.insert("bin".into(), Value::Array(vec![Value::Table(bin)]));
     doc.insert("dependencies".into(), Value::Table(deps));
+    if !dev_deps.is_empty() {
+        // only `parvez test` / `check` builds compile these
+        doc.insert("dev-dependencies".into(), Value::Table(dev_deps));
+    }
     let mut release = Table::new();
     release.insert("strip".into(), Value::Boolean(true));
     let mut profile = Table::new();
@@ -211,7 +217,7 @@ mod tests {
             ["anyhow", "tokio", "reqwest", "tracing_subscriber", "weird_crate", "chrono"].map(String::from).into();
         let over: Table = "chrono = \"=0.4.38\"\nextra = { version = \"2\" }".parse().unwrap();
         let deps = dependencies(&crates, Some(&over));
-        let m = manifest("svc", deps.clone());
+        let m = manifest("svc", deps.clone(), Table::new());
         let doc: Table = m.parse().unwrap();
         let d = doc["dependencies"].as_table().unwrap();
         assert_eq!(d["anyhow"].as_str(), Some("1"));

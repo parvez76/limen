@@ -1326,3 +1326,290 @@ fn oidc_guard_validates_tokens_against_jwks() {
     assert_eq!(call(&keycloak(r#","resource_access":{"account":{"roles":["RemoteOps.Admin"]}}"#)).0, "403", "another client's role");
     assert_eq!(call(&keycloak(&format!(r#","sub":""{admin_role}"#))).0, "401", "empty subject");
 }
+
+/// v0.9.1 language: generics, traits (async + dyn), map literals, json(..),
+/// catch, `as`, `priv`, parallel, `every`, guard path params, @test_only.
+#[test]
+fn language_completeness_features() {
+    let dir = scratch("lang091");
+    for f in ["main.prvz", "store.prvz", "testkit.prvz", "ts.prvz"] {
+        std::fs::copy(format!("tests/fixtures/lang091/{f}"), dir.join(f)).unwrap();
+    }
+    let ts = text(&run_in(&dir, &["types", "--ts", "ts.prvz"]).stdout);
+    assert!(ts.contains("export type Page<T> = {") && ts.contains("response: Page<Item>;"), "{ts}");
+    let out = run_in(&dir, &["test", "main.prvz"]);
+    let all = text(&out.stdout) + &text(&out.stderr);
+    assert!(out.status.success() && all.contains("3 passed"), "{all}");
+
+    // production build: test code and its crates are gone
+    let out = run_in(&dir, &["build", "main.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let manifest = std::fs::read_to_string(dir.join(".parvez_build/main/Cargo.toml")).unwrap();
+    let (prod, dev) = manifest.split_once("[dev-dependencies]").expect("dev-dependencies section");
+    for c in ["sha2", "hex", "tower"] {
+        assert!(!prod.contains(&format!("\n{c} ")) && dev.contains(c), "{c} must be dev-only:\n{manifest}");
+    }
+    let bin = std::fs::read(dir.join("main")).unwrap();
+    assert!(!bin.windows(20).any(|w| w == b"fixture-only-not-a-r"), "test fixture leaked into the release binary");
+
+    // the worker runs in the real binary
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("main"))
+            .env("PORT", port.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let stats = http_raw(port, b"GET /stats HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    assert!(stats.contains(r#""ticks":true"#) && stats.contains(r#""sum":37"#), "{stats}");
+
+    // `priv` is enforced across modules, reported at the .prvz line
+    std::fs::write(dir.join("priv.prvz"), "import store\nfn main():\n    print(store::secret_helper())\n").unwrap();
+    let out = run_in(&dir, &["check", "priv.prvz"]);
+    let err = text(&out.stderr);
+    assert!(!out.status.success() && err.contains("priv.prvz:3: error[E0603]"), "{err}");
+}
+
+/// v0.9.1 CLI: `new` scaffolds a passing project, `fmt` is canonical and
+/// verified, every release build writes `<binary>.sha256`, `--target` cross-builds.
+#[test]
+fn new_fmt_checksums_and_targets() {
+    let parent = scratch("new091");
+    let _ = std::fs::remove_dir_all(parent.join("demo"));
+    let out = run_in(&parent, &["new", "demo"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!run_in(&parent, &["new", "demo"]).status.success(), "refuses a non-empty directory");
+    assert!(!run_in(&parent, &["new", "Bad Name"]).status.success());
+    let dir = parent.join("demo");
+    for f in ["parvez.toml", "main.prvz", "ui/home.msd", ".gitignore", "README.md"] {
+        assert!(dir.join(f).is_file(), "{f}");
+    }
+    assert!(run_in(&dir, &["fmt", "--check", "."]).status.success(), "scaffold is formatted");
+    let out = run_in(&dir, &["test", "main.prvz"]);
+    let all = text(&out.stdout) + &text(&out.stderr);
+    assert!(out.status.success() && all.contains("2 passed"), "{all}");
+
+    // fmt rewrites in place, keeps comments, and is idempotent; --check fails on unformatted files
+    std::fs::write(dir.join("extra.prvz"), "fn f(a:i64,b :i64)->i64:\n  # keep me\n  ret a+b\n").unwrap();
+    assert_eq!(run_in(&dir, &["fmt", "--check", "extra.prvz"]).status.code(), Some(1));
+    assert!(run_in(&dir, &["fmt", "extra.prvz"]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("extra.prvz")).unwrap(),
+        "fn f(a: i64, b: i64) -> i64:\n    # keep me\n    ret a+b\n"
+    );
+    assert!(run_in(&dir, &["fmt", "--check", "."]).status.success());
+
+    let out = run_in(&dir, &["build", "main.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let sum = std::fs::read_to_string(dir.join("main.sha256")).unwrap();
+    let (hex, name) = sum.trim_end().split_once("  ").unwrap();
+    assert_eq!(name, "main");
+    assert_eq!(hex.len(), 64);
+    if Command::new("sha256sum").arg("--version").output().is_ok() {
+        let check = Command::new("sha256sum").args(["-c", "main.sha256"]).current_dir(&dir).output().unwrap();
+        assert!(check.status.success(), "{}", text(&check.stdout));
+    }
+
+    let out = run_in(&dir, &["build", "main.prvz", "--target", "not-a-real-target"]);
+    assert!(text(&out.stderr).contains("rustup target add not-a-real-target"), "{}", text(&out.stderr));
+    let musl = "x86_64-unknown-linux-musl";
+    let installed = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .map(|o| text(&o.stdout).lines().any(|l| l == musl))
+        .unwrap_or(false);
+    if installed && cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        let out = run_in(&dir, &["build", "main.prvz", "--target", musl]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let bin = dir.join(format!("main-{musl}"));
+        assert!(bin.is_file() && dir.join(format!("main-{musl}.sha256")).is_file());
+        let probe = Command::new(&bin).env("PORT", "0").arg("--version").stdout(std::process::Stdio::null()).spawn();
+        if let Ok(mut c) = probe {
+            let _ = c.kill();
+        }
+    }
+}
+
+/// v0.9.1 browser sign-in: authorization code + PKCE against a fake IdP,
+/// encrypted session cookies, login redirects (HX-Redirect for htmx), CSRF,
+/// transparent refresh, logout, and HTML error pages for navigations.
+#[test]
+fn browser_sign_in_with_session_cookies() {
+    if Command::new("openssl").arg("version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("skipping: openssl not installed");
+        return;
+    }
+    let dir = scratch("session091");
+    let openssl = |args: &[&str], input: Option<&[u8]>| {
+        use std::io::Write;
+        let mut c = Command::new("openssl")
+            .args(args)
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(input.unwrap_or_default()).unwrap();
+        c.wait_with_output().unwrap().stdout
+    };
+    openssl(&["genrsa", "-out", "key.pem", "2048"], None);
+    let modulus = String::from_utf8(openssl(&["rsa", "-in", "key.pem", "-noout", "-modulus"], None)).unwrap();
+    let hex = modulus.trim().split('=').nth(1).unwrap();
+    let n: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+    let idp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let iss = format!("http://127.0.0.1:{}", idp.local_addr().unwrap().port());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let sign = |exp: u64, email: &str| {
+        let h = b64url(br#"{"alg":"RS256","kid":"k1","typ":"JWT"}"#);
+        let p = b64url(format!(r#"{{"iss":"{iss}","sub":"u-9","aud":["api","account"],"typ":"Bearer","exp":{exp},"email":"{email}"}}"#).as_bytes());
+        let msg = format!("{h}.{p}");
+        let sig = openssl(&["dgst", "-sha256", "-sign", "key.pem"], Some(msg.as_bytes()));
+        format!("{msg}.{}", b64url(&sig))
+    };
+    let long = sign(now + 3600, "ada<b>@adn.test");
+    // signed right before use (the build takes a while): see the refresh step
+    let short = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let short_idp = short.clone();
+    let refreshed = sign(now + 3600, "fresh@adn.test");
+    let discovery = format!(
+        r#"{{"issuer":"{iss}","jwks_uri":"{iss}/jwks","authorization_endpoint":"{iss}/authorize","token_endpoint":"{iss}/token","end_session_endpoint":"{iss}/logout"}}"#
+    );
+    let jwks = format!(r#"{{"keys":[{{"kty":"RSA","kid":"k1","alg":"RS256","use":"sig","n":"{}","e":"AQAB"}}]}}"#, b64url(&n));
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for s in idp.incoming().flatten() {
+            let mut s = s;
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let form = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            let verifier_ok = form.split('&').any(|kv| kv.strip_prefix("code_verifier=").is_some_and(|v| v.len() == 43));
+            let (status, body) = if req.starts_with("GET /jwks") {
+                ("200 OK", jwks.clone())
+            } else if req.starts_with("POST /token") && form.contains("grant_type=authorization_code") && verifier_ok {
+                let at = if form.contains("code=short") { short_idp.lock().unwrap().clone() } else { long.clone() };
+                ("200 OK", format!(r#"{{"access_token":"{at}","refresh_token":"rt-1","token_type":"Bearer"}}"#))
+            } else if req.starts_with("POST /token") && form.contains("grant_type=refresh_token") && form.contains("refresh_token=rt-1") {
+                ("200 OK", format!(r#"{{"access_token":"{refreshed}","refresh_token":"rt-2"}}"#))
+            } else if req.starts_with("POST /token") {
+                ("400 Bad Request", r#"{"error":"invalid_grant"}"#.to_string())
+            } else {
+                ("200 OK", discovery.clone())
+            };
+            let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    std::fs::write(
+        dir.join("app.prvz"),
+        "import dash\n\nasync fn me(req) -> Claims!:\n    ret oidc_session(req).await?\n\n@guard(me)\nroute GET \"/whoami\" (auth) -> str:\n    ret auth.email.clone()\n\n@guard(me)\nroute POST \"/act\" (auth) -> str:\n    ret \"done\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("dash.msd"), "page GET \"/dash\" (req) -> html:\n    let c = me(req).await?\n    p Hello {c.email}\n    form(method=\"post\" action=\"/auth/logout\"):\n        button(type=\"submit\") Sign out\n").unwrap();
+    let out = run_in(&dir, &["build", "app.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let public = format!("http://127.0.0.1:{port}");
+    let _server = KillOnDrop(
+        Command::new(dir.join("app"))
+            .env("PORT", port.to_string())
+            .env("PARVEZ_OIDC_ISSUER", &iss)
+            .env("PARVEZ_OIDC_AUDIENCE", "api")
+            .env("PARVEZ_OIDC_CLIENT_ID", "dashboard")
+            .env("PARVEZ_PUBLIC_URL", &public)
+            .env("PARVEZ_SESSION_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+            .env("PARVEZ_OIDC_LEEWAY_SECS", "0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let get = |path: &str, extra: &str| http_raw(port, format!("GET {path} HTTP/1.1\r\nHost: t\r\n{extra}Connection: close\r\n\r\n").as_bytes());
+    let header = |raw: &str, name: &str| -> Vec<String> {
+        raw.split("\r\n\r\n").next().unwrap_or("").lines().filter_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+        }).collect()
+    };
+    let jar = |raw: &str| -> String {
+        header(raw, "set-cookie").iter().filter_map(|c| c.split(';').next()).filter(|kv| !kv.ends_with('=')).collect::<Vec<_>>().join("; ")
+    };
+
+    // not signed in: navigation redirects, htmx gets HX-Redirect, APIs get JSON 401
+    let r = get("/dash", "Accept: text/html\r\n");
+    assert!(r.starts_with("HTTP/1.1 303") && header(&r, "location") == ["/auth/login?next=/dash"], "{r}");
+    let r = get("/dash", "HX-Request: true\r\nHX-Current-URL: http://x/dash?tab=1\r\n");
+    assert!(r.starts_with("HTTP/1.1 401") && header(&r, "hx-redirect") == ["/auth/login?next=/dash%3Ftab%3D1"], "{r}");
+    let r = get("/whoami", "");
+    assert!(r.starts_with("HTTP/1.1 401") && r.contains(r#""code":"unauthenticated""#), "{r}");
+
+    // login: PKCE redirect + sealed state cookie
+    let r = get("/auth/login?next=/dash", "");
+    let loc = header(&r, "location").pop().unwrap_or_default();
+    assert!(loc.starts_with(&format!("{iss}/authorize?")) && loc.contains("code_challenge_method=S256") && loc.contains("client_id=dashboard"), "{r}");
+    assert!(loc.contains(&format!("redirect_uri=http%3A%2F%2F127.0.0.1%3A{port}%2Fauth%2Fcallback")), "{loc}");
+    let state = loc.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    let login_cookie = jar(&r);
+    assert!(login_cookie.starts_with("parvez_login=") && header(&r, "set-cookie")[0].contains("HttpOnly; SameSite=Lax"), "{r}");
+
+    // callback: a wrong state or a missing login cookie fails; the right one starts a session
+    let r = get("/auth/callback?code=good&state=nope", &format!("Cookie: {login_cookie}\r\n"));
+    assert!(r.starts_with("HTTP/1.1 401") && r.contains("state mismatch"), "{r}");
+    let r = get(&format!("/auth/callback?code=good&state={state}"), "Accept: text/html\r\n");
+    assert!(r.starts_with("HTTP/1.1 401") && r.contains("<h1>401 Unauthorized</h1>"), "HTML error page for navigations: {r}");
+    let r = get(&format!("/auth/callback?code=good&state={state}"), &format!("Cookie: {login_cookie}\r\n"));
+    assert!(r.starts_with("HTTP/1.1 303") && header(&r, "location") == ["/dash"], "{r}");
+    let session = jar(&r);
+    assert!(session.starts_with("parvez_session.0="), "{r}");
+    assert!(!session.contains("eyJ"), "tokens must not be readable in the cookie");
+
+    // signed in: page renders (escaped), API works, tampering is rejected
+    let r = get("/dash", &format!("Accept: text/html\r\nCookie: {session}\r\n"));
+    assert!(r.starts_with("HTTP/1.1 200") && r.contains("Hello ada&lt;b&gt;@adn.test"), "{r}");
+    assert_eq!(get("/whoami", &format!("Cookie: {session}\r\n")).rsplit("\r\n\r\n").next().unwrap(), "ada<b>@adn.test");
+    let mut bad = session.clone();
+    let k = bad.len() - 5;
+    bad.replace_range(k..k + 1, if &bad[k..k + 1] == "A" { "B" } else { "A" });
+    assert!(get("/dash", &format!("Accept: text/html\r\nCookie: {bad}\r\n")).starts_with("HTTP/1.1 303"));
+
+    // CSRF: unsafe methods need our own Origin
+    let post = |extra: &str| http_raw(port, format!("POST /act HTTP/1.1\r\nHost: t\r\nCookie: {session}\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
+    assert!(post("").starts_with("HTTP/1.1 403"));
+    assert!(post("Origin: https://evil.example\r\n").starts_with("HTTP/1.1 403"));
+    assert!(post(&format!("Origin: {public}\r\n")).starts_with("HTTP/1.1 200"));
+
+    // open redirects are refused
+    let r = get("/auth/login?next=//evil.example/x", "");
+    let st = header(&r, "location").pop().unwrap().split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    let r = get(&format!("/auth/callback?code=good&state={st}"), &format!("Cookie: {}\r\n", jar(&r)));
+    assert_eq!(header(&r, "location"), ["/"]);
+
+    // an expired access token is refreshed transparently and the cookie is replaced
+    let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 2;
+    *short.lock().unwrap() = sign(soon, "short@adn.test");
+    let r = get("/auth/login?next=/whoami", "");
+    let st = header(&r, "location").pop().unwrap().split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    let r = get(&format!("/auth/callback?code=short&state={st}"), &format!("Cookie: {}\r\n", jar(&r)));
+    let short_session = jar(&r);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let r = get("/whoami", &format!("Cookie: {short_session}\r\n"));
+    assert!(r.ends_with("fresh@adn.test") && jar(&r).starts_with("parvez_session.0="), "{r}");
+
+    // logout: same-origin POST clears every chunk and ends the IdP session
+    let r = http_raw(port, format!("POST /auth/logout HTTP/1.1\r\nHost: t\r\nOrigin: {public}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
+    let loc = header(&r, "location").pop().unwrap_or_default();
+    assert!(r.starts_with("HTTP/1.1 303") && loc.starts_with(&format!("{iss}/logout?client_id=dashboard")), "{r}");
+    assert!(header(&r, "set-cookie").iter().filter(|c| c.contains("Max-Age=0")).count() >= 4, "{r}");
+}
