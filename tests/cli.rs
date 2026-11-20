@@ -1512,7 +1512,7 @@ fn browser_sign_in_with_session_cookies() {
         "import dash\n\nasync fn me(req) -> Claims!:\n    ret oidc_session(req).await?\n\n@guard(me)\nroute GET \"/whoami\" (auth) -> str:\n    ret auth.email.clone()\n\n@guard(me)\nroute POST \"/act\" (auth) -> str:\n    ret \"done\"\n",
     )
     .unwrap();
-    std::fs::write(dir.join("dash.msd"), "page GET \"/dash\" (req) -> html:\n    let c = me(req).await?\n    p Hello {c.email}\n    form(method=\"post\" action=\"/auth/logout\"):\n        button(type=\"submit\") Sign out\n").unwrap();
+    std::fs::write(dir.join("dash.msd"), "page GET \"/dash\" (req) -> html:\n    let c = me(req).await?\n    p Hello {c.email}\n    form(method=\"post\" action=\"/auth/logout\"):\n        button(type=\"submit\") Sign out\n\n@guard(me)\npage GET \"/guarded/{tab}\" (auth, tab: str) -> html:\n    h1 Welcome {auth.email}\n    p tab {tab}\n").unwrap();
     let out = run_in(&dir, &["build", "app.prvz"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1554,6 +1554,9 @@ fn browser_sign_in_with_session_cookies() {
     assert!(r.starts_with("HTTP/1.1 401") && header(&r, "hx-redirect") == ["/auth/login?next=/dash%3Ftab%3D1"], "{r}");
     let r = get("/whoami", "");
     assert!(r.starts_with("HTTP/1.1 401") && r.contains(r#""code":"unauthenticated""#), "{r}");
+    // a page with @guard: the guard runs before the template, exactly like a route
+    let r = get("/guarded/x", "Accept: text/html\r\n");
+    assert!(r.starts_with("HTTP/1.1 303") && header(&r, "location") == ["/auth/login?next=/guarded/x"], "{r}");
 
     // login: PKCE redirect + sealed state cookie
     let r = get("/auth/login?next=/dash", "");
@@ -1579,6 +1582,8 @@ fn browser_sign_in_with_session_cookies() {
     let r = get("/dash", &format!("Accept: text/html\r\nCookie: {session}\r\n"));
     assert!(r.starts_with("HTTP/1.1 200") && r.contains("Hello ada&lt;b&gt;@adn.test"), "{r}");
     assert_eq!(get("/whoami", &format!("Cookie: {session}\r\n")).rsplit("\r\n\r\n").next().unwrap(), "ada<b>@adn.test");
+    let r = get("/guarded/a%3Cb", &format!("Accept: text/html\r\nCookie: {session}\r\n"));
+    assert!(r.starts_with("HTTP/1.1 200") && r.contains("<h1>Welcome ada&lt;b&gt;@adn.test</h1><p>tab a&lt;b</p>"), "{r}");
     let mut bad = session.clone();
     let k = bad.len() - 5;
     bad.replace_range(k..k + 1, if &bad[k..k + 1] == "A" { "B" } else { "A" });

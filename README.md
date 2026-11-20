@@ -52,7 +52,7 @@ Memory safety and data-race freedom come from Rust itself. Logic flaws, such as 
 
 - **Tests in Parvez:** `test "..."` blocks with `assert`/`assert_eq` and an in-process HTTP client, run by `parvez test`. Failures point at `.prvz` lines.
 - **Observability:** JSON logs with request IDs, Prometheus `/metrics` (route-template labels, latency histogram, custom events), and `/healthz` / `/readyz`, all without writing any code.
-- **OIDC:** `oidc(req).await?` in a guard validates Keycloak/Entra/Auth0 bearer tokens (JWKS discovery and rotation, asymmetric algorithms only, and issuer, audience and expiry checks).
+- **OIDC:** `oidc(req).await?` in a guard validates Keycloak/Entra/Auth0 bearer tokens (JWKS discovery and rotation, asymmetric algorithms only, and issuer, audience, token-type and expiry checks). `oidc_session(req)` adds browser sign-in for Masud pages: code flow with PKCE, encrypted session cookies, refresh and CSRF checks. `@guard(...)` works on pages and routes alike.
 
 ## Install
 
@@ -62,6 +62,21 @@ You need the Rust toolchain from [rustup.rs](https://rustup.rs).
 git clone https://github.com/parvez76/project-parvez.git
 cd project-parvez
 cargo install --path .
+```
+
+## Quickstart
+
+```bash
+parvez new hello && cd hello        # parvez.toml, main.prvz (a route + tests), ui/home.msd
+parvez check main.prvz              # type/borrow check, errors point at .prvz lines
+parvez test main.prvz               # the test blocks, with an in-process HTTP client
+parvez run main.prvz                # http://localhost:8080
+parvez fuzz main.prvz               # hostile input at every route: crashes, hangs, leaks fail it
+parvez fmt --check .                # canonical formatting (CI)
+
+rustup target add x86_64-unknown-linux-musl
+parvez build main.prvz --target x86_64-unknown-linux-musl
+#   -> ./main-x86_64-unknown-linux-musl (static, runs on any Linux) + .sha256 + SBOM
 ```
 
 ## Usage
@@ -192,7 +207,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.9.1 adds generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
+Parvez v0.9.2 adds `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
 
 ## License
 

@@ -1,4 +1,4 @@
-# PARVEZ v0.9.1 SPEC (AI system prompt)
+# PARVEZ v0.9.2 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -192,6 +192,7 @@ page GET "/help" -> html:
     article:
         raw {models::sanitized_help()}
 ```
+- `@guard(fn)` lines before a `page` (several run in order) work as on a `route`: the page header takes `auth` for the last guard's result, e.g. `@guard(require_staff)` + `page GET "/admin" (state, auth) -> html:`. A failing guard answers before any template code runs.
 
 ## Types
 | Parvez | Rust |
@@ -378,10 +379,10 @@ async fn require_staff(req) -> Claims!:
     if not c.has_role("RemoteOps.Engineer"): fail(403, code: "forbidden", "engineers only")
     ret c
 
-# ui/dash.msd
-page GET "/dash" (req) -> html:
-    let c = require_staff(req).await?
-    p Signed in as {c.email}
+# ui/dash.msd: @guard works on pages exactly as on routes; `auth` is its result
+@guard(require_staff)
+page GET "/dash" (auth) -> html:
+    p Signed in as {auth.email}
     form(method="post" action="/auth/logout"):
         button(type="submit") Sign out
 ```

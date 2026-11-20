@@ -184,9 +184,34 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
     let mut iter = src.lines().enumerate().peekable();
     let mut items = Vec::new();
     let mut reason = false;
+    let mut guards: Vec<String> = Vec::new();
     while let Some((i, text)) = iter.next() {
         let line = start + i;
         if text.trim().is_empty() || text.trim_start().starts_with('#') {
+            continue;
+        }
+        if text.starts_with("@guard") {
+            // `@guard(fn)` / `@guard(module::fn)`, exactly as on a `route`
+            let toks: Vec<Tok> = lex_from(text, line)?.into_iter().map(|t| t.tok).collect();
+            let [Tok::At, Tok::Ident(k), Tok::LParen, rest @ ..] = &toks[..] else {
+                bail!("line {line}: expected @guard(fn_name)");
+            };
+            let mut path = Vec::new();
+            let mut it = rest.iter();
+            loop {
+                match (it.next(), it.next()) {
+                    (Some(Tok::Ident(seg)), Some(Tok::PathSep)) => path.push(seg.clone()),
+                    (Some(Tok::Ident(seg)), Some(Tok::RParen)) => {
+                        path.push(seg.clone());
+                        break;
+                    }
+                    _ => bail!("line {line}: expected @guard(fn_name)"),
+                }
+            }
+            if k != "guard" || !matches!((it.next(), it.next()), (Some(Tok::Newline), Some(Tok::Eof))) {
+                bail!("line {line}: expected @guard(fn_name) on its own line");
+            }
+            guards.push(path.join("::"));
             continue;
         }
         if text.starts_with("@allow_unsafe_html") {
@@ -200,7 +225,7 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
             reason = true;
             continue;
         }
-        if !reason && text.starts_with("import ") {
+        if !reason && guards.is_empty() && text.starts_with("import ") {
             items.extend(parser::parse_items(lex_from(text, line)?)?);
             continue;
         }
@@ -224,6 +249,7 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
             bail!("line {line}: __masud is reserved");
         }
         route.page = true;
+        route.guards = std::mem::take(&mut guards);
         route.body = vec![Located {
             line,
             stmt: Stmt::Let {
@@ -350,6 +376,9 @@ pub fn parse(src: &str, start: usize) -> Result<Vec<Item>> {
         items.push(Item::Route(route));
         reason = false;
     }
+    if !guards.is_empty() {
+        bail!("line {}: expected a page after @guard(...)", start + src.lines().count());
+    }
     if reason {
         bail!(
             "line {}: expected page after @allow_unsafe_html",
@@ -410,6 +439,18 @@ mod tests {
             _ => "other",
         }).collect();
         assert_eq!(kinds, ["other", "render", "for", "render", "render", "ret"]);
+    }
+
+    #[test]
+    fn guards_attach_to_the_next_page() {
+        let items = parse("@guard(auth::staff)\n@guard(audit)\npage GET \"/a\" (auth) -> html:\n    p {auth.email}\npage GET \"/b\" -> html:\n    p b", 1).unwrap();
+        let Item::Route(a) = &items[0] else { panic!() };
+        let Item::Route(b) = &items[1] else { panic!() };
+        assert_eq!(a.guards, ["auth::staff", "audit"]);
+        assert!(a.auth && b.guards.is_empty());
+        for bad in ["@guard(x)\n", "@guard()\npage GET \"/\" -> html:\n    p x", "@guard(x) junk\npage GET \"/\" -> html:\n    p x"] {
+            assert!(parse(bad, 1).is_err(), "{bad}");
+        }
     }
 
     #[test]
