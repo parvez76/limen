@@ -1837,3 +1837,34 @@ fn lint_reports_standards_and_sarif() {
         assert!(cat.contains(id), "{cat}");
     }
 }
+
+#[test]
+fn taint_crosses_modules_and_functions() {
+    let dir = scratch("taint013");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(
+        dir.join("app.prvz"),
+        "import lib.files\n\nfn staff(req) -> str!:\n    who = req.header(\"x-user\").unwrap_or_default()\n    ret std::fs::read_to_string(\"/etc/staff/{who}\")?\n\n@guard(staff)\nroute GET \"/a/{name}\" (name: str) -> str!:\n    ret files::load(name)?\n\n@public(\"demo\")\nroute GET \"/b\" (req) -> str!:\n    f = req.param(\"f\").unwrap_or_default()\n    ret std::fs::read_to_string(f)?\n\n@public(\"demo\")\nroute POST \"/c\" (body: Job) -> str!:\n    files::run_tool(&body.tool)\n    ret \"ok\"\n\n@public(\"demo\")\nroute GET \"/safe/{name}\" (name: str) -> str!:\n    ret files::load_safe(name)?\n\n@json\ntype Job: tool: str\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib/files.prvz"),
+        "fn load(name: str) -> str!:\n    ret inner(name)\n\nfn inner(n: str) -> str!:\n    path = \"/srv/data/{n}\"\n    ret std::fs::read_to_string(&path)?\n\nfn load_safe(name: str) -> str!:\n    ret std::fs::read_to_string(safe_join(\"/srv/data\", &name)?)?\n\nfn run_tool(t: &str):\n    std::process::Command::new(t).status()\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["lint", "app.prvz"]);
+    let so = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{so}{}", text(&out.stderr));
+    for want in [
+        "app.prvz:5: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized",
+        "app.prvz:9: security[path-traversal]: request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.prvz:6 unsanitized",
+        "app.prvz:14: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized",
+        "app.prvz:18: security[command-injection]: request input passed to `files::run_tool(..)` reaches `Command::new(..)` at lib/files.prvz:12 unsanitized",
+    ] {
+        assert!(so.contains(want), "missing: {want}\n{so}");
+    }
+    assert!(!so.contains("app.prvz:23") && so.matches("security[").count() == 4, "{so}");
+    // the build gate reports the same findings
+    let err = text(&run_in(&dir, &["check", "app.prvz"]).stderr);
+    assert!(err.contains("app.prvz:9: security[path-traversal]") && err.contains("4 security error(s)"), "{err}");
+}

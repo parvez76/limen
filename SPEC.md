@@ -1,4 +1,4 @@
-# PARVEZ v0.12.0 SPEC (AI system prompt)
+# PARVEZ v0.13.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -329,12 +329,13 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 |---|---|---|---|
 | sql-injection | 89 | `query("... {x}")`, `query("..." + x)`, or a variable holding either | `sqlx::query("... WHERE id = $1").bind(x)` |
 | command-injection | 78 | `Command::new(dynamic)`; `Command::new("sh").arg("-c").arg("{x}")` | `Command::new("tar").arg("czf").arg(x)` (fixed program, input as separate args) |
-| path-traversal | 22 | route input (`{path}` params, `body`, `query`, or values derived from them) reaching `fs::*` / `File::open` | `std::fs::read_to_string(safe_join("/srv/data", &name)?)?` |
+| path-traversal | 22 | request input (`{path}` params, `body`, `query`, `req`, a socket's `conn`, a guard's inputs, or values derived from them) reaching `fs::*` / `File::open`, also inside a helper fn it is passed to | `std::fs::read_to_string(safe_join("/srv/data", &name)?)?` |
 | hardcoded-secret | 798 | a string literal in a binding named like secret/password/token/api_key/private_key, or a key-like literal (`sk_live_`, `AKIA`, `ghp_`, long random strings) | `api_key: Secret = env_secret("API_KEY")?` in `state:` |
 | secret-type | 312, 316 | a `state:` field named like a secret (`token`, `password`, `api_key`, ...) typed `str` | `api_key: Secret = env_secret("API_KEY")?` |
 | secret-exposure | 532, 200 | `s.expose()` inside `print`, `log_*`, `fail`, `assert`, `json`, `metric_inc`, an interpolated string, or a page | pass `s.expose()` only to the API that needs it: `.bind(s.expose())`, an HMAC key, a header |
 - `safe_join(base, name)?` rejects `..`, absolute paths, separators and empty names: 400 in routes, an error elsewhere.
-- Taint is tracked inside each route body only, not into other fns. SQL and secret checks apply everywhere.
+- Request input is followed into the functions and methods it is passed to, across modules, helper chains and recursion. The finding is on the route's call line and names the sink: "request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.prvz:6 unsanitized". Sanitize at either end with `safe_join`. A helper that only ever receives constants isn't flagged. SQL and secret checks apply everywhere.
+- A method call is followed when exactly one `impl` defines that method name. Calls through a trait with several implementations aren't followed.
 - Opt out only deliberately: `@allow_insecure("reason")` on the line before a `fn`, `route`, method or `state:`. Every build prints the reason.
 
 Services are hardened automatically (nothing to write):

@@ -8,11 +8,15 @@
 //! - path-traversal: route input reaching filesystem calls without `safe_join`
 //! - hardcoded-secret: literals in secret-named bindings, or key-like literals
 //!
-//! Taint (route params, `body`, `query`, and values derived from them) is
-//! tracked within each route body; it does not flow through other functions.
+//! Taint sources: route params, `body`, `query`, `req`, a socket's `conn`,
+//! and the inputs of guard functions. Taint follows values derived from them
+//! and flows into user functions and methods: each function gets a summary
+//! (which parameters reach which sinks), computed to a fixed point, so a
+//! route that passes request data to a helper that opens a file is caught
+//! at the call, naming the sink inside the helper.
 
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finding {
@@ -160,30 +164,48 @@ const OUTPUT_SINKS: &[&str] = &["print", "eprint", "log_info", "log_warn", "log_
 const FIX_SECRET: &str = "load secrets at runtime as a Secret: `api_key: Secret = env_secret(\"API_KEY\")?` in `state:`; never commit them";
 
 pub fn lint(prog: &Program) -> Report {
-    let mut l = Linter { findings: Vec::new() };
+    let test_mods = prog.test_only_modules();
+    let items: Vec<(&[String], &Item)> =
+        prog.all_items().into_iter().filter(|(m, i)| !prog.is_test_scope(m, i, &test_mods)).collect();
+    let mut fx = Fx::new(prog, &items);
+    fx.summarize();
+    // guards run on every request before the handler: their inputs are untrusted too
+    let mut guards: HashSet<String> = HashSet::new();
+    for (module, item) in &items {
+        if let Item::Route(r) = item {
+            guards.extend(r.guards.iter().filter_map(|g| fx.resolve(module, g)));
+        }
+    }
+    let mut l = Linter::new(&fx, &[]);
     let mut allowed = Vec::new();
     let mut suppressed = Vec::new();
-    let test_mods = prog.test_only_modules();
-    for (module, item) in prog.all_items() {
-        // test code never ships (fixture keys, fake IdPs): `parvez build` strips it
-        if prog.is_test_scope(module, item, &test_mods) {
-            continue;
-        }
+    for (module, item) in &items {
+        l.module = module.to_vec();
         match item {
             Item::Const { name, value, line, .. } => {
                 l.secret_binding(name, value, *line);
                 l.expr(value, *line, &Cx::default());
             }
-            Item::Fn(f) => l.function(f, &mut allowed, &mut suppressed),
-            Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, &mut allowed, &mut suppressed)),
-            Item::Trait(t) => t.methods.iter().for_each(|m| l.function(m, &mut allowed, &mut suppressed)),
+            Item::Fn(f) => {
+                let guard = fx.resolve(module, &f.name).is_some_and(|k| guards.contains(&k));
+                l.function(f, guard, &mut allowed, &mut suppressed)
+            }
+            Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, false, &mut allowed, &mut suppressed)),
+            Item::Trait(t) => t.methods.iter().for_each(|m| l.function(m, false, &mut allowed, &mut suppressed)),
             Item::Every(e) => l.block(&e.body, &mut Cx::default()),
             Item::Route(r) => {
                 let mut cx = Cx::default();
                 cx.taint.extend(r.params.iter().map(|(n, _)| n.clone()));
+                // `req` exposes headers, params and the raw body; a socket's `conn` yields client messages
+                if r.req {
+                    cx.taint.insert("req".into());
+                }
+                if r.conn {
+                    cx.taint.insert("conn".into());
+                }
                 if let Some(why) = &r.allow_insecure {
                     allowed.push((r.line, why.clone()));
-                    let mut s = Linter { findings: Vec::new() };
+                    let mut s = Linter::new(&fx, module);
                     s.block(&r.body, &mut cx);
                     suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
                     continue;
@@ -191,7 +213,7 @@ pub fn lint(prog: &Program) -> Report {
                 l.block(&r.body, &mut cx);
             }
             Item::State(st) => {
-                let mut s = Linter { findings: Vec::new() };
+                let mut s = Linter::new(&fx, module);
                 let l = if st.allow_insecure.is_some() { &mut s } else { &mut l };
                 let mut cx = Cx::default();
                 for (name, ty, value, line) in &st.fields {
@@ -213,11 +235,132 @@ pub fn lint(prog: &Program) -> Report {
     // One finding per (line, rule): e.g. `api_token = "ghp_..."` trips both the
     // secret-name and key-shape checks. Name checks run first, so the kept
     // message names the binding to fix. The sort is stable.
-    l.findings.sort_by_key(|f| f.line);
+    let mut findings = l.findings;
+    findings.sort_by_key(|f| f.line);
     let mut seen = HashSet::new();
-    l.findings.retain(|f| seen.insert((f.line, f.rule)));
+    findings.retain(|f| seen.insert((f.line, f.rule)));
     suppressed.sort_by_key(|(f, _)| f.line);
-    Report { findings: l.findings, allowed, suppressed }
+    Report { findings, allowed, suppressed }
+}
+
+/// Where untrusted data entering one parameter of a function ends up.
+#[derive(Clone, Debug, PartialEq)]
+struct Sink {
+    rule: &'static str,
+    /// "`std::fs::read(..)` at files.prvz:3", the deepest sink in the call chain
+    what: String,
+    fix: &'static str,
+}
+
+/// Interprocedural context: every function in the program (by qualified
+/// name) and, per parameter, the sinks that parameter reaches, directly or
+/// through further calls. Summaries are computed to a fixed point, so
+/// helper chains and recursion are followed.
+struct Fx<'a> {
+    files: Vec<String>,
+    /// `f`, `store::f`, `Type::m`, `store::Type::m` -> (module, fn)
+    fns: HashMap<String, (&'a [String], &'a FnDef)>,
+    /// method name -> keys of methods with a receiver (resolved only when unique)
+    methods: HashMap<String, Vec<String>>,
+    /// key -> sinks per parameter (same order as `FnDef::params`)
+    sums: HashMap<String, Vec<Vec<Sink>>>,
+}
+
+fn qualify(module: &[String], name: &str) -> String {
+    if module.is_empty() { name.to_string() } else { format!("{}::{name}", module.join("::")) }
+}
+
+impl<'a> Fx<'a> {
+    fn new(prog: &Program, items: &[(&'a [String], &'a Item)]) -> Fx<'a> {
+        let mut fx = Fx { files: prog.files.iter().map(|f| f.0.clone()).collect(), fns: HashMap::new(), methods: HashMap::new(), sums: HashMap::new() };
+        for (module, item) in items {
+            let mut add = |owner: Option<&str>, f: &'a FnDef| {
+                if !f.has_body && f.body.is_empty() {
+                    return;
+                }
+                let local = match owner { Some(t) => format!("{t}::{}", f.name), None => f.name.clone() };
+                let key = qualify(module, &local);
+                if f.receiver.is_some() {
+                    fx.methods.entry(f.name.clone()).or_default().push(key.clone());
+                }
+                fx.fns.insert(key, (*module, f));
+            };
+            match item {
+                Item::Fn(f) => add(None, f),
+                Item::Impl(i) => i.methods.iter().for_each(|m| add(Some(&i.ty), m)),
+                Item::Trait(t) => t.methods.iter().for_each(|m| add(Some(&t.name), m)),
+                _ => {}
+            }
+        }
+        fx
+    }
+
+    /// `name` as written in `module`: its own items first, then the main file's,
+    /// then a unique suffix match (`tokens::f` for module `auth::tokens`).
+    fn resolve(&self, module: &[String], name: &str) -> Option<String> {
+        let name = name.strip_prefix("crate::").unwrap_or(name);
+        let local = qualify(module, name);
+        if self.fns.contains_key(&local) {
+            return Some(local);
+        }
+        if self.fns.contains_key(name) {
+            return Some(name.to_string());
+        }
+        if !name.contains("::") {
+            return None;
+        }
+        let suffix = format!("::{name}");
+        let mut hits = self.fns.keys().filter(|k| k.ends_with(&suffix));
+        match (hits.next(), hits.next()) {
+            (Some(k), None) => Some(k.clone()),
+            _ => None,
+        }
+    }
+
+    fn summarize(&mut self) {
+        let keys: Vec<String> = {
+            let mut k: Vec<String> = self.fns.keys().cloned().collect();
+            k.sort();
+            k
+        };
+        // monotone: sinks only get added, so this converges; the cap bounds pathological chains
+        for _ in 0..32 {
+            let mut next: HashMap<String, Vec<Vec<Sink>>> = HashMap::new();
+            for key in &keys {
+                let (module, f) = self.fns[key];
+                let per_param = f
+                    .params
+                    .iter()
+                    .map(|(p, _)| {
+                        if p == "state" {
+                            return Vec::new();
+                        }
+                        let mut probe = Linter::new(self, module);
+                        let mut cx = Cx::default();
+                        cx.taint.insert(p.clone());
+                        probe.block(&f.body, &mut cx);
+                        let mut sinks: Vec<Sink> = Vec::new();
+                        for s in probe.sinks {
+                            if !sinks.contains(&s) {
+                                sinks.push(s);
+                            }
+                        }
+                        sinks
+                    })
+                    .collect();
+                next.insert(key.clone(), per_param);
+            }
+            if next == self.sums {
+                return;
+            }
+            self.sums = next;
+        }
+    }
+
+    fn locate(&self, line: usize) -> String {
+        let (k, l) = crate::ast::split_line(line);
+        format!("{}:{l}", self.files.get(k).map(String::as_str).unwrap_or("?"))
+    }
 }
 
 #[derive(Default, Clone)]
@@ -228,28 +371,75 @@ struct Cx {
     dynamic: HashSet<String>,
 }
 
-struct Linter {
+struct Linter<'f, 'a> {
     findings: Vec<Finding>,
+    /// taint-driven sinks hit (for function summaries)
+    sinks: Vec<Sink>,
+    fx: &'f Fx<'a>,
+    module: Vec<String>,
 }
 
 fn last_segment(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }
 
-impl Linter {
-    fn function(&mut self, f: &FnDef, allowed: &mut Vec<(usize, String)>, suppressed: &mut Vec<(Finding, String)>) {
+impl<'f, 'a> Linter<'f, 'a> {
+    fn new(fx: &'f Fx<'a>, module: &[String]) -> Self {
+        Linter { findings: Vec::new(), sinks: Vec::new(), fx, module: module.to_vec() }
+    }
+
+    /// `guard`: the fn is a route guard, so its `req` and path params carry request data.
+    fn function(&mut self, f: &FnDef, guard: bool, allowed: &mut Vec<(usize, String)>, suppressed: &mut Vec<(Finding, String)>) {
+        let mut cx = Cx::default();
+        if guard {
+            cx.taint.extend(f.params.iter().filter(|(n, _)| n != "state").map(|(n, _)| n.clone()));
+        }
         if let Some(why) = &f.allow_insecure {
             allowed.push((f.line, why.clone()));
-            let mut s = Linter { findings: Vec::new() };
-            s.block(&f.body, &mut Cx::default());
+            let mut s = Linter::new(self.fx, &self.module);
+            s.block(&f.body, &mut cx);
             suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
             return;
         }
-        self.block(&f.body, &mut Cx::default());
+        self.block(&f.body, &mut cx);
     }
 
     fn push(&mut self, line: usize, rule: &'static str, msg: String, fix: &'static str) {
         self.findings.push(Finding { line, rule, msg, fix });
+    }
+
+    /// A sink reached by request data at `line`: reported, and recorded for summaries.
+    fn taint_sink(&mut self, line: usize, rule: &'static str, msg: String, sink: &str, fix: &'static str) {
+        let what = format!("{sink} at {}", self.fx.locate(line));
+        self.sinks.push(Sink { rule, what, fix });
+        self.push(line, rule, msg, fix);
+    }
+
+    /// A call into a user function: request data in an argument reaches the
+    /// sinks that parameter leads to (from the function's summary).
+    fn through_call(&mut self, key: &str, shown: &str, args: &[Expr], line: usize, cx: &Cx) {
+        let Some(sums) = self.fx.sums.get(key) else { return };
+        let Some((_, f)) = self.fx.fns.get(key) else { return };
+        let mut positional = 0;
+        for a in args {
+            let idx = match a {
+                Expr::Named(n, _) => f.params.iter().position(|(p, _)| p == n),
+                _ => {
+                    positional += 1;
+                    Some(positional - 1)
+                }
+            };
+            let value = if let Expr::Named(_, v) = a { v } else { a };
+            let Some(sinks) = idx.and_then(|i| sums.get(i)) else { continue };
+            if sinks.is_empty() || !tainted(value, cx) {
+                continue;
+            }
+            for s in sinks.clone() {
+                let msg = format!("request input passed to `{shown}(..)` reaches {} unsanitized", s.what);
+                self.sinks.push(s.clone());
+                self.push(line, s.rule, msg, s.fix);
+            }
+        }
     }
 
     fn block(&mut self, b: &Block, cx: &mut Cx) {
@@ -449,7 +639,14 @@ impl Linter {
         if name.ends_with("Command::new") {
             match args.first() {
                 Some(Expr::Str(p)) if matches!(p.as_slice(), [StrPart::Lit(_)]) => {}
-                Some(a) if is_dynamic(a, cx) || tainted(a, cx) => self.push(
+                Some(a) if tainted(a, cx) => self.taint_sink(
+                    line,
+                    "command-injection",
+                    "the program run by `Command::new` is built from request input".into(),
+                    "`Command::new(..)`",
+                    FIX_CMD,
+                ),
+                Some(a) if is_dynamic(a, cx) => self.push(
                     line,
                     "command-injection",
                     "the program run by `Command::new` is built from dynamic input".into(),
@@ -461,7 +658,10 @@ impl Linter {
         let fs_call = name.contains("fs::") || name.starts_with("File::") || name.contains("::File::");
         let fs_name = FS_FNS.contains(&seg) || FS_FNS.iter().any(|f| name.ends_with(f));
         if fs_call && fs_name && args.iter().any(|a| tainted(a, cx)) {
-            self.push(line, "path-traversal", format!("request input reaches `{name}(..)` unsanitized"), FIX_PATH);
+            self.taint_sink(line, "path-traversal", format!("request input reaches `{name}(..)` unsanitized"), &format!("`{name}(..)`"), FIX_PATH);
+        }
+        if let Some(key) = self.fx.resolve(&self.module, name) {
+            self.through_call(&key, name, args, line, cx);
         }
     }
 
@@ -481,12 +681,20 @@ impl Linter {
                 };
                 items.iter().any(|x| is_dynamic(x, cx) || tainted(x, cx))
             });
-            if dynamic_arg {
+            let tainted_arg = args.iter().any(|a| tainted(a, cx));
+            if tainted_arg {
+                self.taint_sink(line, "command-injection", "a shell (`sh -c` style) receives a script built from request input".into(), "a shell script (`sh -c`)", FIX_CMD);
+            } else if dynamic_arg {
                 self.push(line, "command-injection", "a shell (`sh -c` style) receives a dynamic script".into(), FIX_CMD);
             }
         }
         if m == "open" && chain_mentions(recv, "OpenOptions") && args.iter().any(|a| tainted(a, cx)) {
-            self.push(line, "path-traversal", "request input reaches `OpenOptions::open(..)` unsanitized".into(), FIX_PATH);
+            self.taint_sink(line, "path-traversal", "request input reaches `OpenOptions::open(..)` unsanitized".into(), "`OpenOptions::open(..)`", FIX_PATH);
+        }
+        // `x.helper(..)` on a user type: followed when exactly one impl defines `helper`
+        if let Some([key]) = self.fx.methods.get(m).map(Vec::as_slice) {
+            let key = key.clone();
+            self.through_call(&key, &format!(".{m}"), args, line, cx);
         }
     }
 
@@ -705,6 +913,7 @@ mod tests {
             .split("self.push(")
             .skip(1)
             .chain(code.split("l.push(").skip(1))
+            .chain(code.split("self.taint_sink(").skip(1))
             .filter_map(|c| c.split('"').nth(1))
             .filter(|id| id.chars().all(|c| c.is_ascii_lowercase() || c == '-') && id.contains('-'))
             .collect();
@@ -714,6 +923,34 @@ mod tests {
             assert!(!r.cwe.is_empty() && !r.asvs.is_empty() && r.owasp.contains(":2021"), "{id}");
         }
         assert!(rule("nope").is_none());
+    }
+
+    #[test]
+    fn taint_follows_calls_into_helpers() {
+        let src = "fn load(name: str) -> str!:\n    ret inner(&name)\nfn inner(n: &str) -> str!:\n    p = \"/srv/{n}\"\n    ret std::fs::read_to_string(&p)?\nfn clean(n: &str) -> str!:\n    ret std::fs::read_to_string(safe_join(\"/srv\", n)?)?\nfn run(t: &str):\n    Command::new(\"sh\").arg(\"-c\").arg(t).status()\n@public\nroute GET \"/a/{x}\" (x: str) -> str!:\n    a = load(x)?\n    b = clean(&x)?\n    c = load(\"fixed\")?\n    run(&x)\n    run(path: &x)\n    ret a\n";
+        let r = lint(&parse(lex(src).unwrap()).unwrap());
+        let got: Vec<(usize, &str, &str)> = r.findings.iter().map(|f| (f.line, f.rule, f.msg.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (12, "path-traversal", "request input passed to `load(..)` reaches `std::fs::read_to_string(..)` at ?:5 unsanitized"),
+                (15, "command-injection", "request input passed to `run(..)` reaches a shell script (`sh -c`) at ?:9 unsanitized"),
+            ]
+        );
+        // helpers alone (no request caller) aren't flagged: CLI tools may take paths
+        assert!(rules("fn load(name: str) -> str!:\n    ret std::fs::read_to_string(&name)?\nfn main():\n    load(\"x\")\n").is_empty());
+    }
+
+    #[test]
+    fn taint_follows_methods_and_recursion() {
+        let src = "type S: root: str\nimpl S:\n    fn read(&self, n: &str) -> str!:\n        ret self.go(n, 3)\n    fn go(&self, n: &str, d: i32) -> str!:\n        if d > 0:\n            ret self.go(n, d - 1)\n        ret std::fs::read_to_string(n)?\n@public\nroute GET \"/m/{n}\" (n: str) -> str!:\n    s = S(root: \"/\")\n    ret s.read(&n)?\n";
+        assert_eq!(rules(src), [(12, "path-traversal")]);
+    }
+
+    #[test]
+    fn req_conn_and_guards_are_sources() {
+        let src = "fn staff(req) -> str!:\n    who = req.header(\"x-user\").unwrap_or_default()\n    ret std::fs::read_to_string(\"/etc/{who}\")?\nfn helper(req) -> str!:\n    ret std::fs::read_to_string(\"/etc/{who}\")?\n@guard(staff)\nroute GET \"/a\" (req, auth) -> str!:\n    f = req.param(\"f\").unwrap_or_default()\n    ret std::fs::read_to_string(f)?\n@public\nsocket \"/ws\" (conn):\n    msg = conn.recv().await?\n    Command::new(msg).status()\n";
+        assert_eq!(rules(src), [(3, "path-traversal"), (9, "path-traversal"), (13, "command-injection")]);
     }
 
     #[test]

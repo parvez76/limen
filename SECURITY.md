@@ -28,8 +28,8 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 | Version | Security fixes |
 |---|---|
-| 0.12.x | yes |
-| < 0.12 | no |
+| 0.13.x | yes |
+| < 0.13 | no |
 
 ## Scope
 
@@ -84,7 +84,7 @@ The compile-time lint rules, as shown by `parvez lint --rules` and in every find
 | `secret-exposure` | `.expose()` reaching logs, output, errors, JSON or pages | 532, 200 | A09 Security Logging and Monitoring Failures | 7.1.1, 7.1.2 | 6.5 |
 | `secret-type` | a secret-named `state:` field typed `str` | 312, 316 | A04 Insecure Design | 8.3.6, 6.4.1 | 4.0 |
 
-Known limit: untrusted-input tracking is per function. A request value passed into a helper function and used there isn't followed yet; cross-function tracking is planned.
+Untrusted input comes from route parameters, `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Known limits: a method is followed only when exactly one `impl` defines that name, so calls through a trait with several implementations aren't followed; and taint doesn't flow through `state:` fields or values stored and read back later.
 
 ## Code scanning (SARIF)
 
@@ -103,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.12.0 --locked
+      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.13.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
