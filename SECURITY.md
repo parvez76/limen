@@ -33,7 +33,7 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 ## Verifying a release
 
-The installer (`install.sh`, served at https://parvez76.github.io/project-parvez/install.sh) and `parvez upgrade` do the checks below automatically: the archive must match `SHA256SUMS`, and when the GitHub CLI is installed its build attestation must verify, or nothing is installed. To check a download by hand:
+The installer (`install.sh`, served at https://parvez76.github.io/parvez/install.sh) and `parvez upgrade` do the checks below automatically: the archive must match `SHA256SUMS`, and when the GitHub CLI is installed its build attestation must verify, or nothing is installed. To check a download by hand:
 
 Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a `v*` tag is pushed. The tests must pass first. Each archive then gets a GitHub build attestation: a keyless Sigstore signature tying the file to the exact commit and workflow run that produced it. The release also lists `SHA256SUMS`.
 
@@ -41,13 +41,13 @@ Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.git
 # 1. checksum
 sha256sum -c SHA256SUMS --ignore-missing
 # 2. provenance: built from this repository by the release workflow
-gh attestation verify parvez-v0.17.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/project-parvez
+gh attestation verify parvez-v0.17.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/parvez
 ```
 
 Builds are reproducible: the workflow rebuilds the Linux binary from scratch in a different directory and refuses to publish if a single byte differs. You can check a release yourself with the same Rust version:
 
 ```bash
-git clone https://github.com/parvez76/project-parvez && cd project-parvez && git checkout v0.17.0
+git clone https://github.com/parvez76/parvez && cd parvez && git checkout v0.17.0
 .github/release-build.sh x86_64-unknown-linux-musl /tmp/rebuild   # prints the archive's SHA-256
 grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 ```
@@ -58,7 +58,7 @@ Release tags from v0.16.0 on are signed with the project's SSH signing key, list
 git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.17.0
 ```
 
-Installing from source (`cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
+Installing from source (`cargo install --git https://github.com/parvez76/parvez --tag v0.17.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
 
@@ -143,7 +143,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked
+      - run: cargo install --git https://github.com/parvez76/parvez --tag v0.17.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

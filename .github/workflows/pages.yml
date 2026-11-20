@@ -1,5 +1,5 @@
 # Publishes site/ (plus install.sh from the repo root) to
-# https://parvez76.github.io/project-parvez/ on every push to main.
+# https://parvez76.github.io/parvez/ on every push to main.
 name: pages
 on:
   push:

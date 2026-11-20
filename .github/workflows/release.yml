@@ -5,7 +5,7 @@
 #  3. a second, independent build of the Linux binary must match byte for byte;
 #  4. each archive gets a GitHub build attestation (signed, keyless: "built from
 #     this commit by this workflow"), and the release lists SHA256SUMS.
-# Verify a download:  gh attestation verify <file> --repo parvez76/project-parvez
+# Verify a download:  gh attestation verify <file> --repo parvez76/parvez
 name: release
 on:
   push:

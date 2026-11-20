@@ -9,7 +9,9 @@ use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REPO: &str = "parvez76/project-parvez";
+const REPO: &str = "parvez76/parvez";
+/// The name releases before the rename (v0.16.0, v0.17.0) were attested under.
+const LEGACY_REPO: &str = "parvez76/project-parvez";
 /// Minimum Rust for the generated code (edition 2024, let-chains).
 const MIN_RUST: (u64, u64) = (1, 88);
 
@@ -137,12 +139,10 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
     }
     eprintln!("parvez: checksum OK");
     if which("gh").is_some() {
-        let ok = Command::new("gh")
-            .args(["attestation", "verify"])
-            .arg(&a)
-            .args(["--repo", REPO])
-            .output()
-            .is_ok_and(|o| o.status.success());
+        let verify = |repo: &str| {
+            Command::new("gh").args(["attestation", "verify"]).arg(&a).args(["--repo", repo]).output().is_ok_and(|o| o.status.success())
+        };
+        let ok = verify(REPO) || verify(LEGACY_REPO);
         if !ok {
             bail!("the GitHub build attestation for {archive} did not verify; nothing was changed");
         }

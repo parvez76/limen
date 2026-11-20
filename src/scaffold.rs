@@ -89,7 +89,7 @@ const GITIGNORE: &str = ".parvez_build/\n/main\n/main-*\n*.sha256\n*.sbom.json\n
 
 const README: &str = r#"# __NAME__
 
-A [Parvez](https://github.com/parvez76/project-parvez) service.
+A [Parvez](https://github.com/parvez76/parvez) service.
 
 ```bash
 parvez test main.prvz              # tests

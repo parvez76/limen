@@ -91,14 +91,14 @@ fn staff(req: &Req) -> anyhow::Result<String> {
 On Linux or an Apple-silicon Mac:
 
 ```bash
-curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh
+curl -fsSL https://parvez76.github.io/parvez/install.sh | sh
 parvez doctor                      # checks the setup and says how to fix anything missing
 parvez new hello && cd hello       # a service with a page and passing tests
 parvez test main.prvz
 parvez run main.prvz               # http://localhost:8080
 ```
 
-The installer checks the download against the release's published checksums before installing anything, and offers to set up Rust if you don't have it. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/project-parvez --tag v0.17.0 --locked`.
+The installer checks the download against the release's published checksums before installing anything, and offers to set up Rust if you don't have it. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/parvez --tag v0.17.0 --locked`.
 
 ## What Parvez won't do
 

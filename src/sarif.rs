@@ -7,8 +7,8 @@ use crate::security::{Finding, RULES, Report};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-const INFO_URI: &str = "https://github.com/parvez76/project-parvez";
-const RULES_URI: &str = "https://github.com/parvez76/project-parvez/blob/main/SECURITY.md#rules";
+const INFO_URI: &str = "https://github.com/parvez76/parvez";
+const RULES_URI: &str = "https://github.com/parvez76/parvez/blob/main/SECURITY.md#rules";
 
 /// `files` are (display path, source) as loaded; paths become repo-relative URIs.
 pub fn report(report: &Report, files: &[(String, String)]) -> Value {

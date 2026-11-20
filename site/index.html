@@ -28,7 +28,7 @@
 
   <h2>Install</h2>
   <p>Linux (x86_64, ARM64) and macOS (Apple silicon):</p>
-  <pre><code>curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh</code></pre>
+  <pre><code>curl -fsSL https://parvez76.github.io/parvez/install.sh | sh</code></pre>
   <p class="muted">The installer checks the download against the release's SHA256SUMS (and its signed build attestation when the <code>gh</code> CLI is installed), puts <code>parvez</code> in <code>~/.parvez/bin</code>, and offers to set up the Rust toolchain if it's missing. Read it first: <a href="install.sh">install.sh</a>.</p>
 
   <h2>Start</h2>
@@ -41,15 +41,15 @@ parvez run main.prvz       # http://localhost:8080</code></pre>
   <h2>What it feels like</h2>
   <ul>
     <li><strong>Friday deploys get boring.</strong> Every endpoint says who may call it, or the build stops. Injectable SQL, and file paths and commands built from request input, are compile errors with the fix, even after the input passed through helpers, traits or stored state.</li>
-    <li><strong>The whole service fits on one screen.</strong> A JSON service is 9 lines, where the hand-written Rust is 48 (<a href="https://github.com/parvez76/project-parvez/tree/main/docs/comparison">see both</a>).</li>
+    <li><strong>The whole service fits on one screen.</strong> A JSON service is 9 lines, where the hand-written Rust is 48 (<a href="https://github.com/parvez76/parvez/tree/main/docs/comparison">see both</a>).</li>
     <li><strong>When your agent slips, it lands on the right line.</strong> The spec is one file written for AI agents, and errors point at your <code>.prvz</code> line.</li>
     <li><strong>Leaving costs nothing.</strong> It compiles to plain, readable Rust; <code>parvez show</code> hands it over.</li>
   </ul>
 
   <h2>What it won't do</h2>
-  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Parvez enforces the wrong answer. It runs on top of Rust, covers Linux and Apple-silicon Macs, and is pre-1.0. <a href="https://github.com/parvez76/project-parvez#what-parvez-wont-do">The full list</a>.</p>
+  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Parvez enforces the wrong answer. It runs on top of Rust, covers Linux and Apple-silicon Macs, and is pre-1.0. <a href="https://github.com/parvez76/parvez#what-parvez-wont-do">The full list</a>.</p>
 
-  <p class="muted"><a href="https://github.com/parvez76/project-parvez">Source on GitHub</a> · <a href="https://github.com/parvez76/project-parvez/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/project-parvez/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
+  <p class="muted"><a href="https://github.com/parvez76/parvez">Source on GitHub</a> · <a href="https://github.com/parvez76/parvez/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/parvez/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
 </main>
 </body>
 </html>

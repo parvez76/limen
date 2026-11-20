@@ -1,7 +1,7 @@
 #!/bin/sh
 # Parvez installer.
 #
-#   curl -fsSL https://parvez76.github.io/project-parvez/install.sh | sh
+#   curl -fsSL https://parvez76.github.io/parvez/install.sh | sh
 #
 # Downloads the release for this OS and CPU, checks it against the release's
 # SHA256SUMS (and its GitHub build attestation when the `gh` CLI is installed),
@@ -18,7 +18,8 @@
 #   PARVEZ_HOME        install location (default: ~/.parvez)
 set -eu
 
-REPO="parvez76/project-parvez"
+REPO="parvez76/parvez"
+LEGACY_REPO="parvez76/project-parvez"
 DOWNLOAD_BASE="${PARVEZ_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
 LATEST_URL="${PARVEZ_LATEST_URL:-https://github.com/$REPO/releases/latest}"
 PARVEZ_HOME="${PARVEZ_HOME:-$HOME/.parvez}"
@@ -89,7 +90,9 @@ fi
 say "checksum OK"
 
 if command -v gh >/dev/null 2>&1; then
-    if gh attestation verify "$tmp/$archive" --repo "$REPO" >/dev/null 2>&1; then
+    # releases before the rename (v0.16.0, v0.17.0) were attested as parvez76/project-parvez
+    if gh attestation verify "$tmp/$archive" --repo "$REPO" >/dev/null 2>&1 \
+        || gh attestation verify "$tmp/$archive" --repo "$LEGACY_REPO" >/dev/null 2>&1; then
         say "build attestation OK (built by $REPO's release workflow)"
     else
         die "the GitHub build attestation for $archive did not verify. Nothing was installed."
