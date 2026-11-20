@@ -174,6 +174,9 @@ fn real_main() -> Result<()> {
             }
             let prog = load_program(&file)?;
             let report = security::lint(&prog);
+            if let Some(why) = &report.incomplete {
+                bail!("{}: the security analysis is incomplete ({why}); this is a Parvez bug, please report it", file.display());
+            }
             let n = report.findings.len();
             if sarif {
                 let doc = serde_json::to_string_pretty(&sarif::report(&report, &prog.files))? + "\n";
@@ -321,7 +324,10 @@ fn load_program(file: &Path) -> Result<ast::Program> {
 
 fn load_into(file: &Path, files: &mut Vec<(String, String)>) -> Result<ast::Program> {
     let src = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    files.push((file.display().to_string(), src.clone()));
+    // `sub/store.prvz` on every platform, so messages, maps and SARIF read the same on Windows
+    let shown = file.display().to_string();
+    let shown = if cfg!(windows) { shown.replace('\\', "/") } else { shown };
+    files.push((shown, src.clone()));
     let items = parser::parse_items(lexer::lex(&src)?)?;
     let base = file.parent().unwrap_or(Path::new("."));
     let mut modules: Vec<ast::Module> = Vec::new();
@@ -371,6 +377,10 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     let prog = load_program(file)?;
     let files = prog.files.clone();
     let report = security::lint(&prog);
+    // fail closed: an analysis that hit its safety limit must not pass as clean
+    if let Some(why) = &report.incomplete {
+        bail!("{}: the security analysis is incomplete ({why}); this is a Parvez bug, please report it", file.display());
+    }
     for (line, why) in &report.allowed {
         eprintln!("parvez: warning: {}: security checks disabled by @allow_insecure: {why}", locate(&files, *line));
     }
@@ -540,6 +550,22 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     // place fails ("text file busy"); a rename swaps it atomically.
     let tmp = cwd.join(format!(".{out_name}.parvez-tmp"));
     std::fs::copy(&built, &tmp).with_context(|| format!("copying binary to {}", tmp.display()))?;
+    // Windows won't replace a running .exe (the service you're rebuilding), but it
+    // will rename one: move it aside under a unique name. Leftovers from earlier
+    // builds are removed once nothing runs them any more.
+    if cfg!(windows) {
+        let prefix = format!(".{out_name}.parvez-old");
+        for e in std::fs::read_dir(&cwd).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path()); // still running: try next time
+            }
+        }
+        if dest.exists() {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let aside = cwd.join(format!("{prefix}-{}-{stamp}", std::process::id()));
+            std::fs::rename(&dest, &aside).with_context(|| format!("moving the previous {} aside", dest.display()))?;
+        }
+    }
     std::fs::rename(&tmp, &dest).with_context(|| format!("installing binary at {}", dest.display()))?;
     // `<binary>.sha256` in `sha256sum` format: `sha256sum -c app.sha256` verifies it
     let digest = sha256_hex(&std::fs::read(&dest)?);

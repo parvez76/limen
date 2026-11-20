@@ -29,9 +29,14 @@ pub fn target() -> Option<&'static str> {
         ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-musl"),
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        // Windows on ARM runs the x64 build through its built-in emulation
+        ("windows", "x86_64" | "aarch64") => Some("x86_64-pc-windows-msvc"),
         _ => None,
     }
 }
+
+/// Where curl can throw away a response body.
+const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 fn curl(args: &[&str]) -> Result<std::process::Output> {
     let out = Command::new("curl")
@@ -44,7 +49,7 @@ fn curl(args: &[&str]) -> Result<std::process::Output> {
 
 /// The newest release tag (`/releases/latest` redirects to `/releases/tag/<tag>`).
 fn latest_tag() -> Result<String> {
-    let out = curl(&["-I", "-o", "/dev/null", "-w", "%{url_effective}", &latest_url()])?;
+    let out = curl(&["-I", "-o", NULL_DEVICE, "-w", "%{url_effective}", &latest_url()])?;
     if !out.status.success() {
         bail!("could not reach GitHub to find the latest release");
     }
@@ -79,6 +84,14 @@ pub fn expected_sum(sums: &str, archive: &str) -> Option<String> {
 
 pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> {
     let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+    // binaries earlier Windows upgrades moved aside (in use then, usually free now)
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(".parvez.old") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     let Some(target) = target() else {
         bail!(
             "no prebuilt Parvez for {}/{}; update from source with `cargo install --git https://github.com/{REPO} --locked`",
@@ -152,7 +165,7 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
     if !status.success() {
         bail!("could not unpack {archive}");
     }
-    let new_bin = tmp.join(format!("parvez-{tag}-{target}")).join("parvez");
+    let new_bin = tmp.join(format!("parvez-{tag}-{target}")).join(format!("parvez{}", std::env::consts::EXE_SUFFIX));
     if !new_bin.is_file() {
         bail!("{archive} has no parvez binary");
     }
@@ -164,10 +177,33 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&staged, &exe).with_context(|| format!("replacing {}", exe.display()))?;
+    // Windows won't overwrite a running .exe, but it will rename one: move it aside
+    // under a unique name (an older leftover may still be in use)
+    let old = exe.with_file_name(format!(".parvez.old-{}", std::process::id()));
+    if cfg!(windows) {
+        std::fs::rename(&exe, &old).with_context(|| format!("moving {} aside", exe.display()))?;
+    }
+    if let Err(e) = std::fs::rename(&staged, &exe) {
+        if cfg!(windows) {
+            let _ = std::fs::rename(&old, &exe); // put the working binary back
+        }
+        return Err(e).with_context(|| format!("replacing {}", exe.display()));
+    }
     let _ = std::fs::remove_dir_all(&tmp);
-    eprintln!("parvez: upgraded {current} -> {tag} ({})", exe.display());
+    eprintln!("parvez: upgraded {current} -> {tag} ({})", shown(&exe));
     Ok(())
+}
+
+/// The Visual Studio installation with the C++ tools, via Microsoft's `vswhere`.
+fn msvc_tools() -> Option<String> {
+    let base = std::env::var_os("ProgramFiles(x86)").or_else(|| std::env::var_os("ProgramFiles"))?;
+    let vswhere = PathBuf::from(base).join("Microsoft Visual Studio").join("Installer").join("vswhere.exe");
+    let out = Command::new(vswhere)
+        .args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !p.is_empty()).then_some(p)
 }
 
 /// The package command that installs a C linker on this Linux distribution.
@@ -188,6 +224,12 @@ fn linker_hint() -> &'static str {
     }
 }
 
+/// A path for people: without Windows' `\\?\` prefix that `canonicalize` adds.
+fn shown(p: &Path) -> String {
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -201,7 +243,8 @@ fn tempdir() -> Result<PathBuf> {
 
 fn which(tool: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(tool)).find(|p| p.is_file())
+    let name = format!("{tool}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&path).map(|d| d.join(&name)).find(|p| p.is_file())
 }
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
@@ -229,7 +272,7 @@ pub fn doctor() -> Result<()> {
     ok(&format!(
         "parvez {} ({})",
         env!("CARGO_PKG_VERSION"),
-        exe.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_else(|| "?".into())
+        exe.as_deref().map(shown).unwrap_or_else(|| "?".into())
     ));
     match run("rustc", &["--version"]) {
         Some(v) => match rust_version(&v) {
@@ -243,7 +286,15 @@ pub fn doctor() -> Result<()> {
         None => fail("cargo isn't on PATH; open a new terminal after installing Rust, or run `. \"$HOME/.cargo/env\"`"),
     }
     // rustc links with the system C toolchain, which rustup doesn't install
-    if cfg!(target_os = "macos") {
+    let host = run("rustc", &["-vV"]).and_then(|v| v.lines().find_map(|l| l.strip_prefix("host: ").map(str::to_string)));
+    if host.as_deref().is_some_and(|h| h.ends_with("windows-msvc")) {
+        match msvc_tools() {
+            Some(p) => ok(&format!("Visual Studio C++ build tools ({p})")),
+            None => fail(
+                "the Visual Studio C++ build tools (Rust's linker on Windows) aren't installed: winget install Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"",
+            ),
+        }
+    } else if cfg!(target_os = "macos") {
         match run("xcode-select", &["-p"]) {
             Some(p) => ok(&format!("Xcode command line tools ({p})")),
             None => fail("the Xcode command line tools (Rust's linker) aren't installed: xcode-select --install"),
@@ -282,9 +333,9 @@ pub fn doctor() -> Result<()> {
             .map(|p| std::env::split_paths(&p).any(|d| d.canonicalize().is_ok_and(|d| d == dir)))
             .unwrap_or(false);
         if on_path {
-            ok(&format!("{} is on PATH", dir.display()));
+            ok(&format!("{} is on PATH", shown(dir)));
         } else {
-            warn(&format!("{} isn't on PATH; open a new terminal or add it to your shell profile", dir.display()));
+            warn(&format!("{} isn't on PATH; open a new terminal or add it to your shell profile", shown(dir)));
         }
     }
     if target().is_none() {

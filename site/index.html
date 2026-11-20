@@ -29,7 +29,9 @@
   <h2>Install</h2>
   <p>Linux (x86_64, ARM64) and macOS (Apple silicon):</p>
   <pre><code>curl -fsSL https://parvez76.github.io/parvez/install.sh | sh</code></pre>
-  <p class="muted">The installer checks the download against the release's SHA256SUMS (and its signed build attestation when the <code>gh</code> CLI is installed), puts <code>parvez</code> in <code>~/.parvez/bin</code>, and offers to set up the Rust toolchain if it's missing. Read it first: <a href="install.sh">install.sh</a>.</p>
+  <p>Windows (beta), in PowerShell:</p>
+  <pre><code>irm https://parvez76.github.io/parvez/install.ps1 | iex</code></pre>
+  <p class="muted">The installer checks the download against the release's SHA256SUMS (and its signed build attestation when the <code>gh</code> CLI is installed), puts <code>parvez</code> in <code>~/.parvez/bin</code>, and offers to set up the Rust toolchain if it's missing. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
 
   <h2>Start</h2>
   <pre><code>parvez doctor              # check the setup
@@ -47,7 +49,7 @@ parvez run main.prvz       # http://localhost:8080</code></pre>
   </ul>
 
   <h2>What it won't do</h2>
-  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Parvez enforces the wrong answer. It runs on top of Rust, covers Linux and Apple-silicon Macs, and is pre-1.0. <a href="https://github.com/parvez76/parvez#what-parvez-wont-do">The full list</a>.</p>
+  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Parvez enforces the wrong answer. It runs on top of Rust, covers Linux, Apple-silicon Macs and Windows (beta), and is pre-1.0. <a href="https://github.com/parvez76/parvez#what-parvez-wont-do">The full list</a>.</p>
 
   <p class="muted"><a href="https://github.com/parvez76/parvez">Source on GitHub</a> · <a href="https://github.com/parvez76/parvez/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/parvez/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
 </main>

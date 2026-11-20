@@ -120,7 +120,9 @@ fn source_file(args: &Value) -> Result<(PathBuf, PathBuf, String), String> {
 
 /// Messages mention the real file path; show the name the caller used.
 fn rename(msg: &str, file: &Path, shown: &str) -> String {
-    msg.replace(&file.display().to_string(), shown)
+    // messages name files with `/` on every platform (see `load_into`); match both spellings
+    let native = file.display().to_string();
+    msg.replace(&native.replace('\\', "/"), shown).replace(&native, shown)
 }
 
 fn call_tool(params: &Value) -> Result<Value, (i64, String)> {

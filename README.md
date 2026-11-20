@@ -92,13 +92,24 @@ On Linux or an Apple-silicon Mac:
 
 ```bash
 curl -fsSL https://parvez76.github.io/parvez/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://parvez76.github.io/parvez/install.ps1 | iex
+```
+
+Then, in a new terminal:
+
+```bash
 parvez doctor                      # checks the setup and says how to fix anything missing
 parvez new hello && cd hello       # a service with a page and passing tests
 parvez test main.prvz
 parvez run main.prvz               # http://localhost:8080
 ```
 
-The installer checks the download against the release's published checksums before installing anything, and offers to set up Rust if you don't have it. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/parvez --tag v0.17.1 --locked`.
+Both installers check the download against the release's published checksums before installing anything, and offer to set up Rust if you don't have it. On Windows, Rust also needs Microsoft's C++ build tools; `parvez doctor` gives the one-line `winget` command. You can also use Parvez inside WSL with the Linux installer. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/parvez --tag v0.18.0 --locked`.
 
 ## What Parvez won't do
 
@@ -106,7 +117,7 @@ The installer checks the download against the release's published checksums befo
 - **It won't make memory perfectly clean.** `Secret` wipes its own memory and compares in constant time, but copies you make from it aren't wiped. [SECURITY.md](SECURITY.md) says exactly where the line is.
 - **It isn't for everything.** It's built for services and command-line tools. Rust macros and lifetimes aren't supported; for those, run `parvez show` and continue in Rust.
 - **It doesn't replace Rust.** It runs on top of it. The installer sets Rust up, and you also need a C linker; `parvez doctor` tells you what's missing.
-- **It isn't on every platform yet.** Prebuilt binaries cover Linux (x86_64, ARM64) and Apple-silicon Macs. Windows is untested.
+- **It isn't on every platform yet.** Prebuilt binaries cover Linux (x86_64, ARM64), Apple-silicon Macs and Windows (x64, which Windows on ARM runs through emulation). Windows support is new and tested in CI, but hasn't seen much real use yet, so treat it as beta. Intel Macs can build from source.
 - **It's young.** Before 1.0, syntax and defaults can change between minor versions. The [changelog](docs/CHANGELOG.md) says when they do and what to change.
 
 ## Learn more

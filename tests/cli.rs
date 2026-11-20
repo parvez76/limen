@@ -15,6 +15,11 @@ fn parvez() -> Command {
 
 /// Scratch dir per test. Everything except `.parvez_build` (cargo's cache)
 /// is wiped so each run starts clean but rebuilds stay fast.
+/// A built program's file: `name`, or `name.exe` on Windows.
+fn exe(dir: &std::path::Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
 fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("parvez-it-{name}"));
     std::fs::create_dir_all(&d).unwrap();
@@ -52,7 +57,7 @@ fn hello_example_runs() {
         assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}");
     }
     assert!(stderr.contains("[failed] 503: upstream down"), "{stderr}");
-    assert!(dir.join("hello").exists(), "binary copied to cwd");
+    assert!(exe(&dir, "hello").exists(), "binary copied to cwd");
 }
 
 #[test]
@@ -583,21 +588,30 @@ route GET "/leak/{name}" (name: str) -> str!:
     for h in ["x-content-type-options: nosniff", "x-frame-options: deny", "cache-control: no-store"] {
         assert!(raw.contains(h), "missing {h} in:\n{raw}");
     }
-    // graceful shutdown on SIGTERM
-    let pid = server.0.id().to_string();
-    assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let status = loop {
-        if let Some(st) = server.0.try_wait().unwrap() {
-            break st;
-        }
-        assert!(std::time::Instant::now() < deadline, "server ignored SIGTERM");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert!(status.success(), "exit {status}");
+    // graceful shutdown on SIGTERM (Unix signals; Windows services stop on Ctrl+C)
+    #[cfg(unix)]
+    {
+        let pid = server.0.id().to_string();
+        assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(st) = server.0.try_wait().unwrap() {
+                break st;
+            }
+            assert!(std::time::Instant::now() < deadline, "server ignored SIGTERM");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "exit {status}");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = server.0.kill();
+        let _ = server.0.wait();
+    }
     let log = std::fs::read_to_string(&log).unwrap();
     assert!(log.contains("parvez: internal error: invalid digit found in string"), "{log}");
     assert!(log.contains("handler panicked"), "{log}");
+    #[cfg(unix)]
     assert!(log.contains("shutting down gracefully"), "{log}");
 
     // fuzz: panics and errors are contained (warnings), the deliberate leak fails the run
@@ -636,7 +650,7 @@ fn advisory_gate_blocks_vulnerable_deps_and_heal_reports() {
     assert!(err.contains("1 known-vulnerable dependency:"), "{err}");
     assert!(err.contains("RUSTSEC-2099-0042 anyhow@1."), "{err}");
     assert!(err.contains("run `parvez heal app.prvz`"), "{err}");
-    assert!(!dir.join("app").exists(), "no binary is shipped when the gate fails");
+    assert!(!exe(&dir, "app").exists(), "no binary is shipped when the gate fails");
 
     let out = with_db(&["heal", "app.prvz"], None);
     let err = text(&out.stderr);
@@ -647,7 +661,7 @@ fn advisory_gate_blocks_vulnerable_deps_and_heal_reports() {
     let out = with_db(&["build", "app.prvz"], Some("warn"));
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("parvez: warning: 1 known-vulnerable dependency"));
-    assert!(dir.join("app").exists() && dir.join("app.sbom.json").exists());
+    assert!(exe(&dir, "app").exists() && dir.join("app.sbom.json").exists());
 }
 
 // ---------- v0.6 ----------
@@ -1363,7 +1377,7 @@ fn language_completeness_features() {
     for c in ["sha2", "hex", "tower"] {
         assert!(!prod.contains(&format!("\n{c} ")) && dev.contains(c), "{c} must be dev-only:\n{manifest}");
     }
-    let bin = std::fs::read(dir.join("main")).unwrap();
+    let bin = std::fs::read(exe(&dir, "main")).unwrap();
     assert!(!bin.windows(20).any(|w| w == b"fixture-only-not-a-r"), "test fixture leaked into the release binary");
 
     // the worker runs in the real binary
@@ -1423,12 +1437,13 @@ fn new_fmt_checksums_and_targets() {
 
     let out = run_in(&dir, &["build", "main.prvz"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let sum = std::fs::read_to_string(dir.join("main.sha256")).unwrap();
+    let bin = format!("main{}", std::env::consts::EXE_SUFFIX); // main.exe on Windows
+    let sum = std::fs::read_to_string(dir.join(format!("{bin}.sha256"))).unwrap();
     let (hex, name) = sum.trim_end().split_once("  ").unwrap();
-    assert_eq!(name, "main");
+    assert_eq!(name, bin);
     assert_eq!(hex.len(), 64);
     if Command::new("sha256sum").arg("--version").output().is_ok() {
-        let check = Command::new("sha256sum").args(["-c", "main.sha256"]).current_dir(&dir).output().unwrap();
+        let check = Command::new("sha256sum").args(["-c", &format!("{bin}.sha256")]).current_dir(&dir).output().unwrap();
         assert!(check.status.success(), "{}", text(&check.stdout));
     }
 
@@ -1974,6 +1989,7 @@ fn security_header_overrides() {
 }
 
 /// A tiny release server: `/latest` redirects to the tag, `/dl/<tag>/<file>` serves files.
+#[cfg(unix)]
 fn release_server(files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>) -> u16 {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2007,6 +2023,7 @@ fn release_server(files: std::sync::Arc<std::sync::Mutex<std::collections::HashM
 }
 
 #[test]
+#[cfg(unix)] // the fake release's "binary" is a shell script; Windows is covered by CI's install test
 fn upgrade_verifies_before_replacing() {
     use sha2::Digest;
     let Some(target) = (match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -2072,7 +2089,10 @@ fn doctor_reports_the_toolchain() {
     let out = parvez().arg("doctor").output().unwrap();
     let so = text(&out.stdout);
     assert!(so.contains("ok    rustc ") && so.contains("ok    cargo ") && so.contains("ok    git version"), "{so}");
-    assert!(so.contains("ok    C linker") || so.contains("ok    Xcode command line tools"), "{so}");
+    assert!(
+        so.contains("ok    C linker") || so.contains("ok    Xcode command line tools") || so.contains("ok    Visual Studio C++ build tools"),
+        "{so}"
+    );
     // without Rust on PATH it fails with the fix
     let empty = scratch("doctor017");
     let out = parvez().arg("doctor").env("PATH", &empty).output().unwrap();

@@ -63,9 +63,12 @@ pub fn location_table(ctx: &Ctx) -> String {
 /// `thread 't' panicked at src/main.rs:120:9:` -> `... panicked at app.prvz:14:`.
 /// Lines without a known location are left alone.
 pub fn map_panic_location(line: &str, places: &[&str]) -> String {
-    const AT: &str = "panicked at src/main.rs:";
-    let Some(i) = line.find(AT) else { return line.to_string() };
-    let rest = &line[i + AT.len()..];
+    // rustc writes `src\\main.rs` on Windows
+    let (i, at) = match ["panicked at src/main.rs:", "panicked at src\\main.rs:"].iter().find_map(|at| line.find(at).map(|i| (i, *at))) {
+        Some(found) => found,
+        None => return line.to_string(),
+    };
+    let rest = &line[i + at.len()..];
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     let place = digits.parse::<usize>().ok().and_then(|n| places.get(n.checked_sub(1)?)).filter(|p| !p.is_empty());
     let Some(place) = place else { return line.to_string() };
@@ -78,7 +81,7 @@ pub fn map_panic_location(line: &str, places: &[&str]) -> String {
 /// is traced back through `expansion.span` to its call site in our code.
 fn our_spans(v: &Value) -> Vec<&Value> {
     fn ours(s: &Value) -> bool {
-        s["file_name"].as_str().is_some_and(|f| f.ends_with("src/main.rs"))
+        s["file_name"].as_str().is_some_and(|f| f.ends_with("src/main.rs") || f.ends_with("src\\main.rs"))
     }
     v["spans"]
         .as_array()
@@ -211,6 +214,11 @@ mod tests {
             "thread 'tests::t' (42) panicked at store.prvz:9:"
         );
         // unknown or unmapped lines stay as they are
+        assert_eq!(
+            map_panic_location("thread 'tests::t' (42) panicked at src\\main.rs:3:9:", &places),
+            map_panic_location("thread 'tests::t' (42) panicked at src/main.rs:3:9:", &places),
+            "Windows paths map the same way"
+        );
         for l in ["panicked at src/main.rs:1:5:", "panicked at src/main.rs:99:1:", "ok"] {
             assert_eq!(map_panic_location(l, &places), l);
         }

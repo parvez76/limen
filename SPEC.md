@@ -1,4 +1,4 @@
-# PARVEZ v0.17.1 SPEC (AI system prompt)
+# PARVEZ v0.18.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -463,7 +463,7 @@ app.prvz:6: error[E0308]: mismatched types
 
 ## CLI
 - `parvez test f.prvz [filter]`: runs the `test` blocks.
-- `parvez doctor`: checks the setup (Rust 1.88+, cargo, git, the advisory database, cross targets, PATH) and prints the fix for anything missing; exits 1 if building can't work.
+- `parvez doctor`: checks the setup (Rust 1.88+, cargo, a C linker or, on Windows, the Visual Studio C++ build tools, git, the advisory database, cross targets, PATH) and prints the fix for anything missing; exits 1 if building can't work.
 - `parvez upgrade [--version vX.Y.Z] [--check] [--force]`: replaces parvez with a newer release after checking it against the release's SHA256SUMS (and its build attestation when `gh` is installed). A cargo-installed parvez is told to update with cargo instead.
 - `parvez lint f.prvz [--sarif [-o out.sarif]]`: the security rules only, no build. Exits 1 on findings. `--sarif` writes SARIF 2.1.0 for GitHub code scanning and similar tools (CWE tags, severity, `@allow_insecure` waivers as suppressed results). `parvez lint --rules` lists the rules with their CWE / OWASP / ASVS references.
 - `parvez routes f.prvz [--json]`: the access map for security review (every endpoint with its guards or `@public` reason).

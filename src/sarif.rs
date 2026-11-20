@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(camel("sql-injection"), "SqlInjection");
         assert_eq!(encode("a b/c#d.prvz"), "a%20b/c%23d.prvz");
         assert_eq!(uri_for("./x/y.prvz", None), "x/y.prvz");
-        let v = report(&Report { findings: vec![], allowed: vec![], suppressed: vec![] }, &[]);
+        let v = report(&Report { findings: vec![], allowed: vec![], suppressed: vec![], incomplete: None }, &[]);
         let rules = v["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
         assert_eq!(rules.len(), RULES.len());
         for r in rules {

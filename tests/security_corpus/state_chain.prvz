@@ -1,0 +1,365 @@
+# Request data copied through 50 `state:` fields, one route at a time, then used as a path.
+# Guards the stored-state fixed point against pass limits.
+
+state:
+    s0: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s1: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s2: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s3: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s4: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s5: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s6: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s7: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s8: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s9: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s10: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s11: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s12: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s13: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s14: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s15: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s16: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s17: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s18: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s19: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s20: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s21: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s22: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s23: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s24: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s25: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s26: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s27: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s28: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s29: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s30: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s31: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s32: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s33: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s34: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s35: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s36: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s37: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s38: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s39: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s40: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s41: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s42: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s43: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s44: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s45: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s46: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s47: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s48: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s49: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+    s50: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
+
+@public("corpus")
+route POST "/in/{name}" (state, name: str) -> str!:
+    *state.s0.lock().unwrap() = name.clone()
+    ret "ok"
+
+@public("corpus")
+route POST "/copy1" (state) -> str!:
+    v = state.s0.lock().unwrap().clone()
+    *state.s1.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy2" (state) -> str!:
+    v = state.s1.lock().unwrap().clone()
+    *state.s2.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy3" (state) -> str!:
+    v = state.s2.lock().unwrap().clone()
+    *state.s3.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy4" (state) -> str!:
+    v = state.s3.lock().unwrap().clone()
+    *state.s4.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy5" (state) -> str!:
+    v = state.s4.lock().unwrap().clone()
+    *state.s5.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy6" (state) -> str!:
+    v = state.s5.lock().unwrap().clone()
+    *state.s6.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy7" (state) -> str!:
+    v = state.s6.lock().unwrap().clone()
+    *state.s7.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy8" (state) -> str!:
+    v = state.s7.lock().unwrap().clone()
+    *state.s8.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy9" (state) -> str!:
+    v = state.s8.lock().unwrap().clone()
+    *state.s9.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy10" (state) -> str!:
+    v = state.s9.lock().unwrap().clone()
+    *state.s10.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy11" (state) -> str!:
+    v = state.s10.lock().unwrap().clone()
+    *state.s11.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy12" (state) -> str!:
+    v = state.s11.lock().unwrap().clone()
+    *state.s12.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy13" (state) -> str!:
+    v = state.s12.lock().unwrap().clone()
+    *state.s13.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy14" (state) -> str!:
+    v = state.s13.lock().unwrap().clone()
+    *state.s14.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy15" (state) -> str!:
+    v = state.s14.lock().unwrap().clone()
+    *state.s15.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy16" (state) -> str!:
+    v = state.s15.lock().unwrap().clone()
+    *state.s16.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy17" (state) -> str!:
+    v = state.s16.lock().unwrap().clone()
+    *state.s17.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy18" (state) -> str!:
+    v = state.s17.lock().unwrap().clone()
+    *state.s18.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy19" (state) -> str!:
+    v = state.s18.lock().unwrap().clone()
+    *state.s19.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy20" (state) -> str!:
+    v = state.s19.lock().unwrap().clone()
+    *state.s20.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy21" (state) -> str!:
+    v = state.s20.lock().unwrap().clone()
+    *state.s21.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy22" (state) -> str!:
+    v = state.s21.lock().unwrap().clone()
+    *state.s22.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy23" (state) -> str!:
+    v = state.s22.lock().unwrap().clone()
+    *state.s23.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy24" (state) -> str!:
+    v = state.s23.lock().unwrap().clone()
+    *state.s24.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy25" (state) -> str!:
+    v = state.s24.lock().unwrap().clone()
+    *state.s25.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy26" (state) -> str!:
+    v = state.s25.lock().unwrap().clone()
+    *state.s26.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy27" (state) -> str!:
+    v = state.s26.lock().unwrap().clone()
+    *state.s27.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy28" (state) -> str!:
+    v = state.s27.lock().unwrap().clone()
+    *state.s28.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy29" (state) -> str!:
+    v = state.s28.lock().unwrap().clone()
+    *state.s29.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy30" (state) -> str!:
+    v = state.s29.lock().unwrap().clone()
+    *state.s30.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy31" (state) -> str!:
+    v = state.s30.lock().unwrap().clone()
+    *state.s31.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy32" (state) -> str!:
+    v = state.s31.lock().unwrap().clone()
+    *state.s32.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy33" (state) -> str!:
+    v = state.s32.lock().unwrap().clone()
+    *state.s33.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy34" (state) -> str!:
+    v = state.s33.lock().unwrap().clone()
+    *state.s34.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy35" (state) -> str!:
+    v = state.s34.lock().unwrap().clone()
+    *state.s35.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy36" (state) -> str!:
+    v = state.s35.lock().unwrap().clone()
+    *state.s36.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy37" (state) -> str!:
+    v = state.s36.lock().unwrap().clone()
+    *state.s37.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy38" (state) -> str!:
+    v = state.s37.lock().unwrap().clone()
+    *state.s38.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy39" (state) -> str!:
+    v = state.s38.lock().unwrap().clone()
+    *state.s39.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy40" (state) -> str!:
+    v = state.s39.lock().unwrap().clone()
+    *state.s40.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy41" (state) -> str!:
+    v = state.s40.lock().unwrap().clone()
+    *state.s41.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy42" (state) -> str!:
+    v = state.s41.lock().unwrap().clone()
+    *state.s42.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy43" (state) -> str!:
+    v = state.s42.lock().unwrap().clone()
+    *state.s43.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy44" (state) -> str!:
+    v = state.s43.lock().unwrap().clone()
+    *state.s44.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy45" (state) -> str!:
+    v = state.s44.lock().unwrap().clone()
+    *state.s45.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy46" (state) -> str!:
+    v = state.s45.lock().unwrap().clone()
+    *state.s46.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy47" (state) -> str!:
+    v = state.s46.lock().unwrap().clone()
+    *state.s47.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy48" (state) -> str!:
+    v = state.s47.lock().unwrap().clone()
+    *state.s48.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy49" (state) -> str!:
+    v = state.s48.lock().unwrap().clone()
+    *state.s49.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route POST "/copy50" (state) -> str!:
+    v = state.s49.lock().unwrap().clone()
+    *state.s50.lock().unwrap() = v
+    ret "ok"
+
+@public("corpus")
+route GET "/out" (state) -> str!:
+    p = state.s50.lock().unwrap().clone()
+    ret std::fs::read_to_string(p)?  # expect: path-traversal

@@ -2,6 +2,13 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
+## v0.18.0
+- Windows support (beta): `irm https://parvez76.github.io/parvez/install.ps1 | iex` installs a verified x64 build to `%USERPROFILE%\.parvez\bin` and adds it to the user PATH without admin rights. Releases include `x86_64-pc-windows-msvc`. CI builds and tests the compiler, the installer, `doctor`, `new`, `test` and `upgrade` on Windows.
+- `parvez doctor` checks for the Visual Studio C++ build tools on Windows; `parvez upgrade` replaces the running `parvez.exe` safely.
+- `parvez fmt` keeps a file's CRLF line endings.
+- Error messages show module paths with `/` on every platform.
+- Security fix: the analysis now runs to a fixed point with no depth limit. Before, a call chain deeper than about 32 functions, or request data copied through more than 32 `state:` fields, could reach a sink unreported. If the analysis's safety limit is ever hit, the build fails instead of passing. The corpus now includes a 100-function chain and a 50-field state chain.
+
 ## v0.17.1
 - The repository is now `parvez76/parvez`. The installer moved to `https://parvez76.github.io/parvez/install.sh`; the old address no longer works.
 - `parvez upgrade` and the installer point at the new name, and accept build attestations made under the old one (v0.16.0, v0.17.0).

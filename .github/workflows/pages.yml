@@ -4,7 +4,7 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: [install.sh, site/**, .github/workflows/pages.yml]
+    paths: [install.sh, install.ps1, site/**, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:
@@ -33,8 +33,8 @@ jobs:
           set -eu
           mkdir -p _site
           cp -r site/. _site/
-          cp install.sh _site/install.sh
-          (cd _site && sha256sum install.sh > install.sh.sha256)
+          cp install.sh install.ps1 _site/
+          (cd _site && sha256sum install.sh > install.sh.sha256 && sha256sum install.ps1 > install.ps1.sha256)
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:

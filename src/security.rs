@@ -42,6 +42,8 @@ pub struct Report {
     pub allowed: Vec<(usize, String)>,
     /// findings inside `@allow_insecure` items, with the item's reason (SARIF suppressions)
     pub suppressed: Vec<(Finding, String)>,
+    /// set when the analysis hit its safety limit: callers must fail, not report "clean"
+    pub incomplete: Option<String>,
 }
 
 /// A lint rule and the standards it enforces: CWE, OWASP Top 10 (2021) and
@@ -168,7 +170,7 @@ pub fn lint(prog: &Program) -> Report {
     let items: Vec<(&[String], &Item)> =
         prog.all_items().into_iter().filter(|(m, i)| !prog.is_test_scope(m, i, &test_mods)).collect();
     let mut fx = Fx::new(prog, &items);
-    fx.summarize();
+    let mut incomplete = (!fx.summarize()).then(|| "function summaries did not converge".to_string());
     // guards run on every request before the handler: their inputs are untrusted too
     let mut guards: HashSet<String> = HashSet::new();
     for (module, item) in &items {
@@ -178,13 +180,22 @@ pub fn lint(prog: &Program) -> Report {
     }
     // `state:` fields that end up holding request data, to a fixed point
     // (a stored value copied into another field taints that one too)
+    // Each pass that changes anything adds at least one field, so this ends after
+    // at most one pass per `state:` field; the limit is only a guard against bugs.
+    let fields: usize = items.iter().map(|(_, i)| if let Item::State(st) = i { st.fields.len() } else { 0 }).sum();
     let mut run = analyze(&fx, &items, &guards);
-    for _ in 0..32 {
+    let mut passes = 0;
+    loop {
         let mut stored = (*fx.stored).clone();
         for (field, at) in &run.writes {
             stored.entry(field.clone()).or_insert_with(|| at.clone());
         }
         if stored.len() == fx.stored.len() {
+            break;
+        }
+        passes += 1;
+        if passes > fields + 1 {
+            incomplete.get_or_insert_with(|| "stored-state analysis did not converge".to_string());
             break;
         }
         fx.stored = std::rc::Rc::new(stored);
@@ -199,7 +210,7 @@ pub fn lint(prog: &Program) -> Report {
     findings.retain(|f| seen.insert((f.line, f.rule)));
     let mut suppressed = run.suppressed;
     suppressed.sort_by_key(|(f, _)| f.line);
-    Report { findings, allowed: run.allowed, suppressed }
+    Report { findings, allowed: run.allowed, suppressed, incomplete }
 }
 
 struct Run {
@@ -510,53 +521,76 @@ impl<'a> Fx<'a> {
         }
     }
 
-    fn summarize(&mut self) {
-        let keys: Vec<String> = {
-            let mut k: Vec<String> = self.fns.keys().cloned().collect();
-            k.sort();
-            k
-        };
-        // monotone: sinks only get added, so this converges; the cap bounds pathological chains
-        for _ in 0..32 {
-            let mut next: HashMap<String, Vec<ParamSum>> = HashMap::new();
-            for key in &keys {
-                let info = &self.fns[key];
-                let per_param = info
-                    .f
-                    .params
-                    .iter()
-                    .map(|(p, t)| {
-                        if p == "state" || !carries_text(t) {
-                            return ParamSum::default();
-                        }
-                        let mut probe = Linter::new(self, info.module);
-                        // probes ignore stored state: a sink fed by state isn't this parameter's
-                        let mut cx = Cx::default();
-                        probe.enter(info, &mut cx);
-                        cx.taint.insert(p.clone());
-                        probe.block(&info.f.body, &mut cx);
-                        let mut sum = ParamSum::default();
-                        for s in probe.sinks {
-                            if !sum.sinks.contains(&s) {
-                                sum.sinks.push(s);
-                            }
-                        }
-                        for w in probe.writes {
-                            if !sum.writes.iter().any(|x| x.0 == w.0) {
-                                sum.writes.push(w);
-                            }
-                        }
-                        sum.self_write = probe.self_write;
-                        sum
-                    })
-                    .collect();
-                next.insert(key.clone(), per_param);
+    /// Per-parameter summaries for every function, to a fixed point. A worklist
+    /// re-summarizes only the callers of a function whose summary changed, so a
+    /// call chain of any depth is followed to its sink. Summaries only grow and
+    /// are finite, so this terminates; `false` means the safety limit was hit
+    /// (a bug), and the caller fails closed rather than report a clean result.
+    fn summarize(&mut self) -> bool {
+        let mut keys: Vec<String> = self.fns.keys().cloned().collect();
+        keys.sort();
+        let mut queue: std::collections::VecDeque<String> = keys.iter().cloned().collect();
+        let mut queued: HashSet<String> = keys.iter().cloned().collect();
+        let mut callers: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+        let limit = (keys.len() + 1) * 10_000;
+        let mut steps = 0;
+        while let Some(key) = queue.pop_front() {
+            queued.remove(&key);
+            steps += 1;
+            if steps > limit {
+                return false;
             }
-            if next == self.sums {
-                return;
+            let (sum, consulted) = self.summarize_one(&key);
+            for callee in consulted {
+                callers.entry(callee).or_default().insert(key.clone());
             }
-            self.sums = next;
+            if self.sums.get(&key) != Some(&sum) {
+                self.sums.insert(key.clone(), sum);
+                for c in callers.get(&key).into_iter().flatten() {
+                    if queued.insert(c.clone()) {
+                        queue.push_back(c.clone());
+                    }
+                }
+            }
         }
+        true
+    }
+
+    /// One function's summary from the current summaries of its callees, and the callees it consulted.
+    fn summarize_one(&self, key: &str) -> (Vec<ParamSum>, Vec<String>) {
+        let info = &self.fns[key];
+        let mut consulted = Vec::new();
+        let per_param = info
+            .f
+            .params
+            .iter()
+            .map(|(p, t)| {
+                if p == "state" || !carries_text(t) {
+                    return ParamSum::default();
+                }
+                let mut probe = Linter::new(self, info.module);
+                // probes ignore stored state: a sink fed by state isn't this parameter's
+                let mut cx = Cx::default();
+                probe.enter(info, &mut cx);
+                cx.taint.insert(p.clone());
+                probe.block(&info.f.body, &mut cx);
+                consulted.append(&mut probe.consulted);
+                let mut sum = ParamSum::default();
+                for s in probe.sinks {
+                    if !sum.sinks.contains(&s) {
+                        sum.sinks.push(s);
+                    }
+                }
+                for w in probe.writes {
+                    if !sum.writes.iter().any(|x| x.0 == w.0) {
+                        sum.writes.push(w);
+                    }
+                }
+                sum.self_write = probe.self_write;
+                sum
+            })
+            .collect();
+        (per_param, consulted)
     }
 
     fn locate(&self, line: usize) -> String {
@@ -605,6 +639,8 @@ struct Linter<'f, 'a> {
     /// receivers that took request data into their fields during the current
     /// statement (`job.set_path(name)` taints `job`); applied after it
     pending: Vec<String>,
+    /// functions whose summaries this analysis read (the worklist's dependencies)
+    consulted: Vec<String>,
     fx: &'f Fx<'a>,
     module: Vec<String>,
 }
@@ -615,7 +651,7 @@ fn last_segment(name: &str) -> &str {
 
 impl<'f, 'a> Linter<'f, 'a> {
     fn new(fx: &'f Fx<'a>, module: &[String]) -> Self {
-        Linter { findings: Vec::new(), sinks: Vec::new(), writes: Vec::new(), self_write: false, pending: Vec::new(), fx, module: module.to_vec() }
+        Linter { findings: Vec::new(), sinks: Vec::new(), writes: Vec::new(), self_write: false, pending: Vec::new(), consulted: Vec::new(), fx, module: module.to_vec() }
     }
 
     /// Parameter and `self` types for method dispatch inside a function.
@@ -785,6 +821,8 @@ impl<'f, 'a> Linter<'f, 'a> {
     /// A call into a user function: request data in an argument reaches the
     /// sinks that parameter leads to (from the function's summary).
     fn through_call(&mut self, key: &str, shown: &str, recv: Option<&Expr>, args: &[Expr], line: usize, cx: &Cx) {
+        // recorded even before the callee has a summary: when it gets one, this caller is redone
+        self.consulted.push(key.to_string());
         let Some(sums) = self.fx.sums.get(key) else { return };
         let Some(FnInfo { f, .. }) = self.fx.fns.get(key) else { return };
         let mut positional = 0;

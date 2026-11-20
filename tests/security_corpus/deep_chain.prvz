@@ -1,0 +1,306 @@
+# Deep call chain: request data passes through 100 functions before reaching the sink.
+# Guards the fixed-point analysis against depth limits (an earlier version stopped at 32 rounds).
+
+fn f100(p: &str) -> str!:
+    ret std::fs::read_to_string(p)?
+
+fn f99(p: &str) -> str!:
+    ret f100(p)
+
+fn f98(p: &str) -> str!:
+    ret f99(p)
+
+fn f97(p: &str) -> str!:
+    ret f98(p)
+
+fn f96(p: &str) -> str!:
+    ret f97(p)
+
+fn f95(p: &str) -> str!:
+    ret f96(p)
+
+fn f94(p: &str) -> str!:
+    ret f95(p)
+
+fn f93(p: &str) -> str!:
+    ret f94(p)
+
+fn f92(p: &str) -> str!:
+    ret f93(p)
+
+fn f91(p: &str) -> str!:
+    ret f92(p)
+
+fn f90(p: &str) -> str!:
+    ret f91(p)
+
+fn f89(p: &str) -> str!:
+    ret f90(p)
+
+fn f88(p: &str) -> str!:
+    ret f89(p)
+
+fn f87(p: &str) -> str!:
+    ret f88(p)
+
+fn f86(p: &str) -> str!:
+    ret f87(p)
+
+fn f85(p: &str) -> str!:
+    ret f86(p)
+
+fn f84(p: &str) -> str!:
+    ret f85(p)
+
+fn f83(p: &str) -> str!:
+    ret f84(p)
+
+fn f82(p: &str) -> str!:
+    ret f83(p)
+
+fn f81(p: &str) -> str!:
+    ret f82(p)
+
+fn f80(p: &str) -> str!:
+    ret f81(p)
+
+fn f79(p: &str) -> str!:
+    ret f80(p)
+
+fn f78(p: &str) -> str!:
+    ret f79(p)
+
+fn f77(p: &str) -> str!:
+    ret f78(p)
+
+fn f76(p: &str) -> str!:
+    ret f77(p)
+
+fn f75(p: &str) -> str!:
+    ret f76(p)
+
+fn f74(p: &str) -> str!:
+    ret f75(p)
+
+fn f73(p: &str) -> str!:
+    ret f74(p)
+
+fn f72(p: &str) -> str!:
+    ret f73(p)
+
+fn f71(p: &str) -> str!:
+    ret f72(p)
+
+fn f70(p: &str) -> str!:
+    ret f71(p)
+
+fn f69(p: &str) -> str!:
+    ret f70(p)
+
+fn f68(p: &str) -> str!:
+    ret f69(p)
+
+fn f67(p: &str) -> str!:
+    ret f68(p)
+
+fn f66(p: &str) -> str!:
+    ret f67(p)
+
+fn f65(p: &str) -> str!:
+    ret f66(p)
+
+fn f64(p: &str) -> str!:
+    ret f65(p)
+
+fn f63(p: &str) -> str!:
+    ret f64(p)
+
+fn f62(p: &str) -> str!:
+    ret f63(p)
+
+fn f61(p: &str) -> str!:
+    ret f62(p)
+
+fn f60(p: &str) -> str!:
+    ret f61(p)
+
+fn f59(p: &str) -> str!:
+    ret f60(p)
+
+fn f58(p: &str) -> str!:
+    ret f59(p)
+
+fn f57(p: &str) -> str!:
+    ret f58(p)
+
+fn f56(p: &str) -> str!:
+    ret f57(p)
+
+fn f55(p: &str) -> str!:
+    ret f56(p)
+
+fn f54(p: &str) -> str!:
+    ret f55(p)
+
+fn f53(p: &str) -> str!:
+    ret f54(p)
+
+fn f52(p: &str) -> str!:
+    ret f53(p)
+
+fn f51(p: &str) -> str!:
+    ret f52(p)
+
+fn f50(p: &str) -> str!:
+    ret f51(p)
+
+fn f49(p: &str) -> str!:
+    ret f50(p)
+
+fn f48(p: &str) -> str!:
+    ret f49(p)
+
+fn f47(p: &str) -> str!:
+    ret f48(p)
+
+fn f46(p: &str) -> str!:
+    ret f47(p)
+
+fn f45(p: &str) -> str!:
+    ret f46(p)
+
+fn f44(p: &str) -> str!:
+    ret f45(p)
+
+fn f43(p: &str) -> str!:
+    ret f44(p)
+
+fn f42(p: &str) -> str!:
+    ret f43(p)
+
+fn f41(p: &str) -> str!:
+    ret f42(p)
+
+fn f40(p: &str) -> str!:
+    ret f41(p)
+
+fn f39(p: &str) -> str!:
+    ret f40(p)
+
+fn f38(p: &str) -> str!:
+    ret f39(p)
+
+fn f37(p: &str) -> str!:
+    ret f38(p)
+
+fn f36(p: &str) -> str!:
+    ret f37(p)
+
+fn f35(p: &str) -> str!:
+    ret f36(p)
+
+fn f34(p: &str) -> str!:
+    ret f35(p)
+
+fn f33(p: &str) -> str!:
+    ret f34(p)
+
+fn f32(p: &str) -> str!:
+    ret f33(p)
+
+fn f31(p: &str) -> str!:
+    ret f32(p)
+
+fn f30(p: &str) -> str!:
+    ret f31(p)
+
+fn f29(p: &str) -> str!:
+    ret f30(p)
+
+fn f28(p: &str) -> str!:
+    ret f29(p)
+
+fn f27(p: &str) -> str!:
+    ret f28(p)
+
+fn f26(p: &str) -> str!:
+    ret f27(p)
+
+fn f25(p: &str) -> str!:
+    ret f26(p)
+
+fn f24(p: &str) -> str!:
+    ret f25(p)
+
+fn f23(p: &str) -> str!:
+    ret f24(p)
+
+fn f22(p: &str) -> str!:
+    ret f23(p)
+
+fn f21(p: &str) -> str!:
+    ret f22(p)
+
+fn f20(p: &str) -> str!:
+    ret f21(p)
+
+fn f19(p: &str) -> str!:
+    ret f20(p)
+
+fn f18(p: &str) -> str!:
+    ret f19(p)
+
+fn f17(p: &str) -> str!:
+    ret f18(p)
+
+fn f16(p: &str) -> str!:
+    ret f17(p)
+
+fn f15(p: &str) -> str!:
+    ret f16(p)
+
+fn f14(p: &str) -> str!:
+    ret f15(p)
+
+fn f13(p: &str) -> str!:
+    ret f14(p)
+
+fn f12(p: &str) -> str!:
+    ret f13(p)
+
+fn f11(p: &str) -> str!:
+    ret f12(p)
+
+fn f10(p: &str) -> str!:
+    ret f11(p)
+
+fn f9(p: &str) -> str!:
+    ret f10(p)
+
+fn f8(p: &str) -> str!:
+    ret f9(p)
+
+fn f7(p: &str) -> str!:
+    ret f8(p)
+
+fn f6(p: &str) -> str!:
+    ret f7(p)
+
+fn f5(p: &str) -> str!:
+    ret f6(p)
+
+fn f4(p: &str) -> str!:
+    ret f5(p)
+
+fn f3(p: &str) -> str!:
+    ret f4(p)
+
+fn f2(p: &str) -> str!:
+    ret f3(p)
+
+fn f1(p: &str) -> str!:
+    ret f2(p)
+
+@public("corpus")
+route GET "/deep/{name}" (name: str) -> str!:
+    ret f1(&name)  # expect: path-traversal

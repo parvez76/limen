@@ -21,7 +21,11 @@ pub fn run(path: &Path, check: bool) -> Result<Vec<PathBuf>> {
     let mut changed = Vec::new();
     for f in files {
         let src = std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?;
-        let out = format_file(&f, &src).with_context(|| format!("formatting {}", f.display()))?;
+        let mut out = format_file(&f, &src).with_context(|| format!("formatting {}", f.display()))?;
+        // keep the file's line endings: Windows checkouts are often CRLF
+        if src.contains("\r\n") {
+            out = out.replace("\r\n", "\n").replace('\n', "\r\n");
+        }
         if out != src {
             if !check {
                 std::fs::write(&f, &out)?;

@@ -85,7 +85,7 @@ page GET "/" (query: HomeQuery) -> html:
                 p Edit ui/home.msd and main.prvz, then run parvez run main.prvz.
 "#;
 
-const GITIGNORE: &str = ".parvez_build/\n/main\n/main-*\n*.sha256\n*.sbom.json\n";
+const GITIGNORE: &str = ".parvez_build/\n/main\n/main.exe\n/main-*\n*.sha256\n*.sbom.json\n.*.parvez-old*\n";
 
 const README: &str = r#"# __NAME__
 

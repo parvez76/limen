@@ -55,7 +55,7 @@ There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue
 | `parvez heal app.prvz` | Updates to patched compatible dependency versions; reports advisories needing a major upgrade |
 | `parvez fuzz app.prvz` | Starts the service and fires malformed/edge-case requests at every route; fails on crash, hang or leak |
 | `parvez test app.prvz [filter]` | Runs `test "..."` blocks, with in-process HTTP tests via `test_app()` |
-| `parvez doctor` | Checks the setup (Rust 1.88+, cargo, C linker, git, advisory database, targets, PATH) and prints the fix for anything missing |
+| `parvez doctor` | Checks the setup (Rust 1.88+, cargo, the C linker or, on Windows, the Visual Studio C++ build tools, git, advisory database, targets, PATH) and prints the fix for anything missing |
 | `parvez upgrade [--version vX.Y.Z] [--check]` | Updates to a newer release after verifying it (SHA256SUMS, and the build attestation when `gh` is installed) |
 | `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec`, `parvez_check`, `parvez_eject` tools (`claude mcp add parvez -- parvez mcp`) |
 | `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
