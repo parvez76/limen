@@ -400,7 +400,7 @@ test "orders need an api key":
 ```
 async fn admin(req) -> Claims!:
     c = oidc(req).await?                     # validates Authorization: Bearer <jwt>
-    if not c.has_role("RemoteOps.Admin"): fail(403, code: "forbidden", "admin role required")
+    if not c.has_role("App.Admin"): fail(403, code: "forbidden", "admin role required")
     ret c
 @guard(admin)
 route GET "/admin/devices" (auth) -> str:
@@ -419,7 +419,7 @@ route GET "/admin/devices" (auth) -> str:
 ```
 async fn require_staff(req) -> Claims!:
     c = oidc_session(req).await?
-    if not c.has_role("RemoteOps.Engineer"): fail(403, code: "forbidden", "engineers only")
+    if not c.has_role("App.Engineer"): fail(403, code: "forbidden", "engineers only")
     ret c
 
 # ui/dash.msd: @guard works on pages exactly as on routes; `auth` is its result
@@ -439,7 +439,7 @@ page GET "/dash" (auth) -> html:
   - Every `PARVEZ_SESSION_RECHECK_SECS` (default 60) a browser session is re-confirmed with the IdP through a refresh, even while its access token is valid. A disabled or deleted user, or an ended IdP session, is therefore signed out within that interval on every instance, with or without back-channel calls.
   - Bearer tokens without a back-channel logout stay valid until they expire (as with any locally validated JWT); keep access-token lifetimes short.
 - CSRF: `Origin: null` (sent by browsers for form posts under `Referrer-Policy: no-referrer`) defers to `Sec-Fetch-Site: same-origin`.
-- Environment: `PARVEZ_OIDC_CLIENT_ID` (the browser client, e.g. `remoteops-dashboard`), `PARVEZ_OIDC_CLIENT_SECRET` (confidential clients), `PARVEZ_PUBLIC_URL` (what users open; https, or http://localhost for development; the redirect URI is `PARVEZ_PUBLIC_URL/auth/callback`), `PARVEZ_SESSION_KEY` (64 hex characters: `openssl rand -hex 32`), plus the `PARVEZ_OIDC_*` settings above. Without them nobody can sign in, and the `/auth` routes log why.
+- Environment: `PARVEZ_OIDC_CLIENT_ID` (the browser client, e.g. `my-dashboard`), `PARVEZ_OIDC_CLIENT_SECRET` (confidential clients), `PARVEZ_PUBLIC_URL` (what users open; https, or http://localhost for development; the redirect URI is `PARVEZ_PUBLIC_URL/auth/callback`), `PARVEZ_SESSION_KEY` (64 hex characters: `openssl rand -hex 32`), plus the `PARVEZ_OIDC_*` settings above. Without them nobody can sign in, and the `/auth` routes log why.
 - Every service with Masud pages answers failing browser navigations with a small HTML error page instead of JSON.
 
 ## Errors (fix loop)

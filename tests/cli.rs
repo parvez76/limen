@@ -1288,15 +1288,15 @@ fn oidc_guard_validates_tokens_against_jwks() {
         format!("{msg}.{}", b64url(&sig))
     };
     let token = |alg: &str, key: &str, extra: &str, exp: u64, aud: &str| {
-        signed(alg, key, format!(r#"{{"iss":"{iss}","sub":"u-1","aud":"{aud}","exp":{exp},"email":"ada@adn.test","realm_access":{{"roles":["RemoteOps.Engineer"{extra}]}}}}"#))
+        signed(alg, key, format!(r#"{{"iss":"{iss}","sub":"u-1","aud":"{aud}","exp":{exp},"email":"ada@adn.test","realm_access":{{"roles":["App.Engineer"{extra}]}}}}"#))
     };
     // Keycloak shapes: `typ` access/ID/refresh, client roles, missing e-mail
     let keycloak = |top: &str| {
-        signed("RS256", "key.pem", format!(r#"{{"iss":"{iss}","sub":"u-2","aud":["remoteops-api","account"],"exp":{},"preferred_username":"bob"{top}}}"#, now + 300))
+        signed("RS256", "key.pem", format!(r#"{{"iss":"{iss}","sub":"u-2","aud":["my-api","account"],"exp":{},"preferred_username":"bob"{top}}}"#, now + 300))
     };
     std::fs::write(
         dir.join("svc.prvz"),
-        "async fn admin(req) -> Claims!:\n    c = oidc(req).await?\n    if not c.has_role(\"RemoteOps.Admin\"): fail(403, code: \"forbidden\", \"admin role required\")\n    ret c\n\n@guard(admin)\nroute GET \"/admin\" (auth) -> str:\n    ret auth.email.clone()\n",
+        "async fn admin(req) -> Claims!:\n    c = oidc(req).await?\n    if not c.has_role(\"App.Admin\"): fail(403, code: \"forbidden\", \"admin role required\")\n    ret c\n\n@guard(admin)\nroute GET \"/admin\" (auth) -> str:\n    ret auth.email.clone()\n",
     )
     .unwrap();
     let out = run_in(&dir, &["build", "svc.prvz"]);
@@ -1306,7 +1306,7 @@ fn oidc_guard_validates_tokens_against_jwks() {
         Command::new(dir.join("svc"))
             .env("PORT", port.to_string())
             .env("PARVEZ_OIDC_ISSUER", &iss)
-            .env("PARVEZ_OIDC_AUDIENCE", "remoteops-api")
+            .env("PARVEZ_OIDC_AUDIENCE", "my-api")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1321,23 +1321,23 @@ fn oidc_guard_validates_tokens_against_jwks() {
         let raw = http_raw(port, format!("GET /admin HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {tok}\r\nConnection: close\r\n\r\n").as_bytes());
         (raw[9..12].to_string(), raw.split_once("\r\n\r\n").map(|x| x.1.to_string()).unwrap_or_default())
     };
-    let admin = token("RS256", "key.pem", r#","RemoteOps.Admin""#, now + 300, "remoteops-api");
+    let admin = token("RS256", "key.pem", r#","App.Admin""#, now + 300, "my-api");
     assert_eq!(call(&admin), ("200".into(), "ada@adn.test".into()));
-    assert_eq!(call(&token("RS256", "key.pem", "", now + 300, "remoteops-api")).0, "403", "no admin role");
-    assert_eq!(call(&token("RS256", "key.pem", r#","RemoteOps.Admin""#, now - 3600, "remoteops-api")).0, "401", "expired");
-    assert_eq!(call(&token("RS256", "key.pem", r#","RemoteOps.Admin""#, now + 300, "other-api")).0, "401", "audience");
-    assert_eq!(call(&token("RS256", "other.pem", r#","RemoteOps.Admin""#, now + 300, "remoteops-api")).0, "401", "forged signature");
-    assert_eq!(call(&token("HS256", "key.pem", r#","RemoteOps.Admin""#, now + 300, "remoteops-api")).0, "401", "HMAC algorithm confusion");
+    assert_eq!(call(&token("RS256", "key.pem", "", now + 300, "my-api")).0, "403", "no admin role");
+    assert_eq!(call(&token("RS256", "key.pem", r#","App.Admin""#, now - 3600, "my-api")).0, "401", "expired");
+    assert_eq!(call(&token("RS256", "key.pem", r#","App.Admin""#, now + 300, "other-api")).0, "401", "audience");
+    assert_eq!(call(&token("RS256", "other.pem", r#","App.Admin""#, now + 300, "my-api")).0, "401", "forged signature");
+    assert_eq!(call(&token("HS256", "key.pem", r#","App.Admin""#, now + 300, "my-api")).0, "401", "HMAC algorithm confusion");
     let parts: Vec<&str> = admin.split('.').collect();
     let none = format!("{}.{}.", b64url(br#"{"alg":"none","typ":"JWT"}"#), parts[1]);
     assert_eq!(call(&none).0, "401", "alg none");
     assert_eq!(call("").0, "401");
-    let admin_role = r#","realm_access":{"roles":["RemoteOps.Admin"]}"#;
+    let admin_role = r#","realm_access":{"roles":["App.Admin"]}"#;
     assert_eq!(call(&keycloak(&format!(r#","typ":"Bearer"{admin_role}"#))), ("200".into(), "bob".into()), "access token, e-mail falls back to username");
     assert_eq!(call(&keycloak(&format!(r#","typ":"ID"{admin_role}"#))).0, "401", "ID token");
     assert_eq!(call(&keycloak(&format!(r#","typ":"Refresh"{admin_role}"#))).0, "401", "refresh token");
-    assert_eq!(call(&keycloak(r#","resource_access":{"remoteops-api":{"roles":["RemoteOps.Admin"]}}"#)).0, "200", "own client role");
-    assert_eq!(call(&keycloak(r#","resource_access":{"account":{"roles":["RemoteOps.Admin"]}}"#)).0, "403", "another client's role");
+    assert_eq!(call(&keycloak(r#","resource_access":{"my-api":{"roles":["App.Admin"]}}"#)).0, "200", "own client role");
+    assert_eq!(call(&keycloak(r#","resource_access":{"account":{"roles":["App.Admin"]}}"#)).0, "403", "another client's role");
     assert_eq!(call(&keycloak(&format!(r#","sub":""{admin_role}"#))).0, "401", "empty subject");
 }
 
