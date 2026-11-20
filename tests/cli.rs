@@ -481,7 +481,8 @@ route GET "/u/{id}" (state, id: str) -> str!:
     assert!(err.contains("bad.prvz:6: security[sql-injection]"), "{err}");
     assert!(err.contains("bad.prvz:7: security[path-traversal]"), "{err}");
     assert!(err.contains("= fix: never build SQL with interpolation"), "{err}");
-    assert!(err.contains("3 security error(s)"), "{err}");
+    assert!(err.contains("bad.prvz:2: security[secret-type]: state field `api_key` holds a secret as plain `str`"), "{err}");
+    assert!(err.contains("4 security error(s)"), "{err}");
 
     // explicit, reasoned opt-out: allowed, but reported on every build
     std::fs::write(
@@ -1719,4 +1720,52 @@ fn deny_by_default_and_access_map() {
     let admin = json.as_array().unwrap().iter().find(|r| r["path"] == "/admin").unwrap();
     assert_eq!(admin["kind"], "page");
     assert_eq!(admin["guards"][0], "staff");
+}
+
+/// v0.10.1 `Secret`: redacted in output, no JSON, constant-time checks, input-only
+/// JSON types, env_secret fails closed; exposure into output is a compile error.
+#[test]
+fn secret_type_never_leaks() {
+    let dir = scratch("secret0101");
+    for f in ["app.prvz", "bad.prvz", "bad2.prvz"] {
+        std::fs::copy(format!("tests/fixtures/secret/{f}"), dir.join(f)).unwrap();
+    }
+    let out = run_in(&dir, &["check", "bad.prvz"]);
+    let err = text(&out.stderr);
+    for want in ["bad.prvz:5: security[secret-type]", "bad.prvz:6: security[hardcoded-secret]", "bad.prvz:10: security[secret-exposure]",
+        "bad.prvz:11: security[secret-exposure]", "bad.prvz:12: security[secret-exposure]", "bad.prvz:13: security[secret-exposure]"] {
+        assert!(err.contains(want), "{want}\n{err}");
+    }
+    let err = text(&run_in(&dir, &["check", "bad2.prvz"]).stderr);
+    assert!(err.contains("bad2.prvz:5: POST /echo returns `Login`, which holds a Secret"), "{err}");
+
+    let out = run_in(&dir, &["build", "app.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let missing = Command::new(dir.join("app")).env("PORT", "0").env_remove("APP_ADMIN_TOKEN").output().unwrap();
+    assert!(!missing.status.success() && text(&missing.stderr).contains("environment variable APP_ADMIN_TOKEN is not set"));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let log = dir.join("out.log");
+    let mut server = Command::new(dir.join("app"))
+        .env("PORT", port.to_string())
+        .env("APP_ADMIN_TOKEN", "s3cret-admin-token")
+        .stdout(std::fs::File::create(&log).unwrap())
+        .stderr(std::fs::File::create(dir.join("err.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (code, body) = http(port, "POST", "/login", r#"{"user":"ada","password":"correct horse"}"#);
+    assert_eq!((code, body.as_str()), (200, r#"{"ok":true,"user":"ada"}"#));
+    let stats = http_raw(port, b"GET /stats HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer s3cret-admin-token\r\nConnection: close\r\n\r\n");
+    assert!(stats.ends_with("admin: 1 logins, token [redacted]"), "{stats}");
+    let wrong = http_raw(port, b"GET /stats HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer s3cret-admin-tokeX\r\nConnection: close\r\n\r\n");
+    assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+    let _ = server.kill();
+    let _ = server.wait();
+    let printed = std::fs::read_to_string(&log).unwrap() + &std::fs::read_to_string(dir.join("err.log")).unwrap();
+    assert!(printed.contains("debug: [redacted] Login { user: \"ada\", password: [redacted] }"), "{printed}");
+    assert!(!printed.contains("correct horse") && !printed.contains("s3cret-admin"), "a secret leaked:\n{printed}");
 }

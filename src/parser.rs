@@ -188,6 +188,45 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
     Ok(items)
 }
 
+/// Names a user type can't take: Rust prelude items and the Parvez runtime's own types.
+fn reserved_type_name(name: &str) -> Option<&'static str> {
+    const RUST: &[&str] = &[
+        "Result", "Option", "Ok", "Err", "Some", "None", "String", "Vec", "Box", "Self", "Send", "Sync", "Sized",
+        "Copy", "Clone", "Default", "Debug", "Display", "Drop", "Fn", "FnMut", "FnOnce", "Eq", "PartialEq", "Ord",
+        "PartialOrd", "Hash", "Iterator", "IntoIterator", "Into", "From", "TryFrom", "TryInto", "AsRef", "AsMut",
+        "ToString", "ToOwned", "Extend", "Unpin", "Future",
+    ];
+    const RUNTIME: &[&str] = &[
+        "ApiError", "AppError", "Claims", "Conn", "HttpError", "JwksCache", "LoginRequired", "LoginState", "Metrics",
+        "NeedsLogin", "Req", "Revocations", "Secret", "ServiceConfig", "SessionConfig", "SessionData", "TestApp",
+        "TestRequest", "TestResponse", "WsMsg", "WsOut", "WsSender", "AppState",
+    ];
+    if RUST.contains(&name) {
+        Some("Rust's built-in type of that name is used by the generated code")
+    } else if RUNTIME.contains(&name) {
+        Some("the Parvez runtime defines a type of that name")
+    } else {
+        None
+    }
+}
+
+fn type_names(t: &Type, out: &mut Vec<String>) {
+    match t {
+        Type::Named(n, args) => {
+            out.push(n.clone());
+            args.iter().for_each(|a| type_names(a, out));
+        }
+        Type::Ref(x, _) | Type::List(x) | Type::Opt(x) => type_names(x, out),
+        Type::Tuple(xs) => xs.iter().for_each(|x| type_names(x, out)),
+        Type::Fn(xs, r) => {
+            xs.iter().for_each(|x| type_names(x, out));
+            if let Some(r) = r {
+                type_names(r, out);
+            }
+        }
+    }
+}
+
 /// Applies `f` to an item's `priv` / `@test_only` flags; items without flags are rejected earlier.
 fn set_flags(item: &mut Item, f: impl FnOnce(&mut Flags)) {
     match item {
@@ -268,6 +307,45 @@ pub fn validate(prog: &Program) -> Result<()> {
         _ => None,
     }) {
         bail!("line {}: `fn main` belongs in the main file, not in an imported module", f.line);
+    }
+    // Type names the generated Rust relies on: a user `type Result` would shadow
+    // std's Result in every signature Parvez emits (rustc then reports E0107 deep
+    // inside runtime code). Reject them here with a rename hint.
+    for (_, item) in &all {
+        let (kind, name, line) = match item {
+            Item::Struct(s) => ("type", &s.name, s.line),
+            Item::Enum(e) => ("enum", &e.name, e.line),
+            Item::Trait(t) => ("trait", &t.name, t.line),
+            _ => continue,
+        };
+        if let Some(why) = reserved_type_name(name) {
+            bail!("line {line}: {kind} `{name}` is reserved ({why}); rename it, e.g. `{name}Info` or a name from your domain");
+        }
+    }
+    // A Secret never leaves as JSON: a route can't return a type that holds one.
+    let mut secret_types: Vec<&str> = Vec::new();
+    for (_, item) in &all {
+        if let Item::Struct(st) = item {
+            let mut names = Vec::new();
+            st.fields.iter().for_each(|(_, t)| type_names(t, &mut names));
+            if names.iter().any(|n| n == "Secret") {
+                secret_types.push(&st.name);
+            }
+        }
+    }
+    for (_, r) in &routes {
+        let mut names = Vec::new();
+        if let Some(t) = &r.ret {
+            type_names(t, &mut names);
+        }
+        if let Some(n) = names.iter().find(|n| n.as_str() == "Secret" || secret_types.contains(&n.rsplit("::").next().unwrap_or(n))) {
+            bail!(
+                "line {}: {} {} returns `{n}`, which holds a Secret; secrets never leave as JSON. Return a type without it",
+                r.line,
+                r.method,
+                r.path
+            );
+        }
     }
     // Deny-by-default access control (OWASP A01): every endpoint states who may call it.
     for (_, r) in &routes {
@@ -2200,6 +2278,18 @@ mod tests {
         let p = prog("@public(\"health probe for the load balancer\")\nroute GET \"/ping\" -> str:\n    ret \"pong\"\n");
         let Item::Route(r) = &p.items[0] else { panic!() };
         assert_eq!(r.public.as_deref(), Some("health probe for the load balancer"));
+    }
+
+    #[test]
+    fn reserved_type_names() {
+        let err = |src: &str| lex(src).and_then(parse).map(|_| ()).unwrap_err().to_string();
+        let e = err("type Result: ok: bool, user: str\n");
+        assert!(e.contains("line 1: type `Result` is reserved") && e.contains("Rust's built-in"), "{e}");
+        assert!(err("enum Option:\n    A\n").contains("enum `Option` is reserved"));
+        assert!(err("trait Clone:\n    fn f(&self)\n").contains("trait `Clone` is reserved"));
+        assert!(err("type AppError: m: str\n").contains("the Parvez runtime defines"));
+        assert!(err("type Secret: v: str\n").contains("the Parvez runtime defines"));
+        prog("type LoginResult: ok: bool\ntype State: n: int\n");
     }
 
     #[test]

@@ -107,6 +107,23 @@ pub fn generate_with(prog: &Program, cfg: &ServiceConfig) -> Generated {
             g.line(l);
         }
     }
+    // `Secret` is used: emit the type (unless the program defines its own)
+    let mentions = |code: &str, w: &str| {
+        code.match_indices(w).any(|(i, _)| {
+            let before = code[..i].chars().last().is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+            let after = code[i + w.len()..].chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+            before && after
+        })
+    };
+    if mentions(&g.out, "Secret") && !g.out.contains("struct Secret") && !g.out.contains("enum Secret") {
+        g.cur_line = 0;
+        g.out.push('\n');
+        for l in SECRET_PRELUDE.lines() {
+            g.line(l);
+        }
+        g.deps.insert("zeroize".into());
+        g.deps.insert("serde".into());
+    }
     let mut out = finish(&g.out);
     out.dev_deps = g.dev_deps.difference(&g.deps).cloned().collect();
     out.deps = g.deps;
@@ -741,7 +758,13 @@ impl Gen {
 
     fn gen_struct(&mut self, s: &StructDef) {
         self.cur_line = s.line;
-        let d = self.derive_line(&s.attrs);
+        let mut d = self.derive_line(&s.attrs);
+        let mut names = Vec::new();
+        s.fields.iter().for_each(|(_, t)| collect_names(t, &mut names));
+        if s.attrs.json && names.iter().any(|n| n == "Secret") {
+            // a type holding a Secret is input-only: it can be decoded from a request, never sent
+            d = d.replace(", serde::Serialize", "");
+        }
         self.line(&d);
         self.line(&format!("{}struct {}{} {{", self.vis_of(s.flags), s.name, generic_params(&s.generics)));
         self.indent += 1;
@@ -2015,6 +2038,14 @@ impl Gen {
                     format!("plog({level:?}, &format!({}), vec![{}])", self.fmt_args(&text), fields.join(", "))
                 }
                 "test_app" if args.is_empty() => "TestApp::new()".to_string(),
+                "secret" if args.len() == 1 && self.local(&self.fns, "secret").is_none() => {
+                    format!("Secret::new({})", self.expr_as(&args[0], true))
+                }
+                "env_secret" if args.len() == 1 => {
+                    // fails without revealing anything; never falls back to a default
+                    let var = self.expr_as(&args[0], false);
+                    format!("Secret::from_env({var})")
+                }
                 "json" if args.len() == 1 && self.local(&self.fns, "json").is_none() => {
                     self.deps.insert("serde_json".into());
                     match &args[0] {
@@ -3638,6 +3669,96 @@ async fn auth_logout(headers: axum::http::HeaderMap) -> Result<axum::response::R
     };
     metric_inc("auth logout");
     Ok(with_cookies(axum::response::Redirect::to(&target).into_response(), clear_session(&cfg)))
+}"#;
+
+/// `Secret`: emitted when a program uses it.
+const SECRET_PRELUDE: &str = r#"/// A value that must never reach logs, output or responses: Debug/Display show
+/// `[redacted]`, there is no Serialize, equality is constant-time, and the memory
+/// is zeroed when the value is dropped. `expose()` is the one way to the value.
+pub struct Secret<T: zeroize::Zeroize = String>(T);
+
+impl<T: zeroize::Zeroize> Secret<T> {
+    pub fn new(value: T) -> Self {
+        Secret(value)
+    }
+
+    /// The value itself, for the one place that needs it (a DB bind, an HMAC key, a header).
+    pub fn expose(&self) -> &T {
+        &self.0
+    }
+}
+
+impl Secret<String> {
+    /// `env_secret("NAME")?`: fails if unset or empty; the error names the variable only.
+    pub fn from_env(name: &str) -> anyhow::Result<Secret<String>> {
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Ok(Secret(v)),
+            _ => anyhow::bail!("environment variable {name} is not set"),
+        }
+    }
+
+    /// Constant-time comparison with a candidate (a submitted token or password).
+    pub fn matches(&self, candidate: &str) -> bool {
+        secret_eq(self.0.as_bytes(), candidate.as_bytes())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Constant-time: the time depends only on the candidate's length, never on where
+/// the bytes differ or on the secret's own length.
+fn secret_eq(secret: &[u8], candidate: &[u8]) -> bool {
+    let mut diff = secret.len() ^ candidate.len();
+    for (i, y) in candidate.iter().enumerate() {
+        let x = secret.get(i).copied().unwrap_or(0);
+        diff |= std::hint::black_box((x ^ y) as usize);
+    }
+    diff == 0
+}
+
+impl<T: zeroize::Zeroize> Drop for Secret<T> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl<T: zeroize::Zeroize + Clone> Clone for Secret<T> {
+    fn clone(&self) -> Self {
+        Secret(self.0.clone())
+    }
+}
+
+impl<T: zeroize::Zeroize + AsRef<[u8]>> PartialEq for Secret<T> {
+    fn eq(&self, other: &Self) -> bool {
+        secret_eq(self.0.as_ref(), other.0.as_ref())
+    }
+}
+
+impl<T: zeroize::Zeroize> std::fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+impl<T: zeroize::Zeroize> std::fmt::Display for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// Secrets can arrive in requests (a password field), but never leave as JSON.
+impl<'de, T: zeroize::Zeroize + serde::Deserialize<'de>> serde::Deserialize<'de> for Secret<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        T::deserialize(d).map(Secret)
+    }
+}
+
+impl<T: zeroize::Zeroize + Default> Default for Secret<T> {
+    fn default() -> Self {
+        Secret(T::default())
+    }
 }"#;
 
 /// In-process HTTP client for `test` blocks: `app = test_app().await?`.

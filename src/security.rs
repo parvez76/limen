@@ -56,7 +56,11 @@ const KEY_PREFIXES: &[&str] = &[
 const FIX_SQL: &str = "never build SQL with interpolation or `+`; use a parameterized query, e.g. sqlx::query(\"SELECT * FROM users WHERE id = $1\").bind(id)";
 const FIX_CMD: &str = "use a fixed program name (string literal) and pass input as separate `.arg(x)` values; never run input through `sh -c`";
 const FIX_PATH: &str = "join untrusted names with `safe_join(\"/base/dir\", name)?`, which rejects `..`, absolute paths and separators";
-const FIX_SECRET: &str = "load secrets at runtime with `env(\"NAME\")` (e.g. in a `state:` field); never commit them";
+const FIX_EXPOSE: &str = "pass `s.expose()` only to the API that needs the value (a DB bind, an HMAC key, a header); print or log the Secret itself, which shows [redacted]";
+const FIX_SECRET_TYPE: &str = "store it as a Secret so it can't be logged or serialized: `api_key: Secret = env_secret(\"API_KEY\")?`";
+/// Calls whose arguments end up in output: logs, stdout/stderr, error messages, JSON.
+const OUTPUT_SINKS: &[&str] = &["print", "eprint", "log_info", "log_warn", "log_error", "fail", "assert", "assert_eq", "json", "json_encode", "json_pretty", "metric_inc"];
+const FIX_SECRET: &str = "load secrets at runtime as a Secret: `api_key: Secret = env_secret(\"API_KEY\")?` in `state:`; never commit them";
 
 pub fn lint(prog: &Program) -> Report {
     let mut l = Linter { findings: Vec::new() };
@@ -91,7 +95,11 @@ pub fn lint(prog: &Program) -> Report {
                     continue;
                 }
                 let mut cx = Cx::default();
-                for (name, _, value, line) in &st.fields {
+                for (name, ty, value, line) in &st.fields {
+                    let lower = name.to_lowercase();
+                    if matches!(ty, Type::Named(t, a) if t == "str" && a.is_empty()) && SECRET_NAMES.iter().any(|n| lower.contains(n)) {
+                        l.push(*line, "secret-type", format!("state field `{name}` holds a secret as plain `str`"), FIX_SECRET_TYPE);
+                    }
                     l.secret_binding(name, value, *line);
                     l.expr(value, *line, &mut cx);
                 }
@@ -148,6 +156,9 @@ impl Linter {
             Stmt::Render(parts) => {
                 for p in parts {
                     if let HtmlPart::Value(e, _) = p {
+                        if exposes(e) {
+                            self.push(line, "secret-exposure", "an exposed Secret is rendered into the page".into(), FIX_EXPOSE);
+                        }
                         self.expr(e, line, cx);
                     }
                 }
@@ -225,7 +236,12 @@ impl Linter {
                 for p in parts {
                     match p {
                         StrPart::Lit(s) => self.key_like(s, line),
-                        StrPart::Interp(x, _) => self.expr(x, line, cx),
+                        StrPart::Interp(x, _) => {
+                            if exposes(x) {
+                                self.push(line, "secret-exposure", "an exposed Secret is interpolated into a string".into(), FIX_EXPOSE);
+                            }
+                            self.expr(x, line, cx)
+                        }
                     }
                 }
             }
@@ -314,6 +330,12 @@ impl Linter {
 
     fn call_rules(&mut self, name: &str, args: &[Expr], line: usize, cx: &Cx) {
         let seg = last_segment(name);
+        if OUTPUT_SINKS.contains(&name) && args.iter().any(exposes) {
+            self.push(line, "secret-exposure", format!("an exposed Secret is passed to `{name}(..)`"), FIX_EXPOSE);
+        }
+        if matches!(name, "secret" | "Secret::new" | "Secret") && args.iter().any(|a| matches!(a, Expr::Str(p) if p.iter().any(|x| matches!(x, StrPart::Lit(l) if !l.is_empty())))) {
+            self.push(line, "hardcoded-secret", "a Secret is created from a string literal".into(), FIX_SECRET);
+        }
         if SQL_FNS.contains(&seg) && args.iter().any(|a| is_dynamic(a, cx)) {
             self.push(line, "sql-injection", format!("`{name}(..)` receives a string built from interpolation/concatenation"), FIX_SQL);
         }
@@ -418,6 +440,13 @@ fn is_dynamic(e: &Expr, cx: &Cx) -> bool {
     }
 }
 
+/// Does `e` reveal a Secret's value (`s.expose()`) anywhere inside?
+fn exposes(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x, Expr::Method(_, m, _, _) if m == "expose"));
+    found
+}
+
 /// Does the expression carry request-derived data? `safe_join(..)` cleans it.
 fn tainted(e: &Expr, cx: &Cx) -> bool {
     match e {
@@ -508,8 +537,22 @@ mod tests {
         let src = "state:\n    api_key: str = \"abc123secret\"\n    db_url: str = env(\"DATABASE_URL\")\n    jwt_secret: str = env(\"JWT_SECRET\")\n@public\nroute GET \"/\" (state) -> str:\n    ret \"\"\nfn f():\n    password = \"hunter22\"\n    token = \"\"\n    c = Cfg(client_secret: \"s3cr3t\")\n    k = \"sk_live_51HxQ2abcdef0123456789\"\n    r = \"q8Zt3LmX9vB2nR7kW4pY6sD1fG5hJ0cV8aE3uI\"\n    uuid = \"550e8400-e29b-41d4-a716-446655440000\"\n    url = \"https://api.example.com/v1/users/12345/profile\"\n";
         assert_eq!(
             rules(src),
-            [(2, "hardcoded-secret"), (9, "hardcoded-secret"), (11, "hardcoded-secret"), (12, "hardcoded-secret"), (13, "hardcoded-secret")]
+            [
+                (2, "secret-type"),
+                (2, "hardcoded-secret"),
+                (4, "secret-type"),
+                (9, "hardcoded-secret"),
+                (11, "hardcoded-secret"),
+                (12, "hardcoded-secret"),
+                (13, "hardcoded-secret")
+            ]
         );
+    }
+
+    #[test]
+    fn secrets_stay_secret() {
+        let src = "state:\n    token: Secret = env_secret(\"T\")?\n    db_password: str = env(\"DB\")\n@public\nroute GET \"/\" (state) -> str:\n    print(\"{state.token}\")\n    q = sqlx::query(\"SELECT 1 WHERE k = $1\").bind(state.token.expose())\n    log_warn(\"x\", t: state.token.expose().clone())\n    s = \"Bearer {state.token.expose()}\"\n    k = secret(\"abc\")\n    ret \"\"\n";
+        assert_eq!(rules(src), [(3, "secret-type"), (8, "secret-exposure"), (9, "secret-exposure"), (10, "hardcoded-secret")]);
     }
 
     #[test]

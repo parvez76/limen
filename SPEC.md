@@ -1,4 +1,4 @@
-# PARVEZ v0.10.0 SPEC (AI system prompt)
+# PARVEZ v0.11.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -224,6 +224,8 @@ svg(viewBox="0 0 100 8" width="60" height="8"):
 | `fn(A, B) -> R` | `impl Fn(A, B) -> R` (fn params and returns) |
 | `Self`, `Name<A, B>`, `a::B` | same (passed through) |
 
+Reserved type names: a `type`, `enum` or `trait` can't be named after a Rust prelude item (`Result`, `Option`, `String`, `Vec`, `Box`, `Ok`, `Some`, `Clone`, `Iterator`, ...) or a Parvez runtime type (`AppError`, `Req`, `Secret`, `AppState`, ...): the generated code uses those names, so `parvez check` rejects them. Pick a domain name such as `LoginResult`.
+
 ## Generics, traits and visibility
 ```
 @json
@@ -328,7 +330,9 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 | sql-injection | `query("... {x}")`, `query("..." + x)`, or a variable holding either | `sqlx::query("... WHERE id = $1").bind(x)` |
 | command-injection | `Command::new(dynamic)`; `Command::new("sh").arg("-c").arg("{x}")` | `Command::new("tar").arg("czf").arg(x)` (fixed program, input as separate args) |
 | path-traversal | route input (`{path}` params, `body`, `query`, or values derived from them) reaching `fs::*` / `File::open` | `std::fs::read_to_string(safe_join("/srv/data", &name)?)?` |
-| hardcoded-secret | a string literal in a binding named like secret/password/token/api_key/private_key, or a key-like literal (`sk_live_`, `AKIA`, `ghp_`, long random strings) | `env("API_KEY")`, usually in `state:` |
+| hardcoded-secret | a string literal in a binding named like secret/password/token/api_key/private_key, or a key-like literal (`sk_live_`, `AKIA`, `ghp_`, long random strings) | `api_key: Secret = env_secret("API_KEY")?` in `state:` |
+| secret-type | a `state:` field named like a secret (`token`, `password`, `api_key`, ...) typed `str` | `api_key: Secret = env_secret("API_KEY")?` |
+| secret-exposure | `s.expose()` inside `print`, `log_*`, `fail`, `assert`, `json`, `metric_inc`, an interpolated string, or a page | pass `s.expose()` only to the API that needs it: `.bind(s.expose())`, an HMAC key, a header |
 - `safe_join(base, name)?` rejects `..`, absolute paths, separators and empty names: 400 in routes, an error elsewhere.
 - Taint is tracked inside each route body only, not into other fns. SQL and secret checks apply everywhere.
 - Opt out only deliberately: `@allow_insecure("reason")` on the line before a `fn`, `route`, method or `state:`. Every build prints the reason.
@@ -343,6 +347,27 @@ Supply chain (on `parvez build` and `parvez run`):
 - The crates actually compiled into the binary are checked against the RustSec advisory DB (cached, refreshed daily). Optional dependencies of disabled features are ignored. A known vulnerability fails the build. Set `PARVEZ_AUDIT=warn|off` or `[security] audit` in parvez.toml to relax this.
 - `<name>.sbom.json` (CycloneDX 1.5: every compiled crate with its version, license and purl) is written next to the binary.
 
+
+### Secrets
+`Secret` holds a value that must never reach logs, output or responses:
+```
+state:
+    api_key: Secret = env_secret("API_KEY")?           # fails at startup if unset; the error names only the variable
+    break_glass: Secret = secret(env("BREAK_GLASS", ""))  # optional (empty = disabled)
+
+@json
+type Login: user: str, password: Secret               # input-only: decodes from requests, can't be returned
+
+fn admin(state, req) -> str!:
+    given = req.header("authorization").unwrap_or_default()
+    if not state.api_key.matches(given.strip_prefix("Bearer ").unwrap_or("")):   # constant-time
+        fail(401, code: "unauthenticated", "bad token")
+    ret "admin"
+```
+- `print("{s}")`, `{x:?}` of a struct holding it, and panic messages show `[redacted]`. It has no `Serialize`, so it can't go into JSON or a log field, and a route returning a type that holds one is a compile error.
+- `s.matches(candidate)` compares in constant time (the time depends only on the candidate's length); `s == t` too. `s.is_empty()` checks for a configured value.
+- `s.expose()` is the only way to the value, for the API that needs it (`.bind(s.expose())`, an HMAC key, a header). The `secret-exposure` rule rejects it in output.
+- The memory is zeroed when the value is dropped. `Secret<Vec<u8>>` holds binary keys.
 ## Tests
 Put `test "what it checks":` blocks in any file. They compile only for `parvez test` and may use `.await` and `?`.
 ```

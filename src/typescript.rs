@@ -54,6 +54,7 @@ impl Names {
                     }
                     ("DateTime" | "chrono::DateTime", [_]) => "string".into(),
                     ("bool", []) => "boolean".into(),
+                    ("Secret", []) => "string".into(),
                     ("Value" | "serde_json::Value", []) => "unknown".into(),
                     ("Option", [t]) => format!("{} | null", recurse(t)?),
                     ("Vec", [t]) => format!("Array<{}>", recurse(t)?),

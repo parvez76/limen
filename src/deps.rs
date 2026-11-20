@@ -20,6 +20,7 @@ const KNOWN: &[(&str, &str, &str, &[&str], bool)] = &[
     ("anyhow", "anyhow", "1", &[], true),
     ("async_trait", "async-trait", "0.1", &[], true),
     ("aes_gcm", "aes-gcm", "0.10", &[], true),
+    ("zeroize", "zeroize", "1", &[], true),
     ("tokio", "tokio", "1", &["full"], true),
     ("axum", "axum", "0.8", &[], true),
     ("serde", "serde", "1", &["derive"], true),
