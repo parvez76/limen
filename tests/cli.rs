@@ -1769,3 +1769,71 @@ fn secret_type_never_leaks() {
     assert!(printed.contains("debug: [redacted] Login { user: \"ada\", password: [redacted] }"), "{printed}");
     assert!(!printed.contains("correct horse") && !printed.contains("s3cret-admin"), "a secret leaked:\n{printed}");
 }
+
+#[test]
+fn lint_reports_standards_and_sarif() {
+    let dir = scratch("lint012");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(
+        dir.join("app.prvz"),
+        "import sub.store\n\n@public(\"demo\")\nroute GET \"/u/{name}\" (name: str) -> str:\n    db.execute(\"DELETE FROM u WHERE n = '{name}'\")\n    ret \"ok\"\n\n@allow_insecure(\"admin tool, input is a fixed enum\")\n@public(\"demo\")\nroute GET \"/r/{name}\" (name: str) -> str!:\n    ret std::fs::read_to_string(name)?\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("sub/store.prvz"), "fn key() -> str:\n    api_key = \"sk_live_abcdefghijklmnop1234\"\n    ret api_key\n").unwrap();
+    // plain: findings with fix + standards, exit 1
+    let out = run_in(&dir, &["lint", "app.prvz"]);
+    let (so, se) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{so}{se}");
+    assert!(so.contains("app.prvz:5: security[sql-injection]") && so.contains("= see: CWE-89, OWASP A03:2021 Injection, ASVS 5.3.4"), "{so}");
+    assert!(so.contains("sub/store.prvz:2: security[hardcoded-secret]") && so.contains("CWE-798"), "{so}");
+    assert!(!so.contains("app.prvz:11"), "waived finding printed: {so}");
+    assert!(se.contains("app.prvz:10: @allow_insecure: admin tool") && se.contains("1 finding(s) waived") && se.contains("2 security finding(s)"), "{se}");
+    // SARIF 2.1.0 file for code scanning
+    let out = run_in(&dir, &["lint", "app.prvz", "--sarif", "-o", "out.sarif"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("out.sarif")).unwrap()).unwrap();
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "parvez");
+    let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
+    let sql = rules.iter().find(|r| r["id"] == "sql-injection").unwrap();
+    assert_eq!(sql["properties"]["security-severity"], "9.8");
+    assert!(sql["properties"]["tags"].as_array().unwrap().iter().any(|t| t == "external/cwe/cwe-89"));
+    let results = run["results"].as_array().unwrap();
+    let got: Vec<(String, String, u64, bool)> = results
+        .iter()
+        .map(|r| {
+            let loc = &r["locations"][0]["physicalLocation"];
+            (
+                r["ruleId"].as_str().unwrap().to_string(),
+                loc["artifactLocation"]["uri"].as_str().unwrap().to_string(),
+                loc["region"]["startLine"].as_u64().unwrap(),
+                r.get("suppressions").is_some(),
+            )
+        })
+        .collect();
+    let rel = |f: &str| {
+        // URIs are relative to the enclosing git checkout (the scratch dir may be inside one)
+        let base = dir.canonicalize().unwrap();
+        let root = base.ancestors().find(|d| d.join(".git").exists()).map(|p| p.to_path_buf()).unwrap_or(base.clone());
+        base.join(f).strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")
+    };
+    assert_eq!(
+        got,
+        [
+            ("sql-injection".into(), rel("app.prvz"), 5, false),
+            ("hardcoded-secret".into(), rel("sub/store.prvz"), 2, false),
+            ("path-traversal".into(), rel("app.prvz"), 11, true),
+        ]
+    );
+    assert!(!std::fs::read_to_string(dir.join("out.sarif")).unwrap().contains(&*dir.canonicalize().unwrap().to_string_lossy()), "absolute path leaked");
+    // clean program: exit 0; rule catalog
+    std::fs::write(dir.join("ok.prvz"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
+    let out = run_in(&dir, &["lint", "ok.prvz"]);
+    assert!(out.status.success() && text(&out.stderr).contains("no security findings"), "{}", text(&out.stderr));
+    let out = run_in(&dir, &["lint", "--rules"]);
+    let cat = text(&out.stdout);
+    for id in ["sql-injection", "command-injection", "path-traversal", "hardcoded-secret", "secret-exposure", "secret-type"] {
+        assert!(cat.contains(id), "{cat}");
+    }
+}

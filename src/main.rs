@@ -13,6 +13,7 @@ mod mcp;
 mod fmt;
 mod scaffold;
 mod parser;
+mod sarif;
 mod security;
 mod typescript;
 
@@ -46,6 +47,21 @@ enum Cmd {
         /// machine-readable output
         #[arg(long)]
         json: bool,
+    },
+    /// Security lint only (no build): findings with CWE / OWASP / ASVS references.
+    /// Exits 1 when there are findings. `--sarif` writes SARIF 2.1.0 for code scanning.
+    Lint {
+        #[arg(default_value = "main.prvz")]
+        file: PathBuf,
+        /// SARIF 2.1.0 output (GitHub code scanning, Azure DevOps, GitLab, DefectDojo)
+        #[arg(long)]
+        sarif: bool,
+        /// write the report to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// list the rules and the standards they map to, then exit
+        #[arg(long)]
+        rules: bool,
     },
     /// Create a new project: parvez.toml, main.prvz with a route and a test, ui/, .gitignore.
     New { name: String },
@@ -129,6 +145,44 @@ fn real_main() -> Result<()> {
         }
         Cmd::New { name } => scaffold::new_project(&std::env::current_dir()?, &name)?,
         Cmd::Routes { file, json } => print_routes(&file, json)?,
+        Cmd::Lint { file, sarif, output, rules } => {
+            if rules {
+                for r in security::RULES {
+                    println!("{:18} {}\n{:18} {}\n", r.id, r.title, "", r.references());
+                }
+                return Ok(());
+            }
+            if !sarif && output.is_some() {
+                bail!("--output goes with --sarif");
+            }
+            let prog = load_program(&file)?;
+            let report = security::lint(&prog);
+            let n = report.findings.len();
+            if sarif {
+                let doc = serde_json::to_string_pretty(&sarif::report(&report, &prog.files))? + "\n";
+                match &output {
+                    Some(o) => std::fs::write(o, doc).with_context(|| format!("writing {}", o.display()))?,
+                    None => print!("{doc}"),
+                }
+            } else {
+                for f in &report.findings {
+                    let (k, l) = ast::split_line(f.line);
+                    let name = prog.files.get(k).map(|x| x.0.as_str()).unwrap_or("?");
+                    println!("{}\n", security::Finding { line: l, ..f.clone() }.render(name));
+                }
+            }
+            for (line, why) in &report.allowed {
+                eprintln!("parvez: note: {}: @allow_insecure: {why}", locate(&prog.files, *line));
+            }
+            if !report.suppressed.is_empty() {
+                eprintln!("parvez: {} finding(s) waived by @allow_insecure", report.suppressed.len());
+            }
+            if n > 0 {
+                eprintln!("parvez: {n} security finding(s) in {}", file.display());
+                std::process::exit(1);
+            }
+            eprintln!("parvez: no security findings in {}", file.display());
+        }
         Cmd::Fmt { paths, check } => {
             let mut changed = Vec::new();
             for path in &paths {

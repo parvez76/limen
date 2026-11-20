@@ -46,6 +46,7 @@ Parvez generates every line that ships, so security isn't left to each developer
 - **Deny-by-default access control.** Every route, socket and page must declare `@guard(fn)` or `@public("reason")`, or it doesn't compile, so a forgotten permission check (OWASP's #1 risk, broken access control) can't ship. `parvez routes` prints the complete access map for review.
 - **Secrets can't leak.** `Secret` values print as `[redacted]`, can't be serialized into JSON or logs, compare in constant time and are zeroed in memory; `s.expose()` into a log, print, error or string is a compile error, and secret-named `state:` fields must use `Secret`.
 - **Compile-time security checks.** SQL built by string interpolation, shell commands built from input, request data reaching the filesystem (`safe_join` is the fix), and hard-coded secrets are compile errors pointing at the `.prvz` line, each with the safe alternative. Opting out takes an explicit `@allow_insecure("reason")`.
+- **Standards-mapped findings.** Every rule names the CWE, OWASP Top 10 and ASVS requirement it enforces, and `parvez lint --sarif` feeds GitHub code scanning and other security dashboards. [SECURITY.md](SECURITY.md) has the full control map and how to report a vulnerability.
 - **Hardened services.** Internal errors and panics become a generic 500, with details logged server-side only. Body size limits, timeouts, concurrency backpressure, security headers and graceful SIGTERM shutdown are always on.
 - **Supply chain.** Builds fail on dependencies with known RustSec advisories, `parvez heal` moves to patched versions, and every build writes a CycloneDX SBOM.
 - **`parvez fuzz`** sends hostile, type-aware input to every route and fails on any crash, hang or leak.
@@ -91,6 +92,7 @@ parvez build main.prvz --target x86_64-unknown-linux-musl
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz [--target <triple>]` | Builds a release binary (`./app`, or `./app-<triple>` when cross-compiling, e.g. static `x86_64-unknown-linux-musl`) plus `app.sha256` |
+| `parvez lint app.prvz [--sarif -o out.sarif]` | Security rules only (no build), with CWE/OWASP/ASVS references; SARIF 2.1.0 for code scanning. `--rules` lists the rules |
 | `parvez routes app.prvz [--json]` | Access map: every endpoint with its guards or `@public` reason, for security review |
 | `parvez new <name>` | Scaffolds a project (`parvez.toml`, `main.prvz` with tests, `ui/`) that passes `parvez test` immediately |
 | `parvez fmt [paths...] [--check]` | Formats `.prvz`/`.msd` files; every change is verified to leave the program identical |
@@ -203,7 +205,8 @@ src/codegen.rs  AST -> formatted Rust + source map
 src/diagnostics.rs  rustc JSON errors -> .prvz lines
 src/deps.rs     crate detection -> generated Cargo.toml (+ parvez.toml overrides)
 src/mcp.rs      `parvez mcp`: JSON-RPC stdio server for AI agents
-src/security.rs compile-time security checks (SQLi, command injection, path traversal, secrets)
+src/security.rs compile-time security checks + rule catalog (CWE / OWASP / ASVS)
+src/sarif.rs    `parvez lint --sarif`: SARIF 2.1.0 export
 src/audit.rs    RustSec advisory gate + CycloneDX SBOM
 src/fuzz.rs     `parvez fuzz`: type-aware HTTP fuzzing of generated services
 src/main.rs     CLI: build / run / show
@@ -214,7 +217,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.11.0 adds the `Secret` type: values that are zeroized on drop, compared in constant time, print as `[redacted]` and can never be serialized or returned as JSON, with lint rules for exposure, plain-`str` secrets and hard-coded values. Type names that would shadow Rust built-ins or the Parvez runtime (`Result`, `Option`, `AppError`, ...) are now rejected with a clear error. v0.10.0 made access control deny-by-default: every route, socket and page needs `@guard(...)` or `@public`, and `parvez routes` prints the access map (breaking: add `@public` to deliberately open endpoints). v0.9.3 added instant session revocation (OIDC back-channel logout plus a periodic IdP re-check), inline SVG, `canvas`, `data-*` and format specs in Masud, and fixes Sign out for form posts. v0.9.2 added `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
+Parvez v0.12.0 maps every security rule to CWE, OWASP Top 10 and ASVS, adds `parvez lint` with SARIF 2.1.0 output for code scanning, and publishes a security policy (SECURITY.md). v0.11.0 added the `Secret` type: values that are zeroized on drop, compared in constant time, print as `[redacted]` and can never be serialized or returned as JSON, with lint rules for exposure, plain-`str` secrets and hard-coded values. Type names that would shadow Rust built-ins or the Parvez runtime (`Result`, `Option`, `AppError`, ...) are now rejected with a clear error. v0.10.0 made access control deny-by-default: every route, socket and page needs `@guard(...)` or `@public`, and `parvez routes` prints the access map (breaking: add `@public` to deliberately open endpoints). v0.9.3 added instant session revocation (OIDC back-channel logout plus a periodic IdP re-check), inline SVG, `canvas`, `data-*` and format specs in Masud, and fixes Sign out for form posts. v0.9.2 added `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
 
 ## License
 

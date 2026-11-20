@@ -24,7 +24,11 @@ pub struct Finding {
 
 impl Finding {
     pub fn render(&self, file: &str) -> String {
-        format!("{file}:{}: security[{}]: {}\n     = fix: {}", self.line, self.rule, self.msg, self.fix)
+        let mut out = format!("{file}:{}: security[{}]: {}\n     = fix: {}", self.line, self.rule, self.msg, self.fix);
+        if let Some(r) = rule(self.rule) {
+            out.push_str(&format!("\n     = see: {}", r.references()));
+        }
+        out
     }
 }
 
@@ -32,6 +36,99 @@ pub struct Report {
     pub findings: Vec<Finding>,
     /// (line, reason) for every `@allow_insecure` item
     pub allowed: Vec<(usize, String)>,
+    /// findings inside `@allow_insecure` items, with the item's reason (SARIF suppressions)
+    pub suppressed: Vec<(Finding, String)>,
+}
+
+/// A lint rule and the standards it enforces: CWE, OWASP Top 10 (2021) and
+/// OWASP ASVS 4.0.3 requirement numbers. Shown with every finding and
+/// exported in SARIF so scanners and auditors can file it.
+pub struct Rule {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub cwe: &'static [u32],
+    pub owasp: &'static str,
+    pub asvs: &'static [&'static str],
+    /// CVSS-style score (0-10) for GitHub code scanning's severity
+    pub severity: &'static str,
+    pub fix: &'static str,
+}
+
+impl Rule {
+    pub fn references(&self) -> String {
+        let mut refs: Vec<String> = self.cwe.iter().map(|c| format!("CWE-{c}")).collect();
+        refs.push(format!("OWASP {}", self.owasp));
+        refs.extend(self.asvs.iter().map(|a| format!("ASVS {a}")));
+        refs.join(", ")
+    }
+}
+
+pub const RULES: &[Rule] = &[
+    Rule {
+        id: "sql-injection",
+        title: "SQL built from interpolation or concatenation",
+        description: "A string built with interpolation or `+` reaches a SQL API. Untrusted parts can change the query.",
+        cwe: &[89],
+        owasp: "A03:2021 Injection",
+        asvs: &["5.3.4", "5.3.5"],
+        severity: "9.8",
+        fix: FIX_SQL,
+    },
+    Rule {
+        id: "command-injection",
+        title: "Dynamic program name or shell script",
+        description: "A process is started with a non-literal program name, or a shell (`sh -c` style) runs a dynamic script.",
+        cwe: &[78, 77],
+        owasp: "A03:2021 Injection",
+        asvs: &["5.3.8"],
+        severity: "9.8",
+        fix: FIX_CMD,
+    },
+    Rule {
+        id: "path-traversal",
+        title: "Request input reaches the filesystem unsanitized",
+        description: "A route parameter, body or query value (or a value derived from it) reaches a filesystem call without `safe_join`.",
+        cwe: &[22],
+        owasp: "A01:2021 Broken Access Control",
+        asvs: &["12.3.1", "12.3.2"],
+        severity: "7.5",
+        fix: FIX_PATH,
+    },
+    Rule {
+        id: "hardcoded-secret",
+        title: "Credential in source code",
+        description: "A string literal is assigned to a secret-named binding, looks like a known key format, or creates a Secret.",
+        cwe: &[798, 259],
+        owasp: "A07:2021 Identification and Authentication Failures",
+        asvs: &["2.10.4", "6.4.1"],
+        severity: "7.5",
+        fix: FIX_SECRET,
+    },
+    Rule {
+        id: "secret-exposure",
+        title: "Exposed Secret reaches output",
+        description: "`.expose()` on a Secret is passed to a log, print, error, JSON or page output, or interpolated into a string.",
+        cwe: &[532, 200],
+        owasp: "A09:2021 Security Logging and Monitoring Failures",
+        asvs: &["7.1.1", "7.1.2"],
+        severity: "6.5",
+        fix: FIX_EXPOSE,
+    },
+    Rule {
+        id: "secret-type",
+        title: "Secret held as plain `str`",
+        description: "A `state:` field with a secret-like name is typed `str`, so it can be logged, serialized and stays in memory after use.",
+        cwe: &[312, 316],
+        owasp: "A04:2021 Insecure Design",
+        asvs: &["8.3.6", "6.4.1"],
+        severity: "4.0",
+        fix: FIX_SECRET_TYPE,
+    },
+];
+
+pub fn rule(id: &str) -> Option<&'static Rule> {
+    RULES.iter().find(|r| r.id == id)
 }
 
 const SQL_FNS: &[&str] = &[
@@ -65,6 +162,7 @@ const FIX_SECRET: &str = "load secrets at runtime as a Secret: `api_key: Secret 
 pub fn lint(prog: &Program) -> Report {
     let mut l = Linter { findings: Vec::new() };
     let mut allowed = Vec::new();
+    let mut suppressed = Vec::new();
     let test_mods = prog.test_only_modules();
     for (module, item) in prog.all_items() {
         // test code never ships (fixture keys, fake IdPs): `parvez build` strips it
@@ -76,24 +174,25 @@ pub fn lint(prog: &Program) -> Report {
                 l.secret_binding(name, value, *line);
                 l.expr(value, *line, &Cx::default());
             }
-            Item::Fn(f) => l.function(f, &mut allowed),
-            Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, &mut allowed)),
-            Item::Trait(t) => t.methods.iter().for_each(|m| l.function(m, &mut allowed)),
+            Item::Fn(f) => l.function(f, &mut allowed, &mut suppressed),
+            Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, &mut allowed, &mut suppressed)),
+            Item::Trait(t) => t.methods.iter().for_each(|m| l.function(m, &mut allowed, &mut suppressed)),
             Item::Every(e) => l.block(&e.body, &mut Cx::default()),
             Item::Route(r) => {
-                if let Some(why) = &r.allow_insecure {
-                    allowed.push((r.line, why.clone()));
-                    continue;
-                }
                 let mut cx = Cx::default();
                 cx.taint.extend(r.params.iter().map(|(n, _)| n.clone()));
+                if let Some(why) = &r.allow_insecure {
+                    allowed.push((r.line, why.clone()));
+                    let mut s = Linter { findings: Vec::new() };
+                    s.block(&r.body, &mut cx);
+                    suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
+                    continue;
+                }
                 l.block(&r.body, &mut cx);
             }
             Item::State(st) => {
-                if let Some(why) = &st.allow_insecure {
-                    allowed.push((st.line, why.clone()));
-                    continue;
-                }
+                let mut s = Linter { findings: Vec::new() };
+                let l = if st.allow_insecure.is_some() { &mut s } else { &mut l };
                 let mut cx = Cx::default();
                 for (name, ty, value, line) in &st.fields {
                     let lower = name.to_lowercase();
@@ -102,6 +201,10 @@ pub fn lint(prog: &Program) -> Report {
                     }
                     l.secret_binding(name, value, *line);
                     l.expr(value, *line, &mut cx);
+                }
+                if let Some(why) = &st.allow_insecure {
+                    allowed.push((st.line, why.clone()));
+                    suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
                 }
             }
             _ => {}
@@ -113,7 +216,8 @@ pub fn lint(prog: &Program) -> Report {
     l.findings.sort_by_key(|f| f.line);
     let mut seen = HashSet::new();
     l.findings.retain(|f| seen.insert((f.line, f.rule)));
-    Report { findings: l.findings, allowed }
+    suppressed.sort_by_key(|(f, _)| f.line);
+    Report { findings: l.findings, allowed, suppressed }
 }
 
 #[derive(Default, Clone)]
@@ -133,9 +237,12 @@ fn last_segment(name: &str) -> &str {
 }
 
 impl Linter {
-    fn function(&mut self, f: &FnDef, allowed: &mut Vec<(usize, String)>) {
+    fn function(&mut self, f: &FnDef, allowed: &mut Vec<(usize, String)>, suppressed: &mut Vec<(Finding, String)>) {
         if let Some(why) = &f.allow_insecure {
             allowed.push((f.line, why.clone()));
+            let mut s = Linter { findings: Vec::new() };
+            s.block(&f.body, &mut Cx::default());
+            suppressed.extend(s.findings.into_iter().map(|f| (f, why.clone())));
             return;
         }
         self.block(&f.body, &mut Cx::default());
@@ -584,6 +691,29 @@ mod tests {
         assert_eq!(r.allowed, [(3, "internal admin tool, input is trusted".to_string())]);
         let f = &r.findings[0];
         assert!(f.render("app.prvz").starts_with("app.prvz:7: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized\n     = fix: join untrusted"));
+        assert!(f.render("app.prvz").ends_with("\n     = see: CWE-22, OWASP A01:2021 Broken Access Control, ASVS 12.3.1, ASVS 12.3.2"));
+        // the waived finding is still known (SARIF exports it as suppressed)
+        let [(w, why)] = r.suppressed.as_slice() else { panic!("{:?}", r.suppressed) };
+        assert_eq!((w.line, w.rule, why.as_str()), (4, "path-traversal", "internal admin tool, input is trusted"));
+    }
+
+    #[test]
+    fn every_rule_maps_to_standards() {
+        // each rule id pushed by the linter has a catalog entry with references
+        let code = include_str!("security.rs");
+        let pushed: HashSet<&str> = code
+            .split("self.push(")
+            .skip(1)
+            .chain(code.split("l.push(").skip(1))
+            .filter_map(|c| c.split('"').nth(1))
+            .filter(|id| id.chars().all(|c| c.is_ascii_lowercase() || c == '-') && id.contains('-'))
+            .collect();
+        assert!(pushed.len() >= 6, "{pushed:?}");
+        for id in pushed {
+            let r = rule(id).unwrap_or_else(|| panic!("rule {id} has no catalog entry"));
+            assert!(!r.cwe.is_empty() && !r.asvs.is_empty() && r.owasp.contains(":2021"), "{id}");
+        }
+        assert!(rule("nope").is_none());
     }
 
     #[test]
