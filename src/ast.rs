@@ -36,6 +36,13 @@ pub fn split_line(n: usize) -> (usize, usize) {
     (n / FILE_STRIDE, n % FILE_STRIDE)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestDef {
+    pub name: String,
+    pub body: Block,
+    pub line: usize,
+}
+
 /// `import a.b`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportDef {
@@ -64,6 +71,8 @@ pub enum Item {
     Route(RouteDef),
     State(StateDef),
     Import(ImportDef),
+    /// `test "name":` block (compiled only for `parvez test`)
+    Test(TestDef),
 }
 
 /// `state:` block: shared resources built once at server start.

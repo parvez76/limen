@@ -38,6 +38,7 @@ const KNOWN: &[(&str, &str, &str, &[&str], bool)] = &[
     ("thiserror", "thiserror", "2", &[], true),
     ("sqlx", "sqlx", "0.8", &["runtime-tokio", "postgres", "chrono", "uuid", "json", "derive", "migrate"], false),
     ("hmac", "hmac", "0.12", &[], true),
+    ("tower", "tower", "0.5", &["util"], true),
     ("hex", "hex", "0.4", &[], true),
     ("ed25519_dalek", "ed25519-dalek", "2", &[], true),
     ("subtle", "subtle", "2", &[], true),

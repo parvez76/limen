@@ -48,6 +48,12 @@ Parvez generates every line that ships, so security isn't left to each developer
 
 Memory safety and data-race freedom come from Rust itself. Logic flaws, such as a missing permission check, are still yours to get right; Parvez removes whole classes of bugs, not all of them.
 
+## Production essentials, built in
+
+- **Tests in Parvez:** `test "..."` blocks with `assert`/`assert_eq` and an in-process HTTP client, run by `parvez test`. Failures point at `.prvz` lines.
+- **Observability:** JSON logs with request IDs, Prometheus `/metrics` (route-template labels, latency histogram, custom events), and `/healthz` / `/readyz`, all without writing any code.
+- **OIDC:** `oidc(req).await?` in a guard validates Keycloak/Entra/Auth0 bearer tokens (JWKS discovery and rotation, asymmetric algorithms only, and issuer, audience and expiry checks).
+
 ## Install
 
 You need the Rust toolchain from [rustup.rs](https://rustup.rs).
@@ -68,6 +74,7 @@ cargo install --path .
 | `parvez build app.prvz` | Builds a release binary and writes it to `./app` |
 | `parvez heal app.prvz` | Updates to patched compatible dependency versions; reports advisories needing a major upgrade |
 | `parvez fuzz app.prvz` | Starts the service and fires malformed/edge-case requests at every route; fails on crash, hang or leak |
+| `parvez test app.prvz [filter]` | Runs `test "..."` blocks, with in-process HTTP tests via `test_app()` |
 | `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec`, `parvez_check`, `parvez_eject` tools (`claude mcp add parvez -- parvez mcp`) |
 | `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
 
@@ -176,7 +183,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.8 includes Masud v0.1. For traits, generics on your own types, `as` casts, or Rust macros, use `parvez show` to continue in Rust.
+Parvez v0.9 includes Masud v0.1, tests, observability and OIDC. For traits, generics on your own types, `as` casts, or Rust macros, use `parvez show` to continue in Rust.
 
 ## License
 

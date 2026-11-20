@@ -1133,3 +1133,182 @@ export { u, p, q, b, r, bad };
         .unwrap();
     assert!(tsc.status.success(), "tsc --strict failed:\n{}{}", text(&tsc.stdout), text(&tsc.stderr));
 }
+
+// ---------- v0.9 ----------
+
+#[test]
+fn parvez_test_runs_blocks_and_maps_failures() {
+    let dir = scratch("tests9");
+    std::fs::write(
+        dir.join("app.prvz"),
+        "import pricing\nuse std::sync::atomic::{AtomicU64, Ordering}\n\n@json\ntype Order: item: str, qty: u32\n\nstate:\n    orders: AtomicU64 = AtomicU64::new(0)\n\nfn require_key(req) -> str!:\n    match req.header(\"x-api-key\"):\n        Some(k) if k == \"k1\" -> ret \"alice\"\n        _ -> fail(401, code: \"unauthenticated\", \"missing key\")\n\n@guard(require_key)\nroute POST \"/orders\" (state, auth, body: Order) -> u32:\n    state.orders.fetch_add(1, Ordering::SeqCst)\n    status(201)\n    ret pricing::total(body.qty)\n\ntest \"orders need an api key\":\n    app = test_app().await?\n    res = app.post(\"/orders\", &Order(item: \"pen\", qty: 2)).await?\n    assert_eq(res.status, 401)\n\ntest \"an order is priced and counted\":\n    app = test_app().await?\n    res = app.request(\"POST\", \"/orders\").header(\"x-api-key\", \"k1\").json(&Order(item: \"pen\", qty: 10)).send().await?\n    assert_eq(res.status, 201)\n    assert_eq(res.text(), \"90\")\n    assert(res.header(\"x-request-id\").is_some(), \"responses carry a request id\")\n\ntest \"this one fails on purpose\":\n    x = pricing::total(2)\n    assert(x == 21, \"expected 21 but got {x}\")\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pricing.prvz"), "fn total(qty: u32) -> u32:\n    if qty >= 10: ret qty * 9\n    ret qty * 10\n\ntest \"module tests run too\":\n    assert(total(0) == 0)\n").unwrap();
+    let out = run_in(&dir, &["test", "app.prvz"]);
+    let all = text(&out.stdout) + &text(&out.stderr);
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("3 passed; 1 failed"), "{all}");
+    assert!(all.contains("app.prvz:35: expected 21 but got 20"), "{all}");
+    let out = run_in(&dir, &["test", "app.prvz", "priced and counted"]);
+    let all = text(&out.stdout) + &text(&out.stderr);
+    assert!(out.status.success() && all.contains("1 passed"), "{all}");
+}
+
+#[test]
+fn services_log_json_with_request_ids_and_export_metrics() {
+    let dir = scratch("obs9");
+    std::fs::write(
+        dir.join("svc.prvz"),
+        "route POST \"/orders/{id}\" (id: u32) -> str:\n    log_info(\"order placed\", order: id)\n    metric_inc(\"orders_placed\")\n    ret \"ok\"\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "svc.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let log = dir.join("svc.log");
+    let mut server = KillOnDrop(
+        Command::new(dir.join("svc"))
+            .env("PORT", port.to_string())
+            .env("PARVEZ_METRICS_TOKEN", "m3tr1cs")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let raw = http_raw(port, b"POST /orders/7 HTTP/1.1\r\nHost: t\r\nx-request-id: trace-42\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert!(raw.to_lowercase().contains("x-request-id: trace-42"), "{raw}");
+    assert_eq!(http(port, "GET", "/nope", "").0, 404);
+    assert_eq!(http(port, "GET", "/healthz", ""), (200, "ok".into()));
+    assert_eq!(http(port, "GET", "/metrics", "").0, 401, "metrics token enforced");
+    let metrics = http_raw(port, b"GET /metrics HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer m3tr1cs\r\nConnection: close\r\n\r\n");
+    for want in [
+        r#"parvez_http_requests_total{method="POST",route="/orders/{id}",status="200"} 1"#,
+        r#"parvez_http_requests_total{method="GET",route="unmatched",status="404"} 1"#,
+        r#"parvez_http_request_duration_seconds_count{method="POST",route="/orders/{id}"} 1"#,
+        r#"parvez_events_total{event="orders_placed"} 1"#,
+    ] {
+        assert!(metrics.contains(want), "missing {want} in:\n{metrics}");
+    }
+    let _ = server.0.kill();
+    let _ = server.0.wait();
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let custom = lines.iter().find(|l| l["msg"] == "order placed").expect("log_info line");
+    assert_eq!((custom["order"].as_u64(), custom["request_id"].as_str()), (Some(7), Some("trace-42")));
+    let access = lines.iter().find(|l| l["msg"] == "request" && l["path"] == "/orders/7").expect("access log line");
+    assert_eq!((access["route"].as_str(), access["status"].as_u64(), access["request_id"].as_str()), (Some("/orders/{id}"), Some(200), Some("trace-42")));
+    assert!(!lines.iter().any(|l| l["path"] == "/healthz"), "health checks are not logged");
+}
+
+fn b64url(data: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..=c.len() {
+            out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+#[test]
+fn oidc_guard_validates_tokens_against_jwks() {
+    if Command::new("openssl").arg("version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("skipping: openssl not installed");
+        return;
+    }
+    let dir = scratch("oidc9");
+    let openssl = |args: &[&str], input: Option<&[u8]>| {
+        use std::io::Write;
+        let mut c = Command::new("openssl")
+            .args(args)
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(input.unwrap_or_default()).unwrap();
+        c.wait_with_output().unwrap().stdout
+    };
+    openssl(&["genrsa", "-out", "key.pem", "2048"], None);
+    openssl(&["genrsa", "-out", "other.pem", "2048"], None);
+    let modulus = String::from_utf8(openssl(&["rsa", "-in", "key.pem", "-noout", "-modulus"], None)).unwrap();
+    let hex = modulus.trim().split('=').nth(1).unwrap();
+    let n: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+
+    // fake identity provider: discovery + JWKS
+    let idp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let iss = format!("http://127.0.0.1:{}", idp.local_addr().unwrap().port());
+    let discovery = format!(r#"{{"issuer":"{iss}","jwks_uri":"{iss}/jwks"}}"#);
+    let jwks = format!(r#"{{"keys":[{{"kty":"RSA","kid":"k1","alg":"RS256","use":"sig","n":"{}","e":"AQAB"}}]}}"#, b64url(&n));
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for s in idp.incoming().flatten() {
+            let mut s = s;
+            let mut buf = [0u8; 2048];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let body = if req.starts_with("GET /jwks") { &jwks } else { &discovery };
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let token = |alg: &str, key: &str, extra: &str, exp: u64, aud: &str| {
+        let h = b64url(format!(r#"{{"alg":"{alg}","kid":"k1","typ":"JWT"}}"#).as_bytes());
+        let p = b64url(
+            format!(r#"{{"iss":"{iss}","sub":"u-1","aud":"{aud}","exp":{exp},"email":"ada@adn.test","realm_access":{{"roles":["RemoteOps.Engineer"{extra}]}}}}"#)
+                .as_bytes(),
+        );
+        let msg = format!("{h}.{p}");
+        let sig = openssl(&["dgst", "-sha256", "-sign", key], Some(msg.as_bytes()));
+        format!("{msg}.{}", b64url(&sig))
+    };
+    std::fs::write(
+        dir.join("svc.prvz"),
+        "async fn admin(req) -> Claims!:\n    c = oidc(req).await?\n    if not c.has_role(\"RemoteOps.Admin\"): fail(403, code: \"forbidden\", \"admin role required\")\n    ret c\n\n@guard(admin)\nroute GET \"/admin\" (auth) -> str:\n    ret auth.email.clone()\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["build", "svc.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("svc"))
+            .env("PORT", port.to_string())
+            .env("PARVEZ_OIDC_ISSUER", &iss)
+            .env("PARVEZ_OIDC_AUDIENCE", "remoteops-api")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let call = |tok: &str| {
+        let raw = http_raw(port, format!("GET /admin HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {tok}\r\nConnection: close\r\n\r\n").as_bytes());
+        (raw[9..12].to_string(), raw.split_once("\r\n\r\n").map(|x| x.1.to_string()).unwrap_or_default())
+    };
+    let admin = token("RS256", "key.pem", r#","RemoteOps.Admin""#, now + 300, "remoteops-api");
+    assert_eq!(call(&admin), ("200".into(), "ada@adn.test".into()));
+    assert_eq!(call(&token("RS256", "key.pem", "", now + 300, "remoteops-api")).0, "403", "no admin role");
+    assert_eq!(call(&token("RS256", "key.pem", r#","RemoteOps.Admin""#, now - 3600, "remoteops-api")).0, "401", "expired");
+    assert_eq!(call(&token("RS256", "key.pem", r#","RemoteOps.Admin""#, now + 300, "other-api")).0, "401", "audience");
+    assert_eq!(call(&token("RS256", "other.pem", r#","RemoteOps.Admin""#, now + 300, "remoteops-api")).0, "401", "forged signature");
+    assert_eq!(call(&token("HS256", "key.pem", r#","RemoteOps.Admin""#, now + 300, "remoteops-api")).0, "401", "HMAC algorithm confusion");
+    let parts: Vec<&str> = admin.split('.').collect();
+    let none = format!("{}.{}.", b64url(br#"{"alg":"none","typ":"JWT"}"#), parts[1]);
+    assert_eq!(call(&none).0, "401", "alg none");
+    assert_eq!(call("").0, "401");
+}

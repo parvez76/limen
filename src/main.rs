@@ -33,6 +33,12 @@ enum Cmd {
     Build { file: PathBuf },
     /// Fast type/borrow check (`cargo check`) with .prvz-mapped errors. No binary.
     Check { file: PathBuf },
+    /// Run the program's `test "..."` blocks (compile errors mapped to .prvz lines).
+    Test {
+        file: PathBuf,
+        /// only tests whose name contains this
+        filter: Option<String>,
+    },
     /// Run an MCP server on stdio (tools: parvez_spec, parvez_check, parvez_eject).
     Mcp,
     /// Emit the JSON models and HTTP contracts of an entry point and its imports.
@@ -94,6 +100,16 @@ fn real_main() -> Result<()> {
         Cmd::Check { file } => {
             compile(&file, Mode::Check)?;
             eprintln!("parvez: ok {}", file.display());
+        }
+        Cmd::Test { file, filter } => {
+            compile(&file, Mode::Test)?;
+            let proj = std::env::current_dir()?.join(".parvez_build").join(bin_name(&file));
+            let mut args = vec!["test".to_string(), "--quiet".into(), "--".into()];
+            if let Some(f) = filter {
+                args.push(test_filter(&f));
+            }
+            let status = Command::new("cargo").args(&args).current_dir(&proj).status().context("running cargo test")?;
+            std::process::exit(status.code().unwrap_or(1));
         }
         Cmd::Types { file, out, .. } => {
             let prog = load_program(&file)?;
@@ -249,6 +265,7 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     let has_main = prog.all_items().iter().any(|(m, i)| match i {
         ast::Item::Fn(f) => m.is_empty() && f.name == "main",
         ast::Item::Route(_) | ast::Item::Embed { .. } => true, // routes generate the server's main
+        ast::Item::Test(_) => true,                            // a test-only file gets an empty main
         _ => false,
     });
     if !has_main {
@@ -272,6 +289,13 @@ fn bin_name(file: &Path) -> String {
 pub(crate) enum Mode {
     Release,
     Check,
+    /// compile the test harness (cargo test --no-run)
+    Test,
+}
+
+/// "rejects bad tokens" -> a fragment of the generated test fn name.
+fn test_filter(f: &str) -> String {
+    f.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect()
 }
 
 pub(crate) enum Outcome {
@@ -318,6 +342,7 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     let args: &[&str] = match mode {
         Mode::Release => &["build", "--release", "--quiet", "--message-format=json"],
         Mode::Check => &["check", "--quiet", "--message-format=json"],
+        Mode::Test => &["test", "--no-run", "--quiet", "--message-format=json"],
     };
     let out = Command::new("cargo")
         .args(args)
@@ -337,7 +362,7 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
         return Ok(Outcome::Errors(errors));
     }
 
-    if mode == Mode::Check {
+    if mode == Mode::Check || mode == Mode::Test {
         return Ok(Outcome::Built(None));
     }
     advisory_gate(file, &proj)?;

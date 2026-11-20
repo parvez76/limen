@@ -1,4 +1,4 @@
-# PARVEZ v0.8 SPEC (AI system prompt)
+# PARVEZ v0.9 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -265,6 +265,50 @@ Supply chain (on `parvez build` and `parvez run`):
 - The crates actually compiled into the binary are checked against the RustSec advisory DB (cached, refreshed daily). Optional dependencies of disabled features are ignored. A known vulnerability fails the build. Set `PARVEZ_AUDIT=warn|off` or `[security] audit` in parvez.toml to relax this.
 - `<name>.sbom.json` (CycloneDX 1.5: every compiled crate with its version, license and purl) is written next to the binary.
 
+## Tests
+Put `test "what it checks":` blocks in any file. They compile only for `parvez test` and may use `.await` and `?`.
+```
+test "orders need an api key":
+    app = test_app().await?                       # the whole service in-process (state, guards, middleware), no port
+    res = app.post("/orders", &Order(item: "pen", qty: 2)).await?
+    assert_eq(res.status, 401)
+    res = app.request("POST", "/orders").header("x-api-key", "k1").json(&order).send().await?
+    r: Receipt = res.json()?
+    assert(res.header("x-request-id").is_some(), "every response has a request id")
+```
+- `assert(cond)` and `assert(cond, "msg {x}")` fail with `file.prvz:LINE: ...`, as does `assert_eq(a, b)`.
+- A response has `.status`, `.text()`, `.json<T>()` and `.header(name)`. Besides `get` and `post`, `app.request(method, path)` takes `.header(k, v)`, `.json(&v)` and `.body(b)`, then `.send()`.
+- `parvez test f.prvz [name-filter]` runs every test in the program, including imported modules, and exits non-zero on failure.
+
+## Observability (every service, automatic)
+- **Request id:** a valid incoming `x-request-id` is propagated; otherwise one is generated. It's returned on every response and attached to every log line.
+- **Logs:** JSON lines on stderr, including an access log (method, path, route template, status, duration_ms, request_id), errors and panics. Health checks aren't logged, and `PARVEZ_LOG=off` silences logging. Add your own with `log_info("order placed", user: id, qty: n)`, `log_warn(..)` or `log_error(..)`; these also work in CLI programs.
+- **Metrics:** `GET /metrics` serves Prometheus text:
+  - `parvez_http_requests_total{method,route,status}`, labelled by route **template**, with unknown paths as `unmatched`
+  - the histogram `parvez_http_request_duration_seconds`
+  - `parvez_http_requests_in_flight`
+  - `parvez_events_total{event}` from `metric_inc("name")`
+
+  Set `PARVEZ_METRICS_TOKEN` to require `Authorization: Bearer <token>`.
+- **Health:** `GET /healthz` returns `ok`, and `GET /readyz` returns `{"status":"ready"}` once `state:` is initialized. A route of your own with the same path replaces the built-in one.
+
+## OIDC sign-in (Keycloak, Entra ID, Auth0...)
+```
+async fn admin(req) -> Claims!:
+    c = oidc(req).await?                     # validates Authorization: Bearer <jwt>
+    if not c.has_role("RemoteOps.Admin"): fail(403, code: "forbidden", "admin role required")
+    ret c
+@guard(admin)
+route GET "/admin/devices" (auth) -> str:
+    ret auth.email.clone()
+```
+- **Configuration:**
+  - `PARVEZ_OIDC_ISSUER`: the issuer URL. It must be `https://`, except localhost for development.
+  - `PARVEZ_OIDC_AUDIENCE`: the expected `aud`. Recommended.
+  - `PARVEZ_OIDC_JWKS_URL`: optional; by default it's taken from discovery.
+- **Checks:** the signature, using asymmetric algorithms only (`none` and HMAC are rejected), plus issuer, audience, `exp` and `nbf` with 60 s leeway. Signing keys are cached for 10 minutes, and an unknown key ID triggers one refetch to handle key rotation. Any failure returns 401 `{"code":"unauthenticated"}`.
+- **`Claims`:** `sub`, `email`, `name`, `username` and `roles` (merged from `realm_access`, `resource_access.*` and `roles`), plus `has_role(r)`, `claim(name)` and `raw`.
+
 ## Errors (fix loop)
 Syntax and rustc errors both point at `.prvz` lines:
 ```
@@ -276,6 +320,7 @@ app.prvz:6: error[E0308]: mismatched types
 `= rust:` shows the generated Rust line. Fix the `.prvz` line it names. `parvez show --map f.prvz` prints the Rust with `// @prvz:N` comments.
 
 ## CLI
+- `parvez test f.prvz [filter]`: runs the `test` blocks.
 - `parvez check f.prvz`: fast type and borrow check with mapped errors and no binary. Use it in edit loops.
 - `parvez run f.prvz [-- args]`: builds and executes.
 - `parvez build f.prvz`: produces `./f`, a release binary.

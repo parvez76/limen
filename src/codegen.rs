@@ -78,6 +78,21 @@ pub fn generate_with(prog: &Program, cfg: &ServiceConfig) -> Generated {
             assets.is_some(),
         );
     }
+    if !g.service && g.uses_log {
+        g.cur_line = 0;
+        g.out.push('\n');
+        for l in PLAIN_LOG_PRELUDE.lines() {
+            g.line(l);
+        }
+        g.deps.insert("serde_json".into());
+    }
+    // a file with only tests (and helpers) still needs a binary entry point
+    let has_main = prog.items.iter().any(|i| matches!(i, Item::Fn(f) if f.name == "main"));
+    if g.has_tests && !g.service && !has_main {
+        g.cur_line = 0;
+        g.out.push('\n');
+        g.line("fn main() {}");
+    }
     if g.helpers.contains("safe_join") {
         g.cur_line = 0;
         g.out.push('\n');
@@ -172,6 +187,14 @@ struct Gen {
     fn_defs: HashMap<String, FnDef>,
     /// some code calls `status(..)`: route wrappers run in status mode
     uses_status: bool,
+    /// some code calls `oidc(req)`: emit the OIDC/JWKS runtime
+    uses_oidc: bool,
+    /// some code calls `log_info/log_warn/log_error`
+    uses_log: bool,
+    /// program has `test` blocks
+    has_tests: bool,
+    /// `.prvz` file names (for assertion locations)
+    file_names: Vec<String>,
     /// module being emitted (`["auth", "tokens"]`); empty = main file
     cur_module: Vec<String>,
     /// path -> [(method, handler path)] for the generated router
@@ -335,6 +358,23 @@ fn owned_ctor(name: &str) -> bool {
 impl Gen {
     fn new(prog: &Program) -> Self {
         let mut g = Gen::default();
+        g.file_names = prog.files.iter().map(|(n, _)| n.clone()).collect();
+        for (_, item) in prog.all_items() {
+            let bodies: Vec<&Block> = match item {
+                Item::Fn(f) => vec![&f.body],
+                Item::Route(r) => vec![&r.body],
+                Item::Impl(i) => i.methods.iter().map(|m| &m.body).collect(),
+                Item::Test(t) => {
+                    g.has_tests = true;
+                    vec![&t.body]
+                }
+                _ => vec![],
+            };
+            for b in bodies {
+                g.uses_oidc |= block_calls(b, "oidc");
+                g.uses_log |= ["log_info", "log_warn", "log_error"].iter().any(|n| block_calls(b, n));
+            }
+        }
         let param_types = |f: &FnDef| f.params.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>();
         for (module, item) in prog.all_items() {
             let q = |n: &str| if module.is_empty() { n.to_string() } else { format!("{}::{n}", module.join("::")) };
@@ -374,6 +414,7 @@ impl Gen {
                     }
                 }
                 Item::Use(_) | Item::Import(_) => {}
+                Item::Test(t) => block_type_crates(&t.body, &mut g.deps),
                 Item::State(st) => {
                     st.fields.iter().for_each(|(_, t, _, _)| type_crates(t, &mut g.deps));
                     g.structs.insert(
@@ -393,6 +434,40 @@ impl Gen {
             }
         }
         g
+    }
+
+    /// `file.prvz:12` for the line being emitted (assertion messages).
+    fn loc(&self) -> String {
+        let (k, l) = split_line(self.cur_line);
+        match self.file_names.get(k) {
+            Some(n) => format!("{n}:{l}"),
+            None => format!("line {l}"),
+        }
+    }
+
+    /// `test "..."` -> `#[cfg(test)] #[tokio::test] async fn test_...() -> anyhow::Result<()>`
+    fn gen_test(&mut self, t: &TestDef) {
+        self.deps.insert("tokio".into());
+        let mut name = test_fn_name(&t.name);
+        while self.fns.contains_key(&format!("{}{name}", self.prefix())) {
+            name.push('_');
+        }
+        self.fns.insert(format!("{}{name}", self.prefix()), vec![]);
+        self.cur_line = t.line;
+        self.line(&format!("/// test {:?}", t.name));
+        self.line("#[cfg(test)]");
+        self.line("#[tokio::test]");
+        self.gen_fn(&FnDef {
+            name,
+            is_async: true,
+            receiver: None,
+            params: vec![],
+            ret: None,
+            fallible: true,
+            body: t.body.clone(),
+            line: t.line,
+            allow_insecure: None,
+        });
     }
 
     /// `pub ` inside imported modules (so other files and the router can reach items).
@@ -430,6 +505,10 @@ impl Gen {
                     self.line(&format!("{}const {}: {t} = {v};", self.vis(), esc(name)));
                 }
                 Item::Embed { .. } | Item::Use(_) | Item::State(_) | Item::Import(_) => {}
+                Item::Test(t) => {
+                    self.out.push('\n');
+                    self.gen_test(t);
+                }
                 Item::Route(r) => {
                     if routes_inline {
                         self.gen_route(r);
@@ -844,6 +923,17 @@ impl Gen {
         if self.uses_status {
             prelude.push_str(STATUS_PRELUDE);
         }
+        prelude.push_str(OBS_PRELUDE);
+        if self.uses_oidc {
+            prelude.push_str(OIDC_PRELUDE);
+            for d in ["jsonwebtoken", "reqwest"] {
+                self.deps.insert(d.into());
+            }
+        }
+        if self.has_tests {
+            prelude.push_str(TEST_PRELUDE);
+            self.deps.insert("tower".into());
+        }
         if routes.iter().any(|r| r.socket.is_some()) {
             prelude.push_str(WS_PRELUDE);
             self.deps.insert("futures".into());
@@ -1156,8 +1246,8 @@ impl Gen {
     fn gen_service_main(&mut self, first_line: usize, state: Option<&StateDef>, embedded: bool) {
         self.cur_line = first_line;
         self.out.push('\n');
-        self.line("#[tokio::main]");
-        self.line("async fn main() -> anyhow::Result<()> {");
+        self.line("/// The whole service as a router: used by `main` and by `test_app()` in tests.");
+        self.line("async fn build_app() -> anyhow::Result<axum::Router> {");
         self.indent += 1;
         if let Some(st) = state {
             self.cur_line = st.line;
@@ -1169,6 +1259,12 @@ impl Gen {
         for (path, methods) in &self.route_table.clone() {
             let chain: Vec<String> = methods.iter().map(|(m, h)| format!("{m}({h})")).collect();
             self.line(&format!(".route(\"{path}\", axum::routing::{})", chain.join(".")));
+        }
+        // operations endpoints, unless the program defines its own
+        for (path, handler) in [("/metrics", "metrics_endpoint"), ("/healthz", "healthz"), ("/readyz", "readyz")] {
+            if !self.route_table.iter().any(|(p, _)| p == path) {
+                self.line(&format!(".route(\"{path}\", axum::routing::get({handler}))"));
+            }
         }
         if embedded {
             self.line(".fallback(embedded)");
@@ -1187,6 +1283,15 @@ impl Gen {
         }
         self.indent -= 1;
         self.line(";");
+        self.line("// outermost: request id, access log, metrics (sees the final status)");
+        self.line("Ok(app.layer(axum::middleware::from_fn(observe)))");
+        self.indent -= 1;
+        self.line("}");
+        self.out.push('\n');
+        self.line("#[tokio::main]");
+        self.line("async fn main() -> anyhow::Result<()> {");
+        self.indent += 1;
+        self.line("let app = build_app().await?;");
         self.line("let port = std::env::var(\"PORT\").unwrap_or_else(|_| \"8080\".into());");
         self.line("let addr = format!(\"0.0.0.0:{port}\");");
         self.line("let listener = tokio::net::TcpListener::bind(&addr).await?;");
@@ -1610,6 +1715,38 @@ impl Gen {
                     _ => format!("anyhow::bail!({})", self.fmt_args(args)),
                 },
                 "status" if args.len() == 1 => format!("set_status({})", self.expr(&args[0])),
+                "assert" if !args.is_empty() => {
+                    let c = self.expr_loose(&args[0]);
+                    let loc = self.loc();
+                    if args.len() == 1 {
+                        let msg = format!("{loc}: assertion failed: {c}").replace('{', "{{").replace('}', "}}");
+                        format!("assert!({c}, {msg:?})")
+                    } else {
+                        let fa = self.fmt_args(&args[1..]);
+                        let prefix = format!("{:?}", format!("{loc}: ").replace('{', "{{").replace('}', "}}"));
+                        format!("assert!({c}, \"{}{})", &prefix[1..prefix.len() - 1], &fa[1..])
+                    }
+                }
+                "assert_eq" if args.len() == 2 => {
+                    let a = self.expr_loose(&args[0]);
+                    let b = self.expr_loose(&args[1]);
+                    let msg = self.loc().replace('{', "{{").replace('}', "}}");
+                    format!("assert_eq!({a}, {b}, {msg:?})")
+                }
+                "log_info" | "log_warn" | "log_error" => {
+                    self.deps.insert("serde_json".into());
+                    let level = &name[4..];
+                    let text: Vec<Expr> = args.iter().filter(|a| !matches!(a, Expr::Named(..))).cloned().collect();
+                    let mut fields = Vec::new();
+                    for a in args {
+                        if let Expr::Named(k, v) = a {
+                            let v = self.expr_loose(v);
+                            fields.push(format!("({k:?}, serde_json::json!({v}))"));
+                        }
+                    }
+                    format!("plog({level:?}, &format!({}), vec![{}])", self.fmt_args(&text), fields.join(", "))
+                }
+                "test_app" if args.is_empty() => "TestApp::new()".to_string(),
                 "json_encode" | "json_pretty" if args.len() == 1 => {
                     self.deps.insert("serde_json".into());
                     let f = if name == "json_encode" { "to_string" } else { "to_string_pretty" };
@@ -1789,6 +1926,19 @@ fn auth_alias(guard: &str) -> String {
         })
         .collect();
     format!("AuthOf{camel}")
+}
+
+/// `test "rejects bad tokens"` -> `test_rejects_bad_tokens`
+fn test_fn_name(name: &str) -> String {
+    let mut s = String::from("test_");
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_lowercase());
+        } else if !s.ends_with('_') {
+            s.push('_');
+        }
+    }
+    s.trim_end_matches('_').to_string()
 }
 
 fn ty_of_body(r: &RouteDef) -> Option<&Type> {
@@ -2171,6 +2321,411 @@ impl Conn {
     }
 }"#;
 
+/// Observability for every service: structured logs, request ids, Prometheus metrics.
+const OBS_PRELUDE: &str = r##"
+
+tokio::task_local! {
+    static REQUEST_ID: String;
+}
+
+/// The current request's id ("" outside a request).
+fn request_id() -> String {
+    REQUEST_ID.try_with(|r| r.clone()).unwrap_or_default()
+}
+
+fn new_request_id() -> String {
+    use std::hash::BuildHasher;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let s = std::collections::hash_map::RandomState::new();
+    format!("{:016x}{:016x}", s.hash_one(n), s.hash_one(n ^ 0x9e37_79b9_7f4a_7c15))
+}
+
+/// One structured log line: JSON on stderr, with the request id when inside a
+/// request. `PARVEZ_LOG=off` silences logging.
+fn plog(level: &str, msg: &str, fields: Vec<(&str, serde_json::Value)>) {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OFF.get_or_init(|| std::env::var("PARVEZ_LOG").is_ok_and(|v| v == "off")) {
+        return;
+    }
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let mut m = serde_json::Map::new();
+    m.insert("ts".into(), serde_json::json!((ts * 1000.0).round() / 1000.0));
+    m.insert("level".into(), serde_json::json!(level));
+    m.insert("msg".into(), serde_json::json!(msg));
+    let rid = request_id();
+    if !rid.is_empty() {
+        m.insert("request_id".into(), serde_json::json!(rid));
+    }
+    for (k, v) in fields {
+        m.insert(k.into(), v);
+    }
+    eprintln!("{}", serde_json::Value::Object(m));
+}
+
+const BUCKETS: [f64; 11] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+
+#[derive(Default)]
+struct Metrics {
+    requests: std::collections::BTreeMap<(String, String, u16), u64>,
+    /// (method, route) -> (cumulative bucket counts, sum of seconds, count)
+    latency: std::collections::BTreeMap<(String, String), (Vec<u64>, f64, u64)>,
+    events: std::collections::BTreeMap<String, u64>,
+    in_flight: i64,
+}
+
+fn metrics() -> std::sync::MutexGuard<'static, Metrics> {
+    static M: std::sync::OnceLock<std::sync::Mutex<Metrics>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `metric_inc("orders_created")`: a custom counter (parvez_events_total{event=...}).
+fn metric_inc(event: &str) {
+    *metrics().events.entry(event.to_string()).or_insert(0) += 1;
+}
+
+fn prom_label(v: &str) -> String {
+    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+/// GET /metrics (Prometheus text). Set PARVEZ_METRICS_TOKEN to require a bearer token.
+async fn metrics_endpoint(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let want = std::env::var("PARVEZ_METRICS_TOKEN").unwrap_or_default();
+    let got = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !want.is_empty() && got != format!("Bearer {want}") {
+        return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "metrics token required" }))).into_response();
+    }
+    let m = metrics();
+    let mut out = String::new();
+    out.push_str("# HELP parvez_http_requests_total HTTP requests by method, route and status.\n");
+    out.push_str("# TYPE parvez_http_requests_total counter\n");
+    for ((method, route, status), n) in &m.requests {
+        out.push_str(&format!("parvez_http_requests_total{{method=\"{}\",route=\"{}\",status=\"{status}\"}} {n}\n", prom_label(method), prom_label(route)));
+    }
+    out.push_str("# HELP parvez_http_request_duration_seconds HTTP request latency.\n");
+    out.push_str("# TYPE parvez_http_request_duration_seconds histogram\n");
+    for ((method, route), (buckets, sum, count)) in &m.latency {
+        let l = format!("method=\"{}\",route=\"{}\"", prom_label(method), prom_label(route));
+        for (b, n) in BUCKETS.iter().zip(buckets) {
+            out.push_str(&format!("parvez_http_request_duration_seconds_bucket{{{l},le=\"{b}\"}} {n}\n"));
+        }
+        out.push_str(&format!("parvez_http_request_duration_seconds_bucket{{{l},le=\"+Inf\"}} {count}\n"));
+        out.push_str(&format!("parvez_http_request_duration_seconds_sum{{{l}}} {sum}\n"));
+        out.push_str(&format!("parvez_http_request_duration_seconds_count{{{l}}} {count}\n"));
+    }
+    out.push_str("# HELP parvez_http_requests_in_flight Requests being handled now.\n");
+    out.push_str("# TYPE parvez_http_requests_in_flight gauge\n");
+    out.push_str(&format!("parvez_http_requests_in_flight {}\n", m.in_flight));
+    out.push_str("# HELP parvez_events_total Custom events (metric_inc).\n");
+    out.push_str("# TYPE parvez_events_total counter\n");
+    for (event, n) in &m.events {
+        out.push_str(&format!("parvez_events_total{{event=\"{}\"}} {n}\n", prom_label(event)));
+    }
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], out).into_response()
+}
+
+/// GET /healthz: the process is up.
+async fn healthz() -> &'static str {
+    "ok"
+}
+
+/// GET /readyz: startup (state:, connections) finished, so the service accepts traffic.
+async fn readyz() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "status": "ready" }))
+}
+
+/// Outermost middleware: request id (x-request-id in and out), metrics, access log.
+async fn observe(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let rid = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty() && v.len() <= 128 && v.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)))
+        .map(String::from)
+        .unwrap_or_else(new_request_id);
+    let method = req.method().to_string();
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "unmatched".into());
+    let path = req.uri().path().to_string();
+    let started = std::time::Instant::now();
+    metrics().in_flight += 1;
+    let mut res = REQUEST_ID.scope(rid.clone(), next.run(req)).await;
+    metrics().in_flight -= 1;
+    let secs = started.elapsed().as_secs_f64();
+    let status = res.status().as_u16();
+    {
+        let mut m = metrics();
+        *m.requests.entry((method.clone(), route.clone(), status)).or_insert(0) += 1;
+        let e = m.latency.entry((method.clone(), route.clone())).or_insert_with(|| (vec![0; BUCKETS.len()], 0.0, 0));
+        for (i, b) in BUCKETS.iter().enumerate() {
+            if secs <= *b {
+                e.0[i] += 1;
+            }
+        }
+        e.1 += secs;
+        e.2 += 1;
+    }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&rid) {
+        res.headers_mut().insert("x-request-id", v);
+    }
+    if !matches!(route.as_str(), "/metrics" | "/healthz" | "/readyz") {
+        plog(
+            "info",
+            "request",
+            vec![
+                ("request_id", serde_json::json!(rid)),
+                ("method", serde_json::json!(method)),
+                ("path", serde_json::json!(path)),
+                ("route", serde_json::json!(route)),
+                ("status", serde_json::json!(status)),
+                ("duration_ms", serde_json::json!((secs * 100_000.0).round() / 100.0)),
+            ],
+        );
+    }
+    res
+}"##;
+
+/// `log_info(...)` outside services (CLI tools): same JSON lines, no request id.
+const PLAIN_LOG_PRELUDE: &str = r#"
+fn plog(level: &str, msg: &str, fields: Vec<(&str, serde_json::Value)>) {
+    if std::env::var("PARVEZ_LOG").is_ok_and(|v| v == "off") {
+        return;
+    }
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let mut m = serde_json::Map::new();
+    m.insert("ts".into(), serde_json::json!((ts * 1000.0).round() / 1000.0));
+    m.insert("level".into(), serde_json::json!(level));
+    m.insert("msg".into(), serde_json::json!(msg));
+    for (k, v) in fields {
+        m.insert(k.into(), v);
+    }
+    eprintln!("{}", serde_json::Value::Object(m));
+}"#;
+
+/// OIDC bearer-token validation for guards: `c = oidc(req).await?`.
+const OIDC_PRELUDE: &str = r#"
+
+/// A validated OIDC access token.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Claims {
+    pub sub: String,
+    pub email: String,
+    pub name: String,
+    pub username: String,
+    /// realm_access.roles + resource_access.*.roles + roles (Keycloak, Entra, generic)
+    pub roles: Vec<String>,
+    pub raw: serde_json::Value,
+}
+
+impl Claims {
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r == role)
+    }
+
+    /// A string claim by name, e.g. `c.claim("org_id")`.
+    pub fn claim(&self, name: &str) -> Option<String> {
+        self.raw.get(name).and_then(|v| v.as_str()).map(String::from)
+    }
+}
+
+struct JwksCache {
+    keys: jsonwebtoken::jwk::JwkSet,
+    fetched: std::time::Instant,
+}
+
+fn jwks_cache() -> &'static tokio::sync::Mutex<Option<JwksCache>> {
+    static C: std::sync::OnceLock<tokio::sync::Mutex<Option<JwksCache>>> = std::sync::OnceLock::new();
+    C.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+fn oidc_fail(msg: &str) -> anyhow::Error {
+    anyhow::Error::new(ApiError(401, String::from("unauthenticated"), msg.to_string()))
+}
+
+/// The issuer, which must be https:// (plain http only for localhost testing).
+fn oidc_issuer() -> anyhow::Result<String> {
+    let iss = std::env::var("PARVEZ_OIDC_ISSUER").unwrap_or_default();
+    let local = iss.starts_with("http://127.0.0.1") || iss.starts_with("http://localhost");
+    if iss.is_empty() || !(iss.starts_with("https://") || local) {
+        plog("error", "PARVEZ_OIDC_ISSUER must be set to an https:// issuer URL", Vec::new());
+        return Err(oidc_fail("sign-in is not configured"));
+    }
+    Ok(iss.trim_end_matches('/').to_string())
+}
+
+async fn fetch_jwks(issuer: &str) -> anyhow::Result<jsonwebtoken::jwk::JwkSet> {
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build()?;
+    let uri = match std::env::var("PARVEZ_OIDC_JWKS_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            let doc: serde_json::Value = client
+                .get(format!("{issuer}/.well-known/openid-configuration"))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            doc["jwks_uri"].as_str().ok_or_else(|| anyhow::anyhow!("OIDC discovery has no jwks_uri"))?.to_string()
+        }
+    };
+    Ok(client.get(uri).send().await?.error_for_status()?.json().await?)
+}
+
+/// Signing keys: cached 10 minutes; an unknown key id triggers one refetch
+/// (key rotation), at most every 30 seconds.
+async fn oidc_key(issuer: &str, kid: &str) -> anyhow::Result<jsonwebtoken::DecodingKey> {
+    let mut cache = jwks_cache().lock().await;
+    let stale = cache.as_ref().is_none_or(|c| c.fetched.elapsed() > std::time::Duration::from_secs(600));
+    let unknown = cache.as_ref().is_some_and(|c| c.keys.find(kid).is_none() && c.fetched.elapsed() > std::time::Duration::from_secs(30));
+    if stale || unknown {
+        match fetch_jwks(issuer).await {
+            Ok(keys) => *cache = Some(JwksCache { keys, fetched: std::time::Instant::now() }),
+            Err(e) => plog("error", &format!("parvez: fetching OIDC keys failed: {e:#}"), Vec::new()),
+        }
+    }
+    let jwk = cache.as_ref().and_then(|c| c.keys.find(kid).cloned()).ok_or_else(|| oidc_fail("unknown signing key"))?;
+    jsonwebtoken::DecodingKey::from_jwk(&jwk).map_err(|_| oidc_fail("unusable signing key"))
+}
+
+/// Validates `Authorization: Bearer <jwt>`: signature (asymmetric algorithms
+/// only), issuer, audience (PARVEZ_OIDC_AUDIENCE), expiry and not-before.
+/// Any failure is a 401 {"code": "unauthenticated"}.
+pub async fn oidc(req: &Req) -> anyhow::Result<Claims> {
+    use jsonwebtoken::Algorithm::*;
+    let issuer = oidc_issuer()?;
+    let auth = req.header("authorization").unwrap_or_default();
+    let token = auth.strip_prefix("Bearer ").ok_or_else(|| oidc_fail("missing bearer token"))?.trim();
+    let header = jsonwebtoken::decode_header(token).map_err(|_| oidc_fail("malformed token"))?;
+    if !matches!(header.alg, RS256 | RS384 | RS512 | PS256 | PS384 | PS512 | ES256 | ES384 | EdDSA) {
+        return Err(oidc_fail("token algorithm not allowed"));
+    }
+    let kid = header.kid.clone().ok_or_else(|| oidc_fail("token has no key id"))?;
+    let key = oidc_key(&issuer, &kid).await?;
+    let mut v = jsonwebtoken::Validation::new(header.alg);
+    v.set_issuer(&[issuer.as_str()]);
+    v.leeway = 60;
+    v.set_required_spec_claims(&["exp", "iss", "sub"]);
+    match std::env::var("PARVEZ_OIDC_AUDIENCE") {
+        Ok(aud) if !aud.is_empty() => v.set_audience(&[aud.as_str()]),
+        _ => v.validate_aud = false,
+    }
+    let data = jsonwebtoken::decode::<serde_json::Value>(token, &key, &v).map_err(|_| oidc_fail("invalid token"))?;
+    let raw = data.claims;
+    let s = |k: &str| raw.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let mut roles: Vec<String> = Vec::new();
+    let mut add = |v: &serde_json::Value| {
+        for r in v.as_array().into_iter().flatten().filter_map(|r| r.as_str()) {
+            if !roles.iter().any(|x| x == r) {
+                roles.push(r.to_string());
+            }
+        }
+    };
+    add(&raw["realm_access"]["roles"]);
+    if let Some(clients) = raw["resource_access"].as_object() {
+        for c in clients.values() {
+            add(&c["roles"]);
+        }
+    }
+    add(&raw["roles"]);
+    Ok(Claims { sub: s("sub"), email: s("email"), name: s("name"), username: s("preferred_username"), roles, raw })
+}"#;
+
+/// In-process HTTP client for `test` blocks: `app = test_app().await?`.
+const TEST_PRELUDE: &str = r#"
+
+#[cfg(test)]
+pub struct TestApp {
+    router: axum::Router,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub struct TestResponse {
+    pub status: u16,
+    pub headers: axum::http::HeaderMap,
+    pub body: String,
+}
+
+#[cfg(test)]
+impl TestResponse {
+    pub fn text(&self) -> String {
+        self.body.clone()
+    }
+
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
+        Ok(serde_json::from_str(&self.body)?)
+    }
+
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers.get(name).and_then(|v| v.to_str().ok()).map(String::from)
+    }
+}
+
+#[cfg(test)]
+pub struct TestRequest<'a> {
+    app: &'a TestApp,
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+#[cfg(test)]
+impl<'a> TestRequest<'a> {
+    pub fn header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_string(), value.into()));
+        self
+    }
+
+    pub fn json<T: serde::Serialize>(mut self, v: &T) -> Self {
+        self.body = serde_json::to_vec(v).unwrap_or_default();
+        self.headers.push(("content-type".into(), "application/json".into()));
+        self
+    }
+
+    pub fn body(mut self, b: impl Into<Vec<u8>>) -> Self {
+        self.body = b.into();
+        self
+    }
+
+    pub async fn send(self) -> anyhow::Result<TestResponse> {
+        let mut b = axum::http::Request::builder().method(self.method.as_str()).uri(self.path.as_str());
+        for (k, v) in &self.headers {
+            b = b.header(k.as_str(), v.as_str());
+        }
+        let req = b.body(axum::body::Body::from(self.body))?;
+        let res = tower::ServiceExt::oneshot(self.app.router.clone(), req).await?;
+        let status = res.status().as_u16();
+        let headers = res.headers().clone();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await?;
+        Ok(TestResponse { status, headers, body: String::from_utf8_lossy(&bytes).into_owned() })
+    }
+}
+
+#[cfg(test)]
+impl TestApp {
+    /// The full service (state, guards, middleware) without opening a port.
+    pub async fn new() -> anyhow::Result<TestApp> {
+        Ok(TestApp { router: build_app().await? })
+    }
+
+    pub fn request(&self, method: &str, path: &str) -> TestRequest<'_> {
+        TestRequest { app: self, method: method.to_string(), path: path.to_string(), headers: Vec::new(), body: Vec::new() }
+    }
+
+    pub async fn get(&self, path: &str) -> anyhow::Result<TestResponse> {
+        self.request("GET", path).send().await
+    }
+
+    pub async fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> anyhow::Result<TestResponse> {
+        self.request("POST", path).json(body).send().await
+    }
+}"#;
+
 /// `status(204)` support: a per-request slot the route (or anything it calls) sets.
 const STATUS_PRELUDE: &str = r#"
 
@@ -2251,7 +2806,7 @@ impl axum::response::IntoResponse for AppError {
         let (code, msg) = match self.0.downcast_ref::<HttpError>() {
             Some(HttpError(code, msg)) => (*code, msg.clone()),
             None => {
-                eprintln!("parvez: internal error: {:#}", self.0);
+                plog("error", &format!("parvez: internal error: {:#}", self.0), Vec::new());
                 (500, String::from("internal server error"))
             }
         };
@@ -2329,15 +2884,17 @@ async fn guard(req: axum::extract::Request, next: axum::middleware::Next) -> axu
         Ok(Ok(p)) => p,
         _ => return fail(axum::http::StatusCode::SERVICE_UNAVAILABLE, "server busy"),
     };
-    let task = tokio::spawn(async move {
+    // the handler runs in its own task (panic isolation); carry the request id along
+    let rid = request_id();
+    let task = tokio::spawn(REQUEST_ID.scope(rid, async move {
         let _permit = permit;
         next.run(req).await
-    });
+    }));
     let abort = task.abort_handle();
     match tokio::time::timeout(budget.saturating_sub(started.elapsed()), task).await {
         Ok(Ok(res)) => res,
         Ok(Err(e)) => {
-            eprintln!("parvez: handler panicked: {e}");
+            plog("error", &format!("parvez: handler panicked: {e}"), Vec::new());
             fail(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         }
         Err(_) => {
@@ -2364,7 +2921,7 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = term => {}
     }
-    eprintln!("parvez: shutting down gracefully");
+    plog("info", "parvez: shutting down gracefully", Vec::new());
 }"#;
 
 fn has_str_pat(p: &Pat) -> bool {
@@ -2796,6 +3353,28 @@ mod tests {
             }
         }
         assert!(generated > cases / 20, "fuzz inputs too shallow: only {generated} of {cases} reached codegen");
+    }
+
+    // ---------- v0.9 ----------
+
+    #[test]
+    fn tests_asserts_logs_and_observability_codegen() {
+        let c = rs("route GET \"/x\" -> str:\n    log_info(\"hit\", user: 7)\n    ret \"ok\"\ntest \"x works\":\n    app = test_app().await?\n    assert_eq(1, 1)\n    assert(true, \"msg {1}\")\n");
+        assert!(c.contains("plog(\"info\", &format!(\"hit\"), vec![(\"user\", serde_json::json!(7))]);"), "{c}");
+        assert!(c.contains("#[cfg(test)]\n#[tokio::test]\nasync fn test_x_works() -> anyhow::Result<()> {\n    let app = TestApp::new().await?;"), "{c}");
+        assert!(c.contains("assert_eq!(1, 1, \"line 6\");"), "{c}");
+        assert!(c.contains("assert!(true, \"line 7: msg {}\", 1);"), "{c}");
+        assert!(c.contains("async fn build_app() -> anyhow::Result<axum::Router> {"), "{c}");
+        assert!(c.contains("Ok(app.layer(axum::middleware::from_fn(observe)))"), "{c}");
+        assert!(c.contains(".route(\"/metrics\", axum::routing::get(metrics_endpoint))"), "{c}");
+        assert!(c.contains("let app = build_app().await?;"), "{c}");
+        assert!(c.contains("tokio::spawn(REQUEST_ID.scope(rid, async move {"), "request id follows the handler task");
+        let g = mapped("async fn admin(req) -> Claims!:\n    ret oidc(req).await?\n@guard(admin)\nroute GET \"/a\" (auth) -> str:\n    ret auth.sub.clone()\n");
+        assert!(g.code.contains("pub async fn oidc(req: &Req) -> anyhow::Result<Claims>"));
+        assert!(g.code.contains("RS256 | RS384 | RS512 | PS256 | PS384 | PS512 | ES256 | ES384 | EdDSA"), "asymmetric algorithms only");
+        assert!(g.deps.contains("jsonwebtoken") && g.deps.contains("reqwest"));
+        // a test-only file gets an empty main
+        assert!(rs("fn f() -> i32:\n    ret 1\ntest \"f\":\n    assert_eq(f(), 1)\n").contains("fn main() {}"));
     }
 
     #[test]

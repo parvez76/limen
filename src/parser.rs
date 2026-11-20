@@ -103,6 +103,16 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
             }
             Tok::Ident(r) if r == "route" => items.push(Item::Route(p.parse_route()?)),
             Tok::Ident(r) if r == "socket" && matches!(p.peek_at(1), Tok::Str(_)) => items.push(Item::Route(p.parse_route()?)),
+            Tok::Ident(r) if r == "test" && matches!(p.peek_at(1), Tok::Str(_)) => {
+                let line = p.line();
+                p.next();
+                let Tok::Str(name) = p.next() else { unreachable!() };
+                if name.trim().is_empty() {
+                    bail!("line {line}: a test needs a name: test \"what it checks\":");
+                }
+                let body = p.parse_block()?;
+                items.push(Item::Test(TestDef { name, body, line }));
+            }
             Tok::Ident(r) if r == "import" && matches!(p.peek_at(1), Tok::Ident(_)) => {
                 let line = p.line();
                 p.next();
