@@ -1,4 +1,4 @@
-# PARVEZ v0.9.2 SPEC (AI system prompt)
+# PARVEZ v0.9.3 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -193,6 +193,13 @@ page GET "/help" -> html:
         raw {models::sanitized_help()}
 ```
 - `@guard(fn)` lines before a `page` (several run in order) work as on a `route`: the page header takes `auth` for the last guard's result, e.g. `@guard(require_staff)` + `page GET "/admin" (state, auth) -> html:`. A failing guard answers before any template code runs.
+- Format specs in markup: `td {cpu:.1}%`, `{n:>6}`, `{x:08.3}`, `{v:?}`; the result is escaped like any value. Specs that read other arguments (`$`, `*`) are rejected.
+- Inline SVG (charts, sparklines): `svg g path rect circle line polyline polygon text tspan defs linearGradient stop` with geometry and presentation attributes (`viewBox`, `d`, `points`, `x`/`y`/`cx`/`r`..., `fill`, `stroke`, `stroke-width`, `transform`, `opacity`, `text-anchor`, `font-size`, `offset`, `stop-color`...), which accept interpolation (escaped). `xmlns` must be the SVG namespace. No `href`, `style` or event handlers, so SVG can't run script.
+```
+svg(viewBox="0 0 100 8" width="60" height="8"):
+    rect(width="{cpu}" height="8" fill="#1a7f37")
+```
+- `canvas(id="chart" width="300" height="80" data-series="{json}")` for a chart drawn by an external script; `data-*` attributes (lower-case names) accept interpolation on any element.
 
 ## Types
 | Parvez | Rust |
@@ -391,6 +398,11 @@ page GET "/dash" (auth) -> html:
 - Not signed in: a browser navigation is redirected to `/auth/login`, an htmx request gets `HX-Redirect`, an API client gets 401 `{"code":"unauthenticated"}`.
 - CSRF: a cookie-authenticated request other than GET/HEAD must carry this site's `Origin` (or `Sec-Fetch-Site: same-origin`), otherwise 403 `csrf`.
 - Logout clears the cookies and redirects to the IdP's `end_session_endpoint` (register `PARVEZ_PUBLIC_URL/` as a post-logout redirect URI).
+- **Revocation:**
+  - `POST /auth/backchannel-logout` implements OIDC Back-Channel Logout. Set the client's back-channel logout URL to `PARVEZ_PUBLIC_URL/auth/backchannel-logout` (Keycloak: "Backchannel logout URL", session required). A verified logout token (signature, issuer, `aud` = the client id, logout event, no `nonce`, recent `iat`) ends that session at once; a token with only `sub` ends all of the user's sessions. Bearer tokens of a revoked session or user (issued before the logout) are refused too. The revocation list lives in memory, per instance.
+  - Every `PARVEZ_SESSION_RECHECK_SECS` (default 60) a browser session is re-confirmed with the IdP through a refresh, even while its access token is valid. A disabled or deleted user, or an ended IdP session, is therefore signed out within that interval on every instance, with or without back-channel calls.
+  - Bearer tokens without a back-channel logout stay valid until they expire (as with any locally validated JWT); keep access-token lifetimes short.
+- CSRF: `Origin: null` (sent by browsers for form posts under `Referrer-Policy: no-referrer`) defers to `Sec-Fetch-Site: same-origin`.
 - Environment: `PARVEZ_OIDC_CLIENT_ID` (the browser client, e.g. `remoteops-dashboard`), `PARVEZ_OIDC_CLIENT_SECRET` (confidential clients), `PARVEZ_PUBLIC_URL` (what users open; https, or http://localhost for development; the redirect URI is `PARVEZ_PUBLIC_URL/auth/callback`), `PARVEZ_SESSION_KEY` (64 hex characters: `openssl rand -hex 32`), plus the `PARVEZ_OIDC_*` settings above. Without them nobody can sign in, and the `/auth` routes log why.
 - Every service with Masud pages answers failing browser navigations with a small HTML error page instead of JSON.
 

@@ -207,7 +207,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-Parvez v0.9.2 adds `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
+Parvez v0.9.3 adds instant session revocation (OIDC back-channel logout plus a periodic IdP re-check), inline SVG, `canvas`, `data-*` and format specs in Masud, and fixes Sign out for form posts. v0.9.2 added `@guard` on Masud pages. v0.9.1 added generics and traits (`async` + `dyn`), map literals and `json({...})`, `catch`, `as`, `priv`, `parallel`, `every` workers, `@test_only` code, guard access to path params, browser sign-in for Masud pages (OIDC code flow + PKCE, encrypted session cookies), `parvez fmt`, `parvez new`, cross-compilation and `.sha256` checksums. For Rust macros or lifetimes, use `parvez show` to continue in Rust.
 
 ## License
 

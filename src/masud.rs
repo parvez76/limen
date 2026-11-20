@@ -34,6 +34,14 @@ fn content(text: &str, line: usize, raw: bool, dynamic: bool) -> Result<Vec<Html
                 check_expression(&e, line)?;
                 out.push(HtmlPart::Value(e, raw));
             }
+            // `{cpu:.1}` / `{n:>5}` / `{x:?}`: formatted like a Parvez string, then escaped
+            StrPart::Interp(e, Some(spec)) if dynamic && !raw => {
+                check_expression(&e, line)?;
+                if !valid_spec(&spec) {
+                    bail!("line {line}: unsupported format spec {spec:?} (e.g. {{x:.2}}, {{x:>8}}, {{x:08.3}}, {{x:?}})");
+                }
+                out.push(HtmlPart::Value(Expr::Str(vec![StrPart::Interp(e, Some(spec))]), false));
+            }
             StrPart::Interp(..) => {
                 bail!("line {line}: interpolation requires text or a plain text attribute and no format specifier")
             }
@@ -42,7 +50,24 @@ fn content(text: &str, line: usize, raw: bool, dynamic: bool) -> Result<Vec<Html
     Ok(out)
 }
 
-const TAGS: &str = "html head title body main section article aside nav header footer div span h1 h2 h3 h4 h5 h6 p strong em small code pre a button form label input textarea select option table thead tbody tr td th ul ol li dl dt dd details summary time img br hr meta link script";
+/// Rust format specs without width/precision arguments (`{x:.1$}` etc. would read other args).
+fn valid_spec(spec: &str) -> bool {
+    !spec.is_empty()
+        && spec.len() <= 16
+        && !spec.contains('$')
+        && !spec.contains('*')
+        && spec.chars().all(|c| c.is_ascii_digit() || "<>^+-#.?xXobeE".contains(c))
+}
+
+const TAGS: &str = "html head title body main section article aside nav header footer div span h1 h2 h3 h4 h5 h6 p strong em small code pre a button form label input textarea select option table thead tbody tr td th ul ol li dl dt dd details summary time img br hr meta link script canvas svg g path rect circle line polyline polygon text tspan defs linearGradient stop";
+
+/// Inline-SVG presentation/geometry attributes: plain values (escaped), never URLs or script.
+const SVG_ATTRS: &[&str] = &[
+    "viewBox", "xmlns", "width", "height", "d", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "points",
+    "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "fill-opacity",
+    "stroke-opacity", "opacity", "transform", "text-anchor", "dominant-baseline", "font-size", "font-weight", "offset",
+    "stop-color", "stop-opacity", "preserveAspectRatio", "gradientTransform",
+];
 const VOID: &[&str] = &["input", "img", "br", "hr", "meta", "link"];
 
 fn element(source: &str, line: usize) -> Result<(Vec<HtmlPart>, Option<String>)> {
@@ -58,9 +83,17 @@ fn element(source: &str, line: usize) -> Result<(Vec<HtmlPart>, Option<String>)>
                 .split_once('=')
                 .ok_or_else(|| anyhow::anyhow!("line {line}: expected attribute=value"))?;
             let key = key.trim();
-            let dynamic =
-                matches!(key, "class" | "title" | "alt" | "placeholder" | "value") || key.starts_with("aria-");
+            let data = key.strip_prefix("data-").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
+            let svg = SVG_ATTRS.contains(&key);
+            if key == "xmlns" && !val.trim_start().starts_with("\"http://www.w3.org/2000/svg\"") {
+                bail!("line {line}: xmlns must be \"http://www.w3.org/2000/svg\"");
+            }
+            let dynamic = matches!(key, "class" | "title" | "alt" | "placeholder" | "value")
+                || key.starts_with("aria-")
+                || data
+                || (svg && key != "xmlns");
             let valid = dynamic
+                || svg
                 || matches!(
                     key,
                     "id" | "name"
@@ -83,7 +116,8 @@ fn element(source: &str, line: usize) -> Result<(Vec<HtmlPart>, Option<String>)>
                         | "hx-swap"
                         | "hx-trigger"
                 );
-            if !valid || !key.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
+            let shape_ok = svg || data || key.bytes().all(|b| b.is_ascii_lowercase() || b == b'-');
+            if !valid || !shape_ok {
                 bail!("line {line}: unsupported attribute {key:?}");
             }
             let Some(quoted) = val.trim_start().strip_prefix('"') else {
@@ -406,7 +440,6 @@ mod tests {
             "    let value = __masud.clone()",
             "    p {__masud}",
             "    p {}",
-            "    p {x:?}",
             "    else:\n        p x",
             "    elif x:\n        p y",
             "    if x:\n        p a\n    else:\n        p b\n    else:\n        p c",
@@ -439,6 +472,41 @@ mod tests {
             _ => "other",
         }).collect();
         assert_eq!(kinds, ["other", "render", "for", "render", "render", "ret"]);
+    }
+
+    #[test]
+    fn format_specs_svg_canvas_and_data_attributes() {
+        let src = "page GET \"/\" -> html:\n    p {cpu:.1}% {n:>4}\n    svg(viewBox=\"0 0 100 20\" xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"):\n        polyline(points=\"{pts}\" fill=\"none\" stroke=\"#0a7\" stroke-width=\"2\")\n        text(x=\"2\" y=\"12\" font-size=\"8\") {label}\n    canvas(id=\"chart\" width=\"300\" height=\"80\" data-series=\"{series}\") no canvas\n";
+        let items = parse(src, 1).unwrap();
+        let Item::Route(r) = &items[0] else { panic!() };
+        let values: Vec<String> = r.body.iter().filter_map(|l| match &l.stmt {
+            Stmt::Render(parts) => Some(parts.iter().map(|p| match p {
+                HtmlPart::Markup(m) => m.clone(),
+                HtmlPart::Value(Expr::Str(sp), _) => format!("<fmt:{:?}>", sp.iter().filter_map(|x| if let StrPart::Interp(_, s) = x { s.clone() } else { None }).collect::<Vec<_>>()),
+                HtmlPart::Value(_, _) => "<v>".into(),
+            }).collect::<String>()),
+            _ => None,
+        }).collect();
+        let html = values.join("");
+        assert!(html.contains("<p><fmt:[\".1\"]>% <fmt:[\">4\"]></p>"), "{html}");
+        assert!(html.contains("<svg viewBox=\"0 0 100 20\" xmlns=\"http://www.w3.org/2000/svg\" width=\"100\">"), "{html}");
+        assert!(html.contains("<polyline points=\"<v>\" fill=\"none\""), "{html}");
+        assert!(html.contains("<canvas id=\"chart\" width=\"300\" height=\"80\" data-series=\"<v>\">no canvas</canvas>"), "{html}");
+        for bad in [
+            "    p {x:1$}",
+            "    p {x:.*}",
+            "    p {x:}x}",
+            "    svg(onload=\"{x}\") a",
+            "    svg(style=\"x\") a",
+            "    path(href=\"{x}\") a",
+            "    svg(xmlns=\"http://evil\") a",
+            "    div(data-=\"x\") a",
+            "    div(data-X=\"x\") a",
+            "    foreignObject x",
+            "    a(href=\"{x}\") go",
+        ] {
+            assert!(parse(&format!("page GET \"/\" -> html:\n{bad}"), 1).is_err(), "{bad}");
+        }
     }
 
     #[test]

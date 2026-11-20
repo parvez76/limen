@@ -1478,6 +1478,9 @@ fn browser_sign_in_with_session_cookies() {
     // signed right before use (the build takes a while): see the refresh step
     let short = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let short_idp = short.clone();
+    // the IdP refuses refreshes once the user is "disabled"
+    let disabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let disabled_idp = disabled.clone();
     let refreshed = sign(now + 3600, "fresh@adn.test");
     let discovery = format!(
         r#"{{"issuer":"{iss}","jwks_uri":"{iss}/jwks","authorization_endpoint":"{iss}/authorize","token_endpoint":"{iss}/token","end_session_endpoint":"{iss}/logout"}}"#
@@ -1497,7 +1500,11 @@ fn browser_sign_in_with_session_cookies() {
             } else if req.starts_with("POST /token") && form.contains("grant_type=authorization_code") && verifier_ok {
                 let at = if form.contains("code=short") { short_idp.lock().unwrap().clone() } else { long.clone() };
                 ("200 OK", format!(r#"{{"access_token":"{at}","refresh_token":"rt-1","token_type":"Bearer"}}"#))
-            } else if req.starts_with("POST /token") && form.contains("grant_type=refresh_token") && form.contains("refresh_token=rt-1") {
+            } else if req.starts_with("POST /token")
+                && form.contains("grant_type=refresh_token")
+                && form.contains("refresh_token=rt-")
+                && !disabled_idp.load(std::sync::atomic::Ordering::SeqCst)
+            {
                 ("200 OK", format!(r#"{{"access_token":"{refreshed}","refresh_token":"rt-2"}}"#))
             } else if req.starts_with("POST /token") {
                 ("400 Bad Request", r#"{"error":"invalid_grant"}"#.to_string())
@@ -1526,6 +1533,7 @@ fn browser_sign_in_with_session_cookies() {
             .env("PARVEZ_PUBLIC_URL", &public)
             .env("PARVEZ_SESSION_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
             .env("PARVEZ_OIDC_LEEWAY_SECS", "0")
+            .env("PARVEZ_SESSION_RECHECK_SECS", "4")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1594,6 +1602,10 @@ fn browser_sign_in_with_session_cookies() {
     assert!(post("").starts_with("HTTP/1.1 403"));
     assert!(post("Origin: https://evil.example\r\n").starts_with("HTTP/1.1 403"));
     assert!(post(&format!("Origin: {public}\r\n")).starts_with("HTTP/1.1 200"));
+    // a same-origin form post under no-referrer: Chrome sends `Origin: null` + Sec-Fetch-Site
+    assert!(post("Origin: null\r\nSec-Fetch-Site: same-origin\r\n").starts_with("HTTP/1.1 200"));
+    assert!(post("Origin: null\r\nSec-Fetch-Site: cross-site\r\n").starts_with("HTTP/1.1 403"));
+    assert!(post("Origin: null\r\n").starts_with("HTTP/1.1 403"));
 
     // open redirects are refused
     let r = get("/auth/login?next=//evil.example/x", "");
@@ -1611,6 +1623,47 @@ fn browser_sign_in_with_session_cookies() {
     std::thread::sleep(std::time::Duration::from_secs(3));
     let r = get("/whoami", &format!("Cookie: {short_session}\r\n"));
     assert!(r.ends_with("fresh@adn.test") && jar(&r).starts_with("parvez_session.0="), "{r}");
+
+    // a disabled user: within the recheck interval the session still works, after it the
+    // IdP refuses the refresh and the session ends (no back-channel call needed)
+    let fresh_session = jar(&r);
+    disabled.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(get("/whoami", &format!("Cookie: {fresh_session}\r\n")).ends_with("fresh@adn.test"));
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let r = get("/whoami", &format!("Cookie: {fresh_session}\r\n"));
+    assert!(r.starts_with("HTTP/1.1 401") && header(&r, "set-cookie").iter().any(|c| c.contains("Max-Age=0")), "{r}");
+    disabled.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // back-channel logout: a signed logout token from the IdP ends the user's sessions
+    // and bearer tokens at once; forged or malformed tokens are refused
+    let r = get("/auth/login?next=/whoami", "");
+    let st = header(&r, "location").pop().unwrap().split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+    let r = get(&format!("/auth/callback?code=good&state={st}"), &format!("Cookie: {}\r\n", jar(&r)));
+    let live = jar(&r);
+    assert!(get("/whoami", &format!("Cookie: {live}\r\n")).ends_with("ada<b>@adn.test"));
+    let bearer = format!("Authorization: Bearer {}\r\n", sign(now + 3600, "api@adn.test"));
+    assert!(get("/whoami", &bearer).ends_with("api@adn.test"));
+    let logout_token = |key: &str, aud: &str, extra: &str| {
+        let h = b64url(br#"{"alg":"RS256","kid":"k1","typ":"logout+jwt"}"#);
+        let iat = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let p = b64url(format!(r#"{{"iss":"{iss}","aud":"{aud}","iat":{iat},"jti":"j1","sub":"u-9","events":{{"http://schemas.openid.net/event/backchannel-logout":{{}}}}{extra}}}"#).as_bytes());
+        let msg = format!("{h}.{p}");
+        let sig = openssl(&["dgst", "-sha256", "-sign", key], Some(msg.as_bytes()));
+        format!("{msg}.{}", b64url(&sig))
+    };
+    openssl(&["genrsa", "-out", "other.pem", "2048"], None);
+    let bc = |tok: &str| {
+        let body = format!("logout_token={tok}");
+        http_raw(port, format!("POST /auth/backchannel-logout HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+    };
+    assert!(bc(&logout_token("other.pem", "dashboard", "")).starts_with("HTTP/1.1 400"), "forged signature");
+    assert!(bc(&logout_token("key.pem", "other-client", "")).starts_with("HTTP/1.1 400"), "wrong audience");
+    assert!(bc(&logout_token("key.pem", "dashboard", r#","nonce":"n""#)).starts_with("HTTP/1.1 400"), "nonce present");
+    assert!(get("/whoami", &format!("Cookie: {live}\r\n")).ends_with("ada<b>@adn.test"), "still signed in");
+    assert!(bc(&logout_token("key.pem", "dashboard", "")).starts_with("HTTP/1.1 200"));
+    assert!(get("/whoami", &format!("Cookie: {live}\r\n")).starts_with("HTTP/1.1 401"), "session ended at once");
+    assert!(get("/dash", &format!("Accept: text/html\r\nCookie: {live}\r\n")).starts_with("HTTP/1.1 303"));
+    assert!(get("/whoami", &bearer).starts_with("HTTP/1.1 401"), "the user's bearer tokens too");
 
     // logout: same-origin POST clears every chunk and ends the IdP session
     let r = http_raw(port, format!("POST /auth/logout HTTP/1.1\r\nHost: t\r\nOrigin: {public}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
