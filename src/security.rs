@@ -314,6 +314,8 @@ struct Fx<'a> {
     type_traits: HashMap<String, Vec<String>>,
     /// `state:` field -> its type (a user type or `dyn Trait`), for method dispatch
     state_types: HashMap<String, String>,
+    /// `state:` field -> the type of its elements (`Vec<Box<dyn Store>>`)
+    state_elems: HashMap<String, String>,
     /// `state:` fields holding request data -> where it was stored ("file:line")
     stored: std::rc::Rc<HashMap<String, String>>,
 }
@@ -332,7 +334,16 @@ struct ParamSum {
     sinks: Vec<Sink>,
     /// (state field, "file:line"): the parameter's value is stored there
     writes: Vec<(String, String)>,
+    /// the parameter's value is stored in a field of `self` (`self.path = p`)
+    self_write: bool,
 }
+
+/// Calls that return rows from the database: their values may have been written
+/// by an earlier request (second-order injection), so file paths and commands
+/// built from them are checked like request input.
+const DB_READS: &[&str] = &["fetch_one", "fetch_all", "fetch_optional", "fetch", "query_one", "query_opt", "try_get"];
+/// `via` marker for taint that comes from a database read.
+const FROM_DB: &str = "#db";
 
 /// Wrappers a method call sees through (`Arc<dyn Store>`, `Mutex<Cache>`).
 const WRAPPERS: &[&str] = &["Box", "Arc", "Rc", "Mutex", "RwLock", "RefCell", "Cell"];
@@ -368,6 +379,7 @@ impl<'a> Fx<'a> {
             trait_impls: HashMap::new(),
             type_traits: HashMap::new(),
             state_types: HashMap::new(),
+            state_elems: HashMap::new(),
             stored: Default::default(),
         };
         let mut traits: HashSet<String> = HashSet::new();
@@ -427,6 +439,9 @@ impl<'a> Fx<'a> {
                     if let Some(d) = fx.desc(ty, &HashMap::new()) {
                         fx.state_types.insert(name.clone(), d);
                     }
+                    if let Some(d) = fx.elem_desc(ty, &HashMap::new()) {
+                        fx.state_elems.insert(name.clone(), d);
+                    }
                 }
             }
         }
@@ -435,7 +450,20 @@ impl<'a> Fx<'a> {
 
     /// A fresh context that knows which state fields hold request data.
     fn cx(&self) -> Cx {
-        Cx { stored: self.stored.clone(), ..Cx::default() }
+        Cx { stored: self.stored.clone(), db: true, ..Cx::default() }
+    }
+
+    /// The element type of a list type: `[Disk]`, `Vec<Box<dyn Store>>`, `&[S]`.
+    fn elem_desc(&self, t: &Type, bounds: &HashMap<String, String>) -> Option<String> {
+        match t {
+            Type::Ref(x, _) => self.elem_desc(x, bounds),
+            Type::List(x) => self.desc(x, bounds),
+            Type::Named(n, args) if args.len() == 1 && matches!(last_segment(n), "Vec" | "VecDeque" | "HashSet" | "BTreeSet") => {
+                self.desc(&args[0], bounds)
+            }
+            Type::Named(n, args) if args.len() == 1 && WRAPPERS.contains(&last_segment(n)) => self.elem_desc(&args[0], bounds),
+            _ => None,
+        }
     }
 
     /// The type a method call on a value of type `t` dispatches on: a user type
@@ -518,6 +546,7 @@ impl<'a> Fx<'a> {
                                 sum.writes.push(w);
                             }
                         }
+                        sum.self_write = probe.self_write;
                         sum
                     })
                     .collect();
@@ -550,12 +579,16 @@ struct Cx {
     via: HashMap<String, String>,
     /// state fields holding request data -> where it was stored
     stored: std::rc::Rc<HashMap<String, String>>,
+    /// name -> the type of its elements (`[Disk(..)]`, `Vec<Box<dyn Store>>`)
+    elems: HashMap<String, String>,
+    /// database reads count as untrusted (off in summaries' probes)
+    db: bool,
 }
 
 impl Cx {
     /// The same context minus everything that's tainted only because it was read from state.
     fn without_stored(&self) -> Cx {
-        let mut cx = Cx { stored: Default::default(), aliases: HashMap::new(), via: HashMap::new(), ..self.clone() };
+        let mut cx = Cx { stored: Default::default(), aliases: HashMap::new(), via: HashMap::new(), db: false, ..self.clone() };
         cx.taint.retain(|n| !self.via.contains_key(n));
         cx
     }
@@ -567,6 +600,11 @@ struct Linter<'f, 'a> {
     sinks: Vec<Sink>,
     /// request data stored into state fields: (field, "file:line")
     writes: Vec<(String, String)>,
+    /// request data stored into a field of `self` (for summaries)
+    self_write: bool,
+    /// receivers that took request data into their fields during the current
+    /// statement (`job.set_path(name)` taints `job`); applied after it
+    pending: Vec<String>,
     fx: &'f Fx<'a>,
     module: Vec<String>,
 }
@@ -577,7 +615,7 @@ fn last_segment(name: &str) -> &str {
 
 impl<'f, 'a> Linter<'f, 'a> {
     fn new(fx: &'f Fx<'a>, module: &[String]) -> Self {
-        Linter { findings: Vec::new(), sinks: Vec::new(), writes: Vec::new(), fx, module: module.to_vec() }
+        Linter { findings: Vec::new(), sinks: Vec::new(), writes: Vec::new(), self_write: false, pending: Vec::new(), fx, module: module.to_vec() }
     }
 
     /// Parameter and `self` types for method dispatch inside a function.
@@ -628,6 +666,7 @@ impl<'f, 'a> Linter<'f, 'a> {
             return "request input".into();
         }
         match args.iter().find_map(|a| stored_from(a, cx)) {
+            Some(f) if f == FROM_DB => "data read from the database (an earlier request may have stored it)".into(),
             Some(f) => format!("request input stored in `state.{f}` (at {})", cx.stored.get(&f).map(String::as_str).unwrap_or("?")),
             None => "request input".into(),
         }
@@ -679,17 +718,57 @@ impl<'f, 'a> Linter<'f, 'a> {
                 let b = last_segment(n);
                 self.fx.user_types.contains(b).then(|| b.to_string())
             }
-            // `Disk::new(..)` returning Self / Disk
+            // a user fn or `Disk::new(..)`: its declared return type
             Expr::Call(n, _, _) => {
-                let (t, _) = n.rsplit_once("::")?;
-                let t = last_segment(t);
                 let key = self.fx.resolve(&self.module, n)?;
-                let ret = self.fx.fns.get(&key)?.f.ret.as_ref()?;
-                let returns_self = matches!(ret, Type::Named(r, _) if r == "Self" || last_segment(r) == t);
-                (returns_self && self.fx.user_types.contains(t)).then(|| t.to_string())
+                self.ret_type(&key)
+            }
+            // a user method on a value of known type: its declared return type
+            Expr::Method(x, m, _, _) => {
+                let key = self.method_targets(x, m, cx).into_iter().next()?;
+                self.ret_type(&key)
             }
             _ => None,
         }
+    }
+
+    fn ret_type(&self, key: &str) -> Option<String> {
+        let info = self.fx.fns.get(key)?;
+        match info.f.ret.as_ref()? {
+            Type::Named(r, _) if r == "Self" => info.owner.filter(|o| self.fx.user_types.contains(*o)).map(str::to_string),
+            t => self.fx.desc(t, &info.bounds),
+        }
+    }
+
+    /// The element type of a collection expression: `[Disk(..)]`, a typed
+    /// variable or `state:` field, `.iter()` / `&` of one.
+    fn elem_type(&self, e: &Expr, cx: &Cx) -> Option<String> {
+        match e {
+            Expr::List(xs) => xs.iter().find_map(|x| self.type_of(x, cx)),
+            Expr::Ident(n) => cx.elems.get(n).cloned(),
+            Expr::Field(x, f) if matches!(&**x, Expr::Ident(s) if s == "state") => self.fx.state_elems.get(f).cloned(),
+            Expr::Ref(x, _) | Expr::Try(x) | Expr::Await(x) => self.elem_type(x, cx),
+            Expr::Method(x, m, _, _)
+                if matches!(m.as_str(), "iter" | "iter_mut" | "into_iter" | "clone" | "lock" | "read" | "unwrap" | "expect" | "values") =>
+            {
+                self.elem_type(x, cx)
+            }
+            // `disks()` / `repo.all()` declared to return `[Disk]`
+            Expr::Call(n, _, _) => {
+                let key = self.fx.resolve(&self.module, n)?;
+                self.ret_elems(&key)
+            }
+            Expr::Method(x, m, _, _) => {
+                let key = self.method_targets(x, m, cx).into_iter().next()?;
+                self.ret_elems(&key)
+            }
+            _ => None,
+        }
+    }
+
+    fn ret_elems(&self, key: &str) -> Option<String> {
+        let info = self.fx.fns.get(key)?;
+        self.fx.elem_desc(info.f.ret.as_ref()?, &info.bounds)
     }
 
     fn push(&mut self, line: usize, rule: &'static str, msg: String, fix: &'static str) {
@@ -705,7 +784,7 @@ impl<'f, 'a> Linter<'f, 'a> {
 
     /// A call into a user function: request data in an argument reaches the
     /// sinks that parameter leads to (from the function's summary).
-    fn through_call(&mut self, key: &str, shown: &str, args: &[Expr], line: usize, cx: &Cx) {
+    fn through_call(&mut self, key: &str, shown: &str, recv: Option<&Expr>, args: &[Expr], line: usize, cx: &Cx) {
         let Some(sums) = self.fx.sums.get(key) else { return };
         let Some(FnInfo { f, .. }) = self.fx.fns.get(key) else { return };
         let mut positional = 0;
@@ -719,7 +798,7 @@ impl<'f, 'a> Linter<'f, 'a> {
             };
             let value = if let Expr::Named(_, v) = a { v } else { a };
             let Some(sum) = idx.and_then(|i| sums.get(i)) else { continue };
-            if (sum.sinks.is_empty() && sum.writes.is_empty()) || !tainted(value, cx) {
+            if (sum.sinks.is_empty() && sum.writes.is_empty() && !sum.self_write) || !tainted(value, cx) {
                 continue;
             }
             let src = self.source(&[value], cx);
@@ -729,6 +808,15 @@ impl<'f, 'a> Linter<'f, 'a> {
                 self.push(line, s.rule, msg, s.fix);
             }
             self.writes.extend(sum.writes.iter().cloned());
+            // the method stored the value in its object: the receiver now holds request data
+            if sum.self_write
+                && let Some(r) = recv
+            {
+                match state_root(r, cx) {
+                    Some(f) => self.writes.push((f, self.fx.locate(line))),
+                    None => self.pending.extend(root_ident(r).map(str::to_string)),
+                }
+            }
         }
     }
 
@@ -739,6 +827,17 @@ impl<'f, 'a> Linter<'f, 'a> {
     }
 
     fn stmt(&mut self, s: &Stmt, line: usize, cx: &mut Cx) {
+        self.stmt_inner(s, line, cx);
+        // `job.set_path(name)`: from here on `job` holds request data
+        for n in std::mem::take(&mut self.pending) {
+            if n == "self" {
+                self.self_write = true;
+            }
+            cx.taint.insert(n);
+        }
+    }
+
+    fn stmt_inner(&mut self, s: &Stmt, line: usize, cx: &mut Cx) {
         match s {
             Stmt::Render(parts) => {
                 for p in parts {
@@ -753,7 +852,8 @@ impl<'f, 'a> Linter<'f, 'a> {
             Stmt::Let { name, value, ty, .. } => {
                 self.secret_binding(name, value, line);
                 self.expr(value, line, cx);
-                if tainted(value, cx) {
+                // `n: i64 = ...` can't hold a path or a script, whatever it was parsed from
+                if tainted(value, cx) && ty.as_ref().is_none_or(carries_text) {
                     cx.taint.insert(name.clone());
                     if let Some(f) = stored_from(value, cx).filter(|_| !tainted(value, &cx.without_stored())) {
                         cx.via.insert(name.clone(), f);
@@ -764,6 +864,9 @@ impl<'f, 'a> Linter<'f, 'a> {
                 }
                 if let Some(t) = ty.as_ref().and_then(|t| self.fx.desc(t, &HashMap::new())).or_else(|| self.type_of(value, cx)) {
                     cx.types.insert(name.clone(), t);
+                }
+                if let Some(t) = ty.as_ref().and_then(|t| self.fx.elem_desc(t, &HashMap::new())).or_else(|| self.elem_type(value, cx)) {
+                    cx.elems.insert(name.clone(), t);
                 }
                 // `g = state.cache.lock().unwrap()`: writes through `g` land in the field
                 if is_guard(value)
@@ -784,6 +887,10 @@ impl<'f, 'a> Linter<'f, 'a> {
                     && tainted(value, cx)
                 {
                     self.writes.push((f, self.fx.locate(line)));
+                }
+                // `self.path = p`: the object now holds request data
+                if root_ident(target) == Some("self") && !matches!(target, Expr::Ident(_)) && tainted(value, cx) {
+                    self.self_write = true;
                 }
                 if let Expr::Ident(n) = target {
                     if tainted(value, cx) {
@@ -823,6 +930,9 @@ impl<'f, 'a> Linter<'f, 'a> {
             Stmt::For { var, iter, body } => {
                 self.expr(iter, line, cx);
                 let mut inner = cx.clone();
+                if let Some(t) = self.elem_type(iter, cx) {
+                    inner.types.insert(var.clone(), t);
+                }
                 if tainted(iter, cx) {
                     inner.taint.insert(var.clone());
                     if let Some(f) = stored_from(iter, cx).filter(|_| !tainted(iter, &cx.without_stored())) {
@@ -860,11 +970,13 @@ impl<'f, 'a> Linter<'f, 'a> {
             }
             Expr::Method(recv, m, _, args) => {
                 self.method_rules(recv, m, args, line, cx);
-                if WRITE_METHODS.contains(&m.as_str())
-                    && args.iter().any(|a| tainted(a, cx))
-                    && let Some(f) = state_root(recv, cx)
-                {
-                    self.writes.push((f, self.fx.locate(line)));
+                if WRITE_METHODS.contains(&m.as_str()) && args.iter().any(|a| tainted(a, cx)) {
+                    if let Some(f) = state_root(recv, cx) {
+                        self.writes.push((f, self.fx.locate(line)));
+                    } else if let Some(n) = root_ident(recv) {
+                        // `self.items.push(p)` / `list.push(name)`: the container holds request data
+                        self.pending.push(n.to_string());
+                    }
                 }
                 self.expr(recv, line, cx);
                 let recv_tainted = tainted(recv, cx);
@@ -980,7 +1092,7 @@ impl<'f, 'a> Linter<'f, 'a> {
             self.taint_sink(line, "path-traversal", format!("{src} reaches `{name}(..)` unsanitized"), &format!("`{name}(..)`"), FIX_PATH);
         }
         if let Some(key) = self.fx.resolve(&self.module, name) {
-            self.through_call(&key, name, args, line, cx);
+            self.through_call(&key, name, None, args, line, cx);
         }
     }
 
@@ -1015,7 +1127,7 @@ impl<'f, 'a> Linter<'f, 'a> {
         // `x.helper(..)` on a user type, a `dyn Trait` or a bounded generic
         for key in self.method_targets(recv, m, cx) {
             let shown = key.rsplit("::").take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("::");
-            self.through_call(&key, &shown, args, line, cx);
+            self.through_call(&key, &shown, Some(recv), args, line, cx);
         }
     }
 
@@ -1091,6 +1203,7 @@ fn tainted(e: &Expr, cx: &Cx) -> bool {
         Expr::Ident(n) => cx.taint.contains(n) || cx.aliases.get(n).is_some_and(|f| cx.stored.contains_key(f)),
         Expr::Field(x, f) if matches!(&**x, Expr::Ident(s) if s == "state") => cx.stored.contains_key(f),
         Expr::Call(n, _, _) if n == "safe_join" => false,
+        Expr::Method(_, m, _, _) if cx.db && DB_READS.contains(&m.as_str()) => true,
         Expr::Call(_, _, args) => args.iter().any(|a| tainted(a, cx)),
         Expr::Method(x, _, _, args) => tainted(x, cx) || args.iter().any(|a| tainted(a, cx)),
         Expr::Str(parts) => parts.iter().any(|p| matches!(p, StrPart::Interp(x, _) if tainted(x, cx))),
@@ -1122,6 +1235,15 @@ fn state_root(e: &Expr, cx: &Cx) -> Option<String> {
     }
 }
 
+/// The variable at the root of a place or method chain: `job` in `job.items.push(x)`.
+fn root_ident(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Ident(n) => Some(n),
+        Expr::Field(x, _) | Expr::Unary(_, x) | Expr::Method(x, ..) | Expr::Index(x, _) | Expr::Try(x) | Expr::Await(x) | Expr::Ref(x, _) => root_ident(x),
+        _ => None,
+    }
+}
+
 /// `state.f.lock().unwrap()`, `.write().await`, `.borrow_mut()`, `.entry(k)`: a handle, not a copy.
 fn is_guard(e: &Expr) -> bool {
     match e {
@@ -1141,6 +1263,7 @@ fn stored_from(e: &Expr, cx: &Cx) -> Option<String> {
         }
         found = match x {
             Expr::Field(y, f) if matches!(&**y, Expr::Ident(s) if s == "state") && cx.stored.contains_key(f) => Some(f.clone()),
+            Expr::Method(_, m, _, _) if cx.db && DB_READS.contains(&m.as_str()) => Some(FROM_DB.to_string()),
             Expr::Ident(n) => cx.via.get(n).cloned().or_else(|| cx.aliases.get(n).filter(|f| cx.stored.contains_key(*f)).cloned()),
             _ => None,
         };

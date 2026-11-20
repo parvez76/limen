@@ -1,0 +1,129 @@
+# Release: runs when a `v*` tag is pushed.
+#  1. tests must pass;
+#  2. the compiler is built for each platform with fixed paths and timestamps,
+#     so anyone can rebuild the tag and get the same bytes;
+#  3. a second, independent build of the Linux binary must match byte for byte;
+#  4. each archive gets a GitHub build attestation (signed, keyless: "built from
+#     this commit by this workflow"), and the release lists SHA256SUMS.
+# Verify a download:  gh attestation verify <file> --repo parvez76/project-parvez
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - run: cargo test --release --locked
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-14, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write      # keyless signing for the attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: GNU tar (macOS)
+        if: runner.os == 'macOS'
+        run: command -v gtar || brew install gnu-tar
+      - name: Build (reproducible)
+        shell: bash
+        run: .github/release-build.sh "${{ matrix.target }}" dist
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # An independent rebuild (different directory, fresh runner) must produce the same archive.
+  reproducible:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          path: elsewhere/parvez
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - name: Rebuild
+        shell: bash
+        working-directory: elsewhere/parvez
+        run: .github/release-build.sh x86_64-unknown-linux-musl "$GITHUB_WORKSPACE/rebuild"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-x86_64-unknown-linux-musl
+          path: released
+      - name: Compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          a=$(sha256sum released/*.tar.gz | cut -d' ' -f1)
+          b=$(sha256sum rebuild/*.tar.gz | cut -d' ' -f1)
+          echo "release: $a"; echo "rebuild: $b"
+          [ "$a" = "$b" ] || { echo "::error::the rebuild differs from the release build"; exit 1; }
+
+  publish:
+    needs: [build, reproducible]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums and release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Parvez $TAG" \
+            --notes "Prebuilt \`parvez\` binaries for $TAG. Parvez builds your programs with the Rust toolchain, so install it from https://rustup.rs first.
+
+          Verify before use (see SECURITY.md, Verifying a release):
+          \`\`\`
+          sha256sum -c SHA256SUMS --ignore-missing
+          gh attestation verify parvez-$TAG-<target>.tar.gz --repo $GITHUB_REPOSITORY
+          \`\`\`" \
+            *.tar.gz SHA256SUMS

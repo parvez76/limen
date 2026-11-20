@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Reproducible release build: the same tag gives the same archive bytes on any
+# machine with the same Rust version, whatever directory it's built in.
+#   .github/release-build.sh <target> <out-dir>
+set -euo pipefail
+target=$1
+out=$2
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+version=$(git describe --tags --exact-match 2>/dev/null || echo "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)")
+# fixed timestamp (the commit's) and no machine paths in the binary
+export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+export RUSTFLAGS="--remap-path-prefix=$root=/parvez --remap-path-prefix=$cargo_home=/cargo ${RUSTFLAGS:-}"
+export CARGO_TARGET_DIR="$root/target/release-build"
+cargo build --release --locked --target "$target"
+name="parvez-$version-$target"
+stage=$(mktemp -d)
+mkdir "$stage/$name"
+cp "$CARGO_TARGET_DIR/$target/release/parvez" LICENSE README.md SECURITY.md "$stage/$name/"
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+# deterministic archive: sorted names, fixed owner, modes and mtime, no gzip timestamp
+# (GNU tar; on macOS that's `gtar` from Homebrew)
+tar=tar
+command -v gtar >/dev/null && tar=gtar
+"$tar" --sort=name --owner=0 --group=0 --numeric-owner --mode='u=rwX,go=rX' --mtime="@$SOURCE_DATE_EPOCH" \
+    --format=gnu -C "$stage" -cf - "$name" | gzip -n -9 > "$out/$name.tar.gz"
+rm -rf "$stage"
+if command -v sha256sum >/dev/null; then (cd "$out" && sha256sum "$name.tar.gz"); else (cd "$out" && shasum -a 256 "$name.tar.gz"); fi

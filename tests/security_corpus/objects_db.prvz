@@ -1,0 +1,70 @@
+# Request data kept in objects, values typed only by inference, and second-order database reads.
+trait Store:
+    fn get(&self, key: &str) -> str!
+
+type Disk: root: str
+type Mem: root: str
+
+impl Store for Disk:
+    fn get(&self, key: &str) -> str!:
+        ret std::fs::read_to_string(key)?
+
+impl Store for Mem:
+    fn get(&self, key: &str) -> str!:
+        ret key.to_string()
+
+type Job: path: str, tags: [str]
+
+impl Job:
+    fn set_path(&~self, p: &str):
+        self.path = p.to_string()
+
+    fn tag(&~self, t: &str):
+        self.tags.push(t.to_string())
+
+fn disks() -> [Disk]:
+    ret [Disk(root: "/srv")]
+
+fn open_disk() -> Disk:
+    ret Disk(root: "/srv")
+
+state:
+    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(&env("DATABASE_URL", "postgres://localhost/x"))?
+    stores: Vec<Box<dyn Store>> = Vec::new()
+
+@public("corpus")
+route GET "/o/{name}" (state, name: str) -> str!:
+    ~job = Job(path: "", tags: [])
+    job.set_path(&name)
+    a = std::fs::read_to_string(&job.path)?  # expect: path-traversal
+    ~other = Job(path: "", tags: [])
+    other.tag(&name)
+    for t in &other.tags:
+        std::fs::remove_file(t)?  # expect: path-traversal
+    ~fixed = Job(path: "", tags: [])
+    fixed.set_path("/etc/app.conf")
+    ok = std::fs::read_to_string(&fixed.path)?
+    stores = [Disk(root: "/srv")]
+    for s in &stores:
+        b = s.get(&name)?  # expect: path-traversal
+    for s in disks():
+        c = s.get(&name)?  # expect: path-traversal
+    d = open_disk().get(&name)?  # expect: path-traversal
+    for s in state.stores.iter():
+        e = s.get(&name)?  # expect: path-traversal
+    mems = [Mem(root: "")]
+    for m in &mems:
+        f = m.get(&name)?
+    ret a
+
+@public("corpus")
+route GET "/o2" (state) -> str!:
+    row: (String,) = sqlx::query_as("SELECT name FROM files LIMIT 1").fetch_one(&state.db).await?
+    g = std::fs::read_to_string(&row.0)?  # expect: path-traversal
+    rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM files").fetch_all(&state.db).await?
+    for r in &rows:
+        Command::new(&r.0).status()  # expect: command-injection
+    n: i64 = sqlx::query_scalar("SELECT count(*) FROM files").fetch_one(&state.db).await?
+    h = std::fs::read_to_string("/srv/report-{n}.txt")?
+    names: Vec<String> = sqlx::query_scalar("SELECT name FROM files").fetch_all(&state.db).await?
+    ret json(names)

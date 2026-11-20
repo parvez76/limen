@@ -24,12 +24,33 @@ Please give us a chance to ship the fix before disclosing. If a deadline matters
 
 ## Supported versions
 
-Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrade with `git pull && cargo install --path . --locked`, then rebuild your services, because fixes to generated code and runtime only reach a service when it's rebuilt.
+Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrade by installing the new release (see [Verifying a release](#verifying-a-release)) or with `git pull && cargo install --path . --locked`, then rebuild your services, because fixes to generated code and runtime only reach a service when it's rebuilt.
 
 | Version | Security fixes |
 |---|---|
-| 0.15.x | yes |
-| < 0.15 | no |
+| 0.16.x | yes |
+| < 0.16 | no |
+
+## Verifying a release
+
+Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a `v*` tag is pushed. The tests must pass first. Each archive then gets a GitHub build attestation: a keyless Sigstore signature tying the file to the exact commit and workflow run that produced it. The release also lists `SHA256SUMS`.
+
+```bash
+# 1. checksum
+sha256sum -c SHA256SUMS --ignore-missing
+# 2. provenance: built from this repository by the release workflow
+gh attestation verify parvez-v0.16.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/project-parvez
+```
+
+Builds are reproducible: the workflow rebuilds the Linux binary from scratch in a different directory and refuses to publish if a single byte differs. You can check a release yourself with the same Rust version:
+
+```bash
+git clone https://github.com/parvez76/project-parvez && cd project-parvez && git checkout v0.16.0
+.github/release-build.sh x86_64-unknown-linux-musl /tmp/rebuild   # prints the archive's SHA-256
+grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
+```
+
+Installing from source (`cargo install --git https://github.com/parvez76/project-parvez --tag v0.16.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
 
@@ -93,7 +114,7 @@ The compile-time lint rules, as shown by `parvez lint --rules` and in every find
 | `secret-exposure` | `.expose()` reaching logs, output, errors, JSON or pages | 532, 200 | A09 Security Logging and Monitoring Failures | 7.1.1, 7.1.2 | 6.5 |
 | `secret-type` | a secret-named `state:` field typed `str` | 312, 316 | A04 Insecure Design | 8.3.6, 6.4.1 | 4.0 |
 
-Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Method calls are resolved by the receiver's type, so calls through a `dyn Trait`, `Arc<dyn Trait>` or a generic bounded by a trait follow every implementation. Request data stored in a `state:` field taints every later read of it, in any route, worker or function, and the finding says where it was stored. Known limits: data kept in an ordinary object's field by a method (`job.set_path(name)`, then `job.path`) isn't followed; a method call on a value whose type isn't known locally (an element of an untyped list) is followed only when exactly one `impl` defines that name; and second-order flows (stored in a database by one request, read back by another) aren't tracked.
+Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Method calls are resolved by the receiver's type, inferred from struct literals, annotations, parameter and `state:` field types, list elements (`[Disk(..)]`, `Vec<Box<dyn Store>>`) and the declared return types of your functions; calls through a `dyn Trait`, `Arc<dyn Trait>` or a generic bounded by a trait follow every implementation. Request data stored in a `state:` field taints every later read of it, in any route, worker or function, and the finding says where it was stored. A method that stores its argument in its object (`job.set_path(name)`) makes the object hold request data. Values read from the database (`fetch_one`, `fetch_all`, `query_as`, ...) are untrusted for file paths and commands, because an earlier request may have written them (second-order injection); a value declared as a number, `bool` or `char` is never treated as text. Known limits: data handed between tasks through a channel whose sending and receiving ends are different `state:` fields isn't followed; contents of files, environment variables and outgoing HTTP responses aren't treated as untrusted; and a method call on a value whose type can't be inferred is followed only when exactly one `impl` defines that name.
 
 The checks are tested against an adversarial corpus ([tests/security_corpus](tests/security_corpus)): programs that try to sneak request data, SQL and secrets past the rules through aliases, transforms, branches, loops, closures, helper chains, modules, methods and recursion, plus safe programs that must not be flagged. Every expected finding must be reported and nothing else may be; the known blind spots above are annotated there and fail the test once they start being caught, so the list stays accurate. Found a bypass or a false positive? A new corpus case is the best report.
 
@@ -114,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.15.0 --locked
+      - run: cargo install --git https://github.com/parvez76/project-parvez --tag v0.16.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

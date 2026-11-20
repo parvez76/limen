@@ -1,43 +1,21 @@
 # Documented blind spots (SECURITY.md). Each must NOT be reported yet; when the
 # analysis catches one, turn its annotation into `expect`.
-trait Store:
-    fn get(&self, key: &str) -> str!
-
-type Disk: root: str
-type Mem: root: str
-
-impl Store for Disk:
-    fn get(&self, key: &str) -> str!:
-        ret std::fs::read_to_string(key)?
-
-impl Store for Mem:
-    fn get(&self, key: &str) -> str!:
-        ret key.to_string()
-
-type Job: path: str
-
-impl Job:
-    fn set_path(&~self, p: &str):
-        self.path = p.to_string()
-
 state:
-    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(&env("DATABASE_URL", "postgres://localhost/x"))?
+    tx: tokio::sync::mpsc::UnboundedSender<String> = jobs_sender()
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>> = jobs_receiver()
 
 @public("corpus")
-route GET "/k/{name}" (state, name: str) -> str!:
-    # request data kept in an ordinary object's field by a method, read later
-    ~job = Job(path: "")
-    job.set_path(&name)
-    a = std::fs::read_to_string(&job.path)?  # known-miss: path-traversal
-    # a value whose type isn't known locally, with several impls of the method
-    stores = [Disk(root: "/srv")]
-    for s in &stores:
-        b = s.get(&name)?  # known-miss: path-traversal
-    # second-order: stored in the database by one request, read back by another
-    sqlx::query("INSERT INTO files (name) VALUES ($1)").bind(&name).execute(&state.db).await?
-    ret a
+route POST "/m/{name}" (state, name: str) -> str!:
+    # handed to another task through a channel: the receiving end is a different field
+    state.tx.send(name.clone())?
+    ret "queued"
+
+every 1m (state):
+    if let Some(job) = state.rx.lock().await.recv().await:
+        Command::new(job).status()  # known-miss: command-injection
 
 @public("corpus")
-route GET "/k2" (state) -> str!:
-    row: (String,) = sqlx::query_as("SELECT name FROM files LIMIT 1").fetch_one(&state.db).await?
-    ret std::fs::read_to_string(&row.0)?  # known-miss: path-traversal
+route GET "/m2" -> str!:
+    # other external input: a file's or an HTTP response's contents used as a path
+    target = std::fs::read_to_string("/srv/next.txt")?
+    ret std::fs::read_to_string(target.trim())?  # known-miss: path-traversal
