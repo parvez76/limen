@@ -2,9 +2,11 @@
 
 **The usual security mistakes don't compile.**
 
-Parvez is a small language for backend services and DevOps tools. You write a few lines. The compiler refuses the route nobody guarded, the secret headed for a log, and the query pasted together from strings. What you get back is one native binary.
+The Parvez language is small, built for backend services and DevOps tools that people and AI agents write together. It compiles to plain, readable Rust. You write a few lines. The compiler refuses the route nobody guarded, the secret headed for a log, and the query pasted together from strings. What you get back is one native binary.
 
 **[Try it in your browser](https://parvez76.github.io/parvez/play/)**: the real compiler, compiled to WebAssembly. No install.
+
+**Why a language, and not a Rust crate?** [The honest answer](docs/WHY-A-LANGUAGE.md), starting with what Rust tools already do well.
 
 ## Picture this
 
@@ -44,6 +46,18 @@ GET     /healthz      built-in  PUBLIC (built-in health check)                  
 
 Before a release, `parvez fuzz` throws hostile input at every route and fails on any crash, hang or leaked internal detail.
 
+## When your agent slips, it lands on the right line
+
+[SPEC.md](SPEC.md) is written as a compact system prompt, so an agent can learn the whole language from one file. `parvez mcp` lets the agent check its own code against the compiler (`claude mcp add parvez -- parvez mcp`). When something's wrong, the error points at the `.prvz` line it wrote, not at generated code:
+
+```
+typo.prvz:2: error[E0308]: mismatched types
+   2 |     ret raw.len()
+     = expected `i32`, found `usize`
+     = line 1: expected `i32` because of return type
+     = rust: raw.len()
+```
+
 ## The whole service fits on one screen
 
 This is a complete JSON service:
@@ -65,18 +79,6 @@ route POST "/events" (body: Event) -> Event!:
 The same service written by hand in Rust with axum takes 48 lines plus a `Cargo.toml`. This one is 9, and 76 tokens instead of 402.¹ Both answer the same requests with the same status codes and the same JSON error format. Yours also comes with health checks, Prometheus metrics, request limits, timeouts and security headers you didn't write.
 
 Short code is quicker to review, and it leaves room in an AI's context window for the part of the problem that's actually hard.
-
-## When your agent slips, it lands on the right line
-
-[SPEC.md](SPEC.md) is written as a compact system prompt, so an agent can learn the whole language from one file. `parvez mcp` lets the agent check its own code against the compiler (`claude mcp add parvez -- parvez mcp`). When something's wrong, the error points at the `.prvz` line it wrote, not at generated code:
-
-```
-typo.prvz:2: error[E0308]: mismatched types
-   2 |     ret raw.len()
-     = expected `i32`, found `usize`
-     = line 1: expected `i32` because of return type
-     = rust: raw.len()
-```
 
 ## Leaving costs nothing
 
@@ -113,6 +115,10 @@ parvez run main.prvz               # http://localhost:8080
 
 Both installers check the download against the release's published checksums before installing anything, and offer to set up Rust if you don't have it. On Windows, Rust also needs Microsoft's C++ build tools; `parvez doctor` gives the one-line `winget` command. You can also use Parvez inside WSL with the Linux installer. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/parvez --tag v0.18.0 --locked`.
 
+## Break it
+
+Parvez makes security claims, so testing them should be easy. Paste your best attempt to sneak request data, SQL or a secret past the checks into the [playground](https://parvez76.github.io/parvez/play/), and start from the adversarial corpus that's already there. If something gets through, open an issue or a pull request with the case: it goes into the [corpus](tests/security_corpus/), which every release must pass, and you're credited in the changelog. A vulnerability in Parvez itself, as opposed to a missed check, should be [reported privately](SECURITY.md#reporting-a-vulnerability).
+
 ## What Parvez won't do
 
 - **It won't catch your logic mistakes.** If your guard returns the wrong answer, Parvez enforces the wrong answer. The checks remove whole classes of bugs, not all of them. The known blind spots are listed in [SECURITY.md](SECURITY.md) and kept in a test suite.
@@ -120,10 +126,12 @@ Both installers check the download against the release's published checksums bef
 - **It isn't for everything.** It's built for services and command-line tools. Rust macros and lifetimes aren't supported; for those, run `parvez show` and continue in Rust.
 - **It doesn't replace Rust.** It runs on top of it. The installer sets Rust up, and you also need a C linker; `parvez doctor` tells you what's missing.
 - **It isn't on every platform yet.** Prebuilt binaries cover Linux (x86_64, ARM64), Apple-silicon Macs and Windows (x64, which Windows on ARM runs through emulation). Windows support is new and tested in CI, but hasn't seen much real use yet, so treat it as beta. Intel Macs can build from source.
-- **It's young.** Before 1.0, syntax and defaults can change between minor versions. The [changelog](docs/CHANGELOG.md) says when they do and what to change.
+- **It's young.** One maintainer so far, and before 1.0, syntax and defaults can change between minor versions. The [changelog](docs/CHANGELOG.md) says when they do and what to change.
 
 ## Learn more
 
+- [Why a language, and not a Rust crate?](docs/WHY-A-LANGUAGE.md): what Rust already does well, what's left, and the costs of choosing Parvez
+- [Playground](https://parvez76.github.io/parvez/play/): the compiler in your browser
 - [Reference](docs/REFERENCE.md): the language at a glance, every command, what's built into every service, full-stack services with Masud pages
 - [SPEC.md](SPEC.md): the complete language, written for humans and AI agents
 - [SECURITY.md](SECURITY.md): what Parvez enforces, mapped to CWE, OWASP and ASVS; how to verify a release; how to report a vulnerability

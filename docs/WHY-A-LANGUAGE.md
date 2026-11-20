@@ -1,0 +1,65 @@
+# Why a language, and not a Rust crate?
+
+It's the right first question. Most of what Parvez enforces can be approximated in plain Rust, and a disciplined team of Rust experts already gets most of the way there today. This page starts with what the existing tools do well, then says what's left, and who that difference is for.
+
+## What plain Rust already gives you
+
+Credit where it's due. These are good tools, and some are stronger than Parvez in their own lane:
+
+| Concern | In Rust today | Compared with Parvez |
+|---|---|---|
+| Secrets in logs | The [`secrecy`](https://crates.io/crates/secrecy) crate: redacted `Debug`, zeroized on drop, no serialization unless you opt in, an explicit `expose_secret()` | Parvez's `Secret` is the same idea. What Parvez adds is a compile error when an exposed value reaches a log, print, error or page. |
+| SQL injection | [`sqlx::query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) checks the SQL against your real database schema at compile time, and takes a string literal, so there's nothing to interpolate | **Stronger than Parvez** in that lane: Parvez doesn't check queries against a schema. Parvez's rule covers the non-macro `sqlx::query(...)` path, which is the one people actually build strings for. |
+| Missing auth checks | Axum extractors: a handler that takes an `AuthUser` argument can't run without authentication. A custom router wrapper can require one on every route | Achievable, if every handler is written that way and every route goes through the wrapper. |
+| Banned calls, risky patterns | Clippy's [`disallowed_methods`](https://rust-lang.github.io/rust-clippy/master/index.html#disallowed_methods), custom lints ([Dylint](https://github.com/trailofbits/dylint)), [Semgrep](https://semgrep.dev) rules for Rust | Flexible and powerful, and you can write rules Parvez doesn't have. |
+| Vulnerable dependencies, SBOM | [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), `cargo-audit`, `cargo-cyclonedx` | Equivalent. Parvez runs the RustSec check and writes the SBOM on every build without setup. |
+| Memory safety | Rust | Identical: Parvez generates safe Rust and inherits it. |
+
+If your team is experienced in Rust, reviews carefully, and has these tools wired into CI, you already have most of what Parvez offers. Keep using Rust.
+
+## What's left: who decides that the checks run
+
+Every row above is **opt-in, per project, and can be switched off a line at a time**:
+
+- The crate, the wrapper, the lint config and the CI job have to be added, and kept, in every project. A new service starts without them.
+- `#[allow(clippy::...)]`, `// nosemgrep`, or one handler written without the wrapper silences a check right where it's inconvenient. Nobody sees it unless they read that line.
+- An AI agent writing plain axum doesn't know about your wrapper unless you tell it every time. Agents routinely add `#[allow(...)]` to make a warning go away.
+
+In Parvez those decisions aren't available:
+
+- **There's no "off".** The checks are part of the compiler: `parvez build`, `run`, `check`, `test` and `show` all refuse an insecure program. There's no lint step to skip and no config that turns them off.
+- **One way to waive, and it's loud.** `@allow_insecure("reason")` is the only waiver. It needs a written reason, covers a whole function, route or `state:` block (not one quiet line), is printed on every build, and appears in the SARIF report as a suppressed finding with that reason. A reviewer can find every exception with one search.
+- **Deny-by-default is the grammar, not a convention.** A route without `@guard` or `@public("why")` isn't a warning. It isn't a valid program.
+- **No hiding places.** Parvez has no macros, no `unsafe`, no procedural attributes and no inline Rust, so every line the checks need to see is in one syntax tree they read in full. The request-data tracking follows values through helpers, modules, traits, generics, objects, `state:` and database reads, with no depth limit.
+
+The short version: **you can't lint a language that permits everything into safety. You can only shrink what it permits.** Rust has to allow everything a systems language needs; a checker on top of it has an unbounded surface to cover. Parvez is small on purpose, so its checks can cover nearly all of it.
+
+"Nearly" is deliberate. Parvez programs can call any Rust crate, and a crate function the rules don't know about can still reach a dangerous sink: for example, a third-party process-spawning library that isn't `std::process::Command`. The [known blind spots](../SECURITY.md#rules) are listed and kept in a test suite that fails if they change, so the list stays honest.
+
+## Why that matters now: agents and tired people
+
+The bet isn't on experts. Experts with good tooling are already fine. It's on the code that gets written fast:
+
+- **By AI agents.** An agent learns all of Parvez from one file ([SPEC.md](../SPEC.md), written as a system prompt), checks its own work with `parvez mcp`, and gets errors that point at the `.prvz` line it wrote, not at generated code. It can't silence a check, because there's nothing to silence it with except a written, visible waiver.
+- **By people at the end of a long day.** The Friday-afternoon endpoint is when the permission check gets forgotten. Parvez makes "forgot" a build error rather than a review comment.
+- **In fewer tokens.** In the one service measured so far, Parvez is 9 lines and 76 tokens where hand-written axum is 48 lines and 402 tokens ([both versions](comparison/)). Smaller code is quicker to review and leaves more of an agent's context for the actual problem. One measurement isn't a law; a larger example and an agent benchmark are next.
+
+## The costs, honestly
+
+Choosing Parvez over Rust means accepting these:
+
+- **Agents know Rust far better.** Models have seen enormous amounts of Rust and almost no Parvez. Parvez depends on its spec being in the agent's context. Whether agents write correct Parvez more reliably than correct Rust hasn't been measured yet; that benchmark is planned, with published prompts and transcripts.
+- **A smaller toolbox.** No editor plugin or language server yet, a young ecosystem, one maintainer, and pre-1.0 syntax that can still change.
+- **Less expressive by design.** No macros, lifetimes or `unsafe`. When you need them, you leave.
+- **Leaving is cheap, though.** `parvez show` prints the generated Rust, and the `Cargo.toml` is already in `.parvez_build/`. You end up with a normal Rust project, not a migration.
+
+## When to choose which
+
+| Choose Rust (with `secrecy`, `sqlx::query!`, Clippy, `cargo-deny`) | Choose Parvez |
+|---|---|
+| An experienced Rust team owns the code long-term | Agents write much of the code, or many people touch it briefly |
+| You need macros, lifetimes, `unsafe`, or full control | It's a backend service or a DevOps tool, the shape Parvez is built for |
+| You'll maintain the lint setup in every repository | You want the checks on by default, with exceptions visible |
+| You need SQL checked against the real schema | Readable Rust as a way out is enough insurance |
+
+Both are reasonable. Parvez exists for the right-hand column.
