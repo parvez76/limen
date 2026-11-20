@@ -972,3 +972,164 @@ socket "/ws/{room}" (state, auth, room: str, conn):
     a.send(8, &1000u16.to_be_bytes());
     assert_eq!(a.recv().0, 8);
 }
+
+#[test]
+fn frontend_bridge_and_typed_pages() {
+    let dir = scratch("frontend8");
+    std::fs::create_dir_all(dir.join("ui")).unwrap();
+    std::fs::write(
+        dir.join("main.prvz"),
+        r#"@embed_dir("dist")
+import ui.dashboard
+route GET "/api" -> models::Card:
+    ret models::card()
+"#,
+    )
+    .unwrap();
+    let model = r#"const LEVEL: i32 = if true: 8 else: 7
+const TITLE: str = "Parvez"
+@json
+type Card: title: str, level: i32, kind: Kind
+@json
+enum Kind: New, Old
+fn unwrap(x: i32?) -> i32:
+    if let Some(v) = x: ret v
+    ret 0
+fn result(x: Result<i32, str>) -> i32:
+    if let Ok(v) = x: ret v
+    ret 0
+fn card() -> Card:
+    ret Card(title: TITLE, level: result(Ok(unwrap(Some(LEVEL)))), kind: New)
+"#;
+    std::fs::write(dir.join("models.prvz"), model).unwrap();
+    let page = r#"import models
+page GET "/card/{name}" (name: str) -> html:
+    let card = models::card()
+    main:
+        h1 {card.title} {models::LEVEL}
+        p(title="{name}") {name}
+        button(hx-get="/api") {card.kind}
+@allow_unsafe_html("fragment from our static layout")
+page GET "/trusted" -> html:
+    raw {"<b>ok</b>"}
+"#;
+    let page_path = dir.join("ui/dashboard.msd");
+    std::fs::write(&page_path, page).unwrap();
+    let ts = run_in(&dir, &["types", "--ts", "--out", "types.ts"]);
+    assert!(ts.status.success(), "{}", text(&ts.stderr));
+    let ts = std::fs::read_to_string(dir.join("types.ts")).unwrap();
+    for want in [
+        "export type Card",
+        "export type Kind = \"New\" | \"Old\"",
+        "\"GET /api\"",
+        "response: Card",
+        "params: { \"name\": string }",
+    ] {
+        assert!(ts.contains(want), "{ts}");
+    }
+    std::fs::create_dir_all(dir.join("dist/static")).unwrap();
+    std::fs::write(dir.join("dist/index.html"), "<main>spa</main>").unwrap();
+    std::fs::write(dir.join("dist/static/app.js"), "let app = 8;").unwrap();
+    std::fs::create_dir_all(dir.join("dist/about")).unwrap();
+    std::fs::write(dir.join("dist/about/index.html"), "<main>about</main>").unwrap();
+    let out = run_in(&dir, &["build", "main.prvz"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    std::fs::rename(dir.join("dist"), dir.join("offline-dist")).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let _server = KillOnDrop(
+        Command::new(dir.join("main"))
+            .env("PORT", port.to_string())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let request = |path: &str| {
+        http_raw(
+            port,
+            format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+    };
+    let html = request("/card/%3C%26%3E%22%27");
+    let safe = "&lt;&amp;&gt;&quot;&#39;";
+    assert!(
+        html.contains("text/html")
+            && html.ends_with(&format!(
+                "<main><h1>Parvez 8</h1><p title=\"{safe}\">{safe}</p><button hx-get=\"/api\">New</button></main>"
+            )),
+        "{html}"
+    );
+    assert!(request("/trusted").ends_with("<b>ok</b>"));
+    assert!(request("/api").ends_with(r#"{"title":"Parvez","level":8,"kind":"New"}"#));
+    let asset = request("/static/app.js?v=8");
+    assert!(asset.contains("text/javascript") && asset.ends_with("let app = 8;"));
+    assert!(request("/about/").ends_with("<main>about</main>"));
+    // SPA fallback only for browser navigations; API clients get the JSON 404
+    let navigate = |path: &str| {
+        http_raw(
+            port,
+            format!("GET {path} HTTP/1.1\r\nHost: t\r\nAccept: text/html,application/xhtml+xml\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+    };
+    assert!(navigate("/client/nested").ends_with("<main>spa</main>"));
+    let api_typo = request("/api/v1/typo");
+    assert!(api_typo.starts_with("HTTP/1.1 404") && api_typo.ends_with(r#"{"error":"not found"}"#), "{api_typo}");
+    assert!(request("/static/missing.css").starts_with("HTTP/1.1 404"));
+    // unknown paths are 404 for every method, not 405
+    assert_eq!(http(port, "POST", "/client/nested", ""), (404, r#"{"error":"not found"}"#.into()));
+    assert_eq!(http(port, "DELETE", "/static/app.js", "").0, 404);
+
+    std::fs::rename(dir.join("offline-dist"), dir.join("dist")).unwrap();
+    std::fs::write(dir.join("models.prvz"), model.replace("title:", "label:")).unwrap();
+    let check = run_in(&dir, &["check", "main.prvz"]);
+    assert!(
+        !check.status.success() && text(&check.stderr).contains("dashboard.msd:5: error[E0609]"),
+        "{}",
+        text(&check.stderr)
+    );
+}
+
+#[test]
+fn generated_typescript_passes_tsc_strict() {
+    if Command::new("npx").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("skipping: npx (Node.js) not installed");
+        return;
+    }
+    let dir = scratch("tsc8");
+    std::fs::write(
+        dir.join("main.prvz"),
+        "@json\ntype User:\n    id: u32\n    name: str\n    @default\n    tags: [str]\n    note: str?\n\n@json\nenum Kind: Admin, Member(str)\n\n@json\ntype Q: page: u32\n\nroute GET \"/users/{id}\" (id: u32, query: Q) -> User:\n    ret User(id: id, name: \"a\", tags: [], note: None)\n\nroute POST \"/users\" (body: User) -> Kind:\n    ret Kind::Admin\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["types", "--ts", "main.prvz", "--out", "types.ts"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    std::fs::write(
+        dir.join("use.ts"),
+        r#"import type { User, UserInput, Kind, Routes } from "./types";
+const u: User = { id: 1, name: "a", tags: [], note: null };
+const input: UserInput = { id: 1, name: "a" };
+const k: Kind[] = ["Admin", { Member: "x" }];
+const p: Routes["GET /users/{id}"]["params"] = { id: 7 };
+const q: Routes["GET /users/{id}"]["query"] = { page: 1 };
+const b: Routes["POST /users"]["body"] = input;
+const r: Routes["POST /users"]["response"] = k[0];
+// @ts-expect-error a string is not a number: the types must reject it
+const bad: User = { id: "1", name: "a", tags: [], note: null };
+export { u, p, q, b, r, bad };
+"#,
+    )
+    .unwrap();
+    let tsc = Command::new("npx")
+        .args(["-y", "-p", "typescript@5.6.3", "tsc", "--strict", "--noEmit", "--target", "es2020", "--moduleResolution", "node", "use.ts", "types.ts"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(tsc.status.success(), "tsc --strict failed:\n{}{}", text(&tsc.stdout), text(&tsc.stderr));
+}

@@ -62,6 +62,7 @@ cargo install --path .
 
 | Command | What it does |
 |---|---|
+| `parvez types --ts app.prvz --out types.ts` | Exports TypeScript request, response, and JSON model types across imports |
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz` | Builds a release binary and writes it to `./app` |
@@ -71,6 +72,44 @@ cargo install --path .
 | `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
 
 Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reuses that cache between builds.
+
+## Full-stack services in v0.8
+
+A service can serve a static build, JSON endpoints, and Masud HTML pages from one binary. For example, put this in `main.prvz`.
+
+```
+@embed_dir("web/dist")
+import models
+import ui.dashboard
+
+route GET "/api/summary" -> models::Summary:
+    ret models::summary()
+```
+
+Use ordinary Parvez types in `models.prvz`.
+
+```
+const TARGET: i32 = 8
+@json
+type Summary: label: str
+
+fn summary() -> Summary:
+    label = if TARGET >= 8: "Ready" else: "Waiting"
+    ret Summary(label: label)
+```
+
+In `ui/dashboard.msd`, indentation nests elements and braces interpolate escaped values. Changing the backend field name makes `parvez check main.prvz` point to the reference in this page.
+
+```
+import models
+page GET "/dashboard" -> html:
+    let summary = models::summary()
+    main:
+        h1 Dashboard
+        p {summary.label}
+```
+
+Run `parvez types --ts --out web/types.ts` before building the frontend. Build the frontend into `web/dist`, then run `parvez build main.prvz`. The resulting binary serves `/dashboard`, `/api/summary`, and the frontend's assets and client-side routes.
 
 ## Language at a glance
 
@@ -85,6 +124,7 @@ Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reu
 | `print("hi {name}")` | `println!("hi {}", name)` |
 | `fail("bad {x}")` | `anyhow::bail!("bad {}", x)` |
 | `and` `or` `not` | `&&` `\|\|` `!` |
+| `if let Some(v) = opt: print(v)` | `if let Some(v) = opt { println!("{}", v); }` |
 | `enum S: A, B(str), C(code: i32)` | `#[derive(Debug, Clone, PartialEq)] enum S { A, B(String), C { code: i32 } }` |
 | `match s:` / `B(msg) -> print(msg)` | `match s { S::B(msg) => println!(..), .. }` |
 | `impl User:` / `fn greet(&self)`, `fn bump(&~self)` | `impl User { fn greet(&self) .. fn bump(&mut self) .. }` |
@@ -136,7 +176,7 @@ Run the tests with `cargo test`. The tests in `tests/cli.rs` compile real progra
 
 ## Status
 
-This is v0.7. These aren't supported yet: traits, generics on your own types, `as` casts, macros and constants. When you need one of them, run `parvez show` and continue in Rust.
+Parvez v0.8 includes Masud v0.1. For traits, generics on your own types, `as` casts, or Rust macros, use `parvez show` to continue in Rust.
 
 ## License
 

@@ -45,6 +45,17 @@ pub struct ImportDef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
+    Const {
+        name: String,
+        ty: Type,
+        value: Expr,
+        line: usize,
+    },
+    Embed {
+        dir: String,
+        files: Vec<(String, std::path::PathBuf)>,
+        line: usize,
+    },
     Fn(FnDef),
     Struct(StructDef),
     Enum(EnumDef),
@@ -78,6 +89,7 @@ pub struct UseDef {
 /// `route POST "/events/{id}" (id: str, body: Event) -> Event!:`
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteDef {
+    pub page: bool,
     /// GET, POST, PUT, PATCH, DELETE
     pub method: String,
     pub path: String,
@@ -237,6 +249,7 @@ pub struct Located {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    Render(Vec<HtmlPart>),
     /// `x = e`, `~x = e`, `x: T = e`. Codegen turns `x = e` into an
     /// assignment when `x` is an already-declared mutable binding.
     Let {
@@ -262,6 +275,12 @@ pub enum Stmt {
     While { cond: Expr, body: Block },
     Break,
     Continue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HtmlPart {
+    Markup(String),
+    Value(Expr, bool), // true only for explicitly authorized raw output
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -301,6 +320,9 @@ pub enum Pat {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// Only produced for statement conditions.
+    LetPat(Box<Pat>, Box<Expr>),
     Int(String),
     Float(String),
     /// `'a'` (raw body, escapes kept)
@@ -356,6 +378,13 @@ pub fn visit_exprs(b: &Block, f: &mut dyn FnMut(&Expr)) {
 
 fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
     match s {
+        Stmt::Render(parts) => {
+            for p in parts {
+                if let HtmlPart::Value(x, _) = p {
+                    visit_expr(x, f);
+                }
+            }
+        }
         Stmt::Let { value, .. } => visit_expr(value, f),
         Stmt::Assign { target, value, .. } => {
             visit_expr(target, f);
@@ -412,6 +441,12 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         Expr::Unary(_, x) | Expr::Ref(x, _) | Expr::Field(x, _) | Expr::Try(x) | Expr::Await(x) | Expr::Named(_, x) => {
             visit_expr(x, f)
         }
+        Expr::If(c, a, b) => {
+            for e in [c, a, b] {
+                visit_expr(e, f);
+            }
+        }
+        Expr::LetPat(_, x) => visit_expr(x, f),
         Expr::Match(x, arms) => {
             visit_expr(x, f);
             for a in arms {

@@ -17,6 +17,33 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
             Tok::Enum => items.push(Item::Enum(p.parse_enum()?)),
             Tok::Impl => items.push(Item::Impl(p.parse_impl()?)),
             Tok::Use => items.push(Item::Use(p.parse_use()?)),
+            Tok::Ident(k) if k == "const" => {
+                let line = p.line();
+                p.next();
+                let name = p.ident("constant name")?;
+                p.expect(Tok::Colon, "constant type")?;
+                let ty = p.parse_type()?;
+                p.expect(Tok::Assign, "`=`")?;
+                let value = p.parse_expr()?;
+                p.end_stmt()?;
+                items.push(Item::Const { name, ty, value, line });
+            }
+            Tok::At if matches!(p.peek_at(1), Tok::Ident(k) if k == "embed_dir") => {
+                let line = p.line();
+                p.next();
+                p.next();
+                p.expect(Tok::LParen, "`(`")?;
+                let Tok::Str(dir) = p.next() else {
+                    bail!("line {line}: expected directory string")
+                };
+                p.expect(Tok::RParen, "`)`")?;
+                p.end_stmt()?;
+                items.push(Item::Embed {
+                    dir,
+                    files: vec![],
+                    line,
+                });
+            }
             Tok::At => {
                 let line = p.line();
                 let attrs = p.parse_attrs()?;
@@ -110,6 +137,23 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 /// `fn main` vs routes, duplicate routes.
 pub fn validate(prog: &Program) -> Result<()> {
     let all = prog.all_items();
+    let mut embedded = false;
+    for (module, item) in &all {
+        if let Item::Embed { line, .. } = item {
+            if embedded || !module.is_empty() {
+                bail!("line {line}: @embed_dir belongs once in the main file");
+            }
+            embedded = true;
+        }
+    }
+    if embedded
+        && let Some(f) = prog.items.iter().find_map(|i| match i {
+            Item::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+    {
+        bail!("line {}: @embed_dir generates the server main", f.line);
+    }
     let routes: Vec<(&[String], &RouteDef)> =
         all.iter().filter_map(|(m, i)| if let Item::Route(r) = i { Some((*m, r)) } else { None }).collect();
     let states: Vec<(&[String], &StateDef)> =
@@ -122,6 +166,7 @@ pub fn validate(prog: &Program) -> Result<()> {
     }
     if let Some((_, s)) = states.first()
         && routes.is_empty()
+        && !embedded
     {
         bail!("line {}: `state:` is shared by `route`s, but this program has none", s.line);
     }
@@ -183,6 +228,20 @@ pub fn validate(prog: &Program) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn page_binding(source: &str, line: usize) -> Result<Located> {
+    let mut p = Parser {
+        toks: lex_from(source, line)?,
+        pos: 0,
+        depth: 0,
+    };
+    let stmt = p.parse_stmt()?;
+    p.skip_newlines();
+    if !matches!(&stmt.stmt, Stmt::Let { name, .. } if name != "__masud") || p.peek() != &Tok::Eof {
+        bail!("line {line}: expected a page binding, e.g. let user = models::user()");
+    }
+    Ok(stmt)
 }
 
 struct Parser {
@@ -675,6 +734,7 @@ impl Parser {
         }
         let body = self.parse_block()?;
         Ok(RouteDef {
+            page: false,
             method,
             path,
             params,
@@ -852,7 +912,21 @@ impl Parser {
 
     fn parse_stmt_kind(&mut self) -> Result<Stmt> {
         match self.peek().clone() {
-            Tok::If => self.parse_if(),
+            Tok::If => {
+                if self.toks[self.pos..]
+                    .iter()
+                    .take_while(|t| t.tok != Tok::Newline)
+                    .any(|t| t.tok == Tok::Else)
+                {
+                    let start = self.pos;
+                    if let Ok(value) = self.parse_expr() {
+                        self.end_stmt()?;
+                        return Ok(Stmt::Expr(value));
+                    }
+                    self.pos = start;
+                }
+                self.parse_if()
+            }
             Tok::For => {
                 self.next();
                 let var = if self.eat(&Tok::LParen) {
@@ -969,17 +1043,31 @@ impl Parser {
         }
     }
 
+    fn condition(&mut self) -> Result<Expr> {
+        if matches!(self.peek(), Tok::Ident(s) if s == "let") {
+            let start = self.pos;
+            self.next();
+            if let Ok(pat) = self.parse_pat()
+                && self.eat(&Tok::Assign)
+            {
+                return Ok(Expr::LetPat(Box::new(pat), Box::new(self.parse_expr()?)));
+            }
+            self.pos = start;
+        }
+        self.parse_expr()
+    }
+
     fn parse_if(&mut self) -> Result<Stmt> {
         self.expect(Tok::If, "`if`")?;
-        let mut branches = vec![(self.parse_expr()?, self.parse_block()?)];
+        let mut branches = vec![(self.condition()?, self.parse_block()?)];
         let mut els = None;
         loop {
             self.skip_newlines();
             if self.eat(&Tok::Elif) {
-                branches.push((self.parse_expr()?, self.parse_block()?));
+                branches.push((self.condition()?, self.parse_block()?));
             } else if self.eat(&Tok::Else) {
                 if self.eat(&Tok::If) {
-                    branches.push((self.parse_expr()?, self.parse_block()?));
+                    branches.push((self.condition()?, self.parse_block()?));
                     continue;
                 }
                 els = Some(self.parse_block()?);
@@ -1255,6 +1343,14 @@ impl Parser {
                 self.pos -= 1;
                 self.parse_closure(false)?
             }
+            Tok::If => {
+                let c = self.parse_expr()?;
+                self.expect(Tok::Colon, "`:` after condition")?;
+                let a = self.parse_expr()?;
+                self.expect(Tok::Else, "`else` in conditional expression")?;
+                self.expect(Tok::Colon, "`:` after else")?;
+                Expr::If(Box::new(c), Box::new(a), Box::new(self.parse_expr()?))
+            }
             Tok::Match => self.parse_match(line)?,
             Tok::LBracket => {
                 let mut items = Vec::new();
@@ -1387,7 +1483,7 @@ pub fn path_params(path: &str) -> Vec<String> {
 
 /// Split a raw string body into literal text and `{expr[:spec]}` holes.
 /// `{{` / `}}` are literal braces.
-fn parse_str(raw: &str, line: usize) -> Result<Vec<StrPart>> {
+pub(crate) fn parse_str(raw: &str, line: usize) -> Result<Vec<StrPart>> {
     let c: Vec<char> = raw.chars().collect();
     let mut parts = Vec::new();
     let mut lit = String::new();
@@ -1437,16 +1533,30 @@ fn parse_str(raw: &str, line: usize) -> Result<Vec<StrPart>> {
                     bail!("line {line}: unclosed `{{` in string (use `{{{{` for a literal brace)");
                 }
                 let inner: String = c[i + 1..j].iter().collect();
+                let full = |src: &str| -> Result<Expr> {
+                    let mut p = Parser {
+                        toks: lex_from(src, line)?,
+                        pos: 0,
+                        depth: 0,
+                    };
+                    let e = p.parse_expr()?;
+                    p.skip_newlines();
+                    if p.peek() != &Tok::Eof {
+                        bail!("line {line}: invalid interpolation {{{inner}}}");
+                    }
+                    Ok(e)
+                };
                 let (src, spec) = split_spec(&inner);
                 if src.trim().is_empty() {
                     bail!("line {line}: empty `{{}}` in string; write `{{expr}}`");
                 }
-                let mut p = Parser { toks: lex_from(src, line)?, pos: 0, depth: 0 };
-                let e = p.parse_expr()?;
-                p.skip_newlines();
-                if p.peek() != &Tok::Eof {
-                    bail!("line {line}: invalid expression in string interpolation `{{{inner}}}`");
-                }
+                let (e, spec) = if spec.is_some()
+                    && let Ok(e) = full(&inner)
+                {
+                    (e, None)
+                } else {
+                    (full(src)?, spec)
+                };
                 if !lit.is_empty() {
                     parts.push(StrPart::Lit(std::mem::take(&mut lit)));
                 }

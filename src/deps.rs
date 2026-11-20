@@ -16,6 +16,7 @@ use toml::{Table, Value};
 
 /// (module name, package name, version, features, default-features)
 const KNOWN: &[(&str, &str, &str, &[&str], bool)] = &[
+    ("percent_encoding", "percent-encoding", "2", &[], true),
     ("anyhow", "anyhow", "1", &[], true),
     ("tokio", "tokio", "1", &["full"], true),
     ("axum", "axum", "0.8", &[], true),

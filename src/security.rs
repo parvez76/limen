@@ -63,6 +63,10 @@ pub fn lint(prog: &Program) -> Report {
     let mut allowed = Vec::new();
     for (_, item) in prog.all_items() {
         match item {
+            Item::Const { name, value, line, .. } => {
+                l.secret_binding(name, value, *line);
+                l.expr(value, *line, &Cx::default());
+            }
             Item::Fn(f) => l.function(f, &mut allowed),
             Item::Impl(i) => i.methods.iter().for_each(|m| l.function(m, &mut allowed)),
             Item::Route(r) => {
@@ -134,6 +138,13 @@ impl Linter {
 
     fn stmt(&mut self, s: &Stmt, line: usize, cx: &mut Cx) {
         match s {
+            Stmt::Render(parts) => {
+                for p in parts {
+                    if let HtmlPart::Value(e, _) = p {
+                        self.expr(e, line, cx);
+                    }
+                }
+            }
             Stmt::Let { name, value, .. } => {
                 self.secret_binding(name, value, line);
                 self.expr(value, line, cx);
@@ -170,7 +181,16 @@ impl Linter {
             Stmt::If { branches, els } => {
                 for (c, b) in branches {
                     self.expr(c, line, cx);
-                    self.block(b, &mut cx.clone());
+                    let mut inner = cx.clone();
+                    if let Expr::LetPat(p, x) = c {
+                        if tainted(x, cx) {
+                            inner.taint.extend(pattern_binds(p));
+                        }
+                        if is_dynamic(x, cx) {
+                            inner.dynamic.extend(pattern_binds(p));
+                        }
+                    }
+                    self.block(b, &mut inner);
                 }
                 if let Some(b) = els {
                     self.block(b, &mut cx.clone());
@@ -239,6 +259,12 @@ impl Linter {
             Expr::Unary(_, x) | Expr::Ref(x, _) | Expr::Field(x, _) | Expr::Try(x) | Expr::Await(x) => {
                 self.expr(x, line, cx)
             }
+            Expr::If(c, a, b) => {
+                for e in [c, a, b] {
+                    self.expr(e, line, cx);
+                }
+            }
+            Expr::LetPat(_, x) => self.expr(x, line, cx),
             Expr::Match(scrut, arms) => {
                 self.expr(scrut, line, cx);
                 for arm in arms {
@@ -360,6 +386,7 @@ fn is_dynamic(e: &Expr, cx: &Cx) -> bool {
         Expr::Binary(a, op, b) if op == "+" => {
             is_dynamic(a, cx) || is_dynamic(b, cx) || matches!(**a, Expr::Str(_)) || matches!(**b, Expr::Str(_))
         }
+        Expr::If(_, a, b) => is_dynamic(a, cx) || is_dynamic(b, cx),
         Expr::Ident(n) => cx.dynamic.contains(n),
         Expr::Ref(x, _) | Expr::Try(x) => is_dynamic(x, cx),
         Expr::Method(x, m, _, _) if matches!(m.as_str(), "as_str" | "clone" | "to_string" | "trim") => is_dynamic(x, cx),
@@ -371,6 +398,8 @@ fn is_dynamic(e: &Expr, cx: &Cx) -> bool {
 /// Does the expression carry request-derived data? `safe_join(..)` cleans it.
 fn tainted(e: &Expr, cx: &Cx) -> bool {
     match e {
+        Expr::If(c, a, b) => [c, a, b].iter().any(|x| tainted(x, cx)),
+        Expr::LetPat(_, x) => tainted(x, cx),
         Expr::Ident(n) => cx.taint.contains(n),
         Expr::Call(n, _, _) if n == "safe_join" => false,
         Expr::Call(_, _, args) => args.iter().any(|a| tainted(a, cx)),

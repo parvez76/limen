@@ -4,12 +4,15 @@ mod ast;
 mod audit;
 mod codegen;
 mod deps;
-mod fuzz;
 mod diagnostics;
+mod embed;
+mod fuzz;
 mod lexer;
+mod masud;
 mod mcp;
 mod parser;
 mod security;
+mod typescript;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -32,6 +35,15 @@ enum Cmd {
     Check { file: PathBuf },
     /// Run an MCP server on stdio (tools: parvez_spec, parvez_check, parvez_eject).
     Mcp,
+    /// Emit the JSON models and HTTP contracts of an entry point and its imports.
+    Types {
+        #[arg(long, required = true)]
+        ts: bool,
+        #[arg(default_value = "main.prvz")]
+        file: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Update dependencies to patched compatible releases; report what still needs a major upgrade.
     Heal { file: PathBuf },
     /// Build the service, start it, and fire malformed/edge-case requests at every route.
@@ -83,6 +95,15 @@ fn real_main() -> Result<()> {
             compile(&file, Mode::Check)?;
             eprintln!("parvez: ok {}", file.display());
         }
+        Cmd::Types { file, out, .. } => {
+            let prog = load_program(&file)?;
+            let ts = typescript::generate(&prog)?;
+            if let Some(out) = out {
+                write_if_changed(&out, &ts)?;
+            } else {
+                print!("{ts}");
+            }
+        }
         Cmd::Mcp => mcp::serve()?,
         Cmd::Heal { file } => heal(&file)?,
         Cmd::Fuzz { file } => {
@@ -114,7 +135,17 @@ fn real_main() -> Result<()> {
 
 /// .prvz source -> (source text, Rust source + source map).
 pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
-    let (src, prog) = parse_checked(file)?;
+    let (src, mut prog) = parse_checked(file)?;
+    let base = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    for item in &mut prog.items {
+        if let ast::Item::Embed { dir, files, line } = item {
+            *files =
+                embed::assets(base, dir).with_context(|| format!("{}:{line}: @embed_dir({dir:?})", file.display()))?;
+        }
+    }
     Ok((src, codegen::generate_with(&prog, &deps::service_config(file)?)))
 }
 
@@ -155,14 +186,26 @@ fn load_into(file: &Path, files: &mut Vec<(String, String)>) -> Result<ast::Prog
             continue;
         }
         let rel = format!("{}.prvz", imp.path.join("/"));
-        let path = base.join(&rel);
+        let mut path = base.join(&rel);
+        let msd = path.with_extension("msd");
+        if msd.exists() {
+            if path.exists() {
+                bail!("line {}: ambiguous module: both {rel} and .msd exist", imp.line);
+            }
+            path = msd;
+        }
         if !path.exists() {
             bail!("line {}: `import {}`: no file {rel} next to the main file", imp.line, imp.path.join("."));
         }
         let k = files.len();
         let msrc = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         files.push((path.display().to_string(), msrc.clone()));
-        let mitems = parser::parse_items(lexer::lex_from(&msrc, k * ast::FILE_STRIDE + 1)?)?;
+        let start = k * ast::FILE_STRIDE + 1;
+        let mitems = if path.extension().is_some_and(|e| e == "msd") {
+            masud::parse(&msrc, start)?
+        } else {
+            parser::parse_items(lexer::lex_from(&msrc, start)?)?
+        };
         queue.extend(imports(&mitems));
         modules.push(ast::Module { path: imp.path, items: mitems });
     }
@@ -205,7 +248,7 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     }
     let has_main = prog.all_items().iter().any(|(m, i)| match i {
         ast::Item::Fn(f) => m.is_empty() && f.name == "main",
-        ast::Item::Route(_) => true, // routes generate the server's main
+        ast::Item::Route(_) | ast::Item::Embed { .. } => true, // routes generate the server's main
         _ => false,
     });
     if !has_main {

@@ -1,4 +1,4 @@
-# PARVEZ v0.7 SPEC (AI system prompt)
+# PARVEZ v0.8 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -17,10 +17,11 @@ You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, 
 - Keywords can be field names (`e.type`, `Event(type: "x")`, `type E: type: str`). Rust keywords such as `gen`, `move` and `loop` work as any name; Parvez escapes them (`r#gen`), and JSON still sees `"type"`.
 
 ## Files and modules
-`import store` loads `store.prvz`, and `import auth.tokens` loads `auth/tokens.prvz` (paths are relative to the main file). Refer to a module's items as `store::find(id)` or `store::Item`. Inside a module, its own names come first, then the main file's. Modules may hold `fn`, `type`, `enum`, `impl`, `use`, `route` and `socket`; `state:` and `fn main` stay in the main file. Errors name the file: `auth/tokens.prvz:12: ...`.
+`import store` loads `store.prvz`, and `import auth.tokens` loads `auth/tokens.prvz` (paths are relative to the main file). Refer to a module's items as `store::find(id)` or `store::Item`. Inside a module, its own names come first, then the main file's. An import can also resolve to a Masud `.msd` module. A module path must resolve to a single file. Modules may hold `const`, `fn`, `type`, `enum`, `impl`, `use`, `route` and `socket`; `state:` and `fn main` stay in the main file. Errors name the file: `auth/tokens.prvz:12: ...`.
 
-## Top level (`import`, `use`, `fn`, `type`, `enum`, `impl`, `state`, `route`, `socket`; needs `fn main` or at least one `route`)
+## Top level
 ```
+const MIN_AGE: u8 = 18                 # public as people::MIN_AGE in module people
 type User: name: str, age: u8          # one line; block form = one field per line
 enum Status:                           # or one line: enum Color: Red, Green, Blue
     Active                             # unit
@@ -40,6 +41,17 @@ async fn fetch(u: &str) -> str!:       # async; `async fn main` runs on tokio
 ```
 Every `type` and `enum` derives `Debug, Clone, PartialEq`. Decorators go on the line(s) above: `@json` adds serde `Serialize, Deserialize`; `@derive(Hash, Eq)` adds more derives.
 Field decorators on a `@json` type (block form, on the line above the field): `@rename("type")` sets the JSON name, `@default` makes a missing field take its default, and `@omit_none` leaves out a `T?` field that is `None`.
+
+Rust checks constant initializers at compile time. A `str` constant stores static string data. Parvez converts it to an owned string in typed value positions.
+
+```
+fn label(count: i32?) -> str:
+    if let Some(n) = count:
+        ret if n == 1: "one" else: "many"
+    ret "unknown"
+```
+
+An `if` expression evaluates one branch and requires an `else` and compatible branch types. Statement conditions support `if let PATTERN = expr`, including `Some(v)` and `Ok(v)`. Pattern variables are scoped to the matching branch.
 
 ## Crates
 `use serde::{Serialize, Deserialize}`, `use std::collections::HashMap`, `use reqwest` (declares the dependency only). Dependencies are detected from `use` lines and from known crate paths such as `reqwest::get(u)` or `tokio::time::sleep(d)`, and written into Cargo.toml automatically. Known crates: tokio axum serde serde_json reqwest chrono uuid regex rand tracing tracing_subscriber tower_http futures clap base64 sha2 hmac hex ed25519_dalek subtle jsonwebtoken redis thiserror sqlx (postgres + chrono/uuid/json/derive/migrate). Other crates resolve to the latest version. To pin a crate or add features, put them in `parvez.toml` next to the `.prvz` file:
@@ -128,6 +140,39 @@ state:
     spawn retention(db.clone())          # e.g. an async fn with `loop:` + tokio::time::interval
 ```
 
+## Embedded frontend and TypeScript
+
+Place `@embed_dir("web/dist")` on its own line in the entry file. The directory is relative to that file and must contain `index.html`. Build the frontend first, using static export for Next.js. The compiler embeds regular files recursively and rejects symlinks. A service can consist entirely of this directive.
+
+Explicit routes and pages take precedence. GET and HEAD serve assets with extension-based MIME types, directory indexes and extensionless HTML exports. Unmatched extensionless paths serve the root index for SPA navigation, but only to browser navigations (`Accept: text/html`). An API client calling a wrong path gets the JSON 404. Missing file-like paths return 404, and methods other than GET/HEAD on unmatched paths return 404 too.
+
+`parvez types --ts [entry.prvz] [--out types.ts]` follows transitive imports from `main.prvz` by default. It works before the frontend build exists. Without `--out` it writes to stdout. It exports each `@json` model, a corresponding `Input` type that accounts for serde defaults, and `Routes` indexed by method and path. For example, `Routes["POST /events/{id}"]["body"]` is the JSON request type. Path parameters live in `params`, query parameters in `query`, and the success payload in `response`. Unit enum variants become string literals and variants with payloads become externally tagged unions.
+
+## Masud v0.1
+
+Import a page module with `import ui.dashboard`. In `ui/dashboard.msd`, import backend modules just as in Parvez. Page headers accept the route parameter syntax. The renderer supports local `let` bindings, Parvez expressions, and serializable values. Strings render as text, other values use their JSON representation.
+
+```
+import models
+page GET "/users/{id}" (id: u32) -> html:
+    let user = models::find(id)?
+    main:
+        h1 {user.name}
+        button(hx-get="/users" hx-target="#list") Refresh
+        div(id="list") {user.status}
+```
+
+A trailing colon opens children. Attributes use double quotes inside parentheses. Load a local htmx bundle with `script(src="/assets/htmx.min.js")`. Text and plain text attributes such as `title`, `alt`, and `aria-label` accept interpolation. The compiler escapes ampersands, angle brackets, and both quote characters. URL and htmx attributes take literals. Inline scripts and event-handler attributes are outside the template grammar.
+
+A page can insert a trusted fragment with an explicit raw line. Other interpolations on the same page still escape their values.
+
+```
+@allow_unsafe_html("fragment generated by the trusted Markdown sanitizer")
+page GET "/help" -> html:
+    article:
+        raw {models::sanitized_help()}
+```
+
 ## Types
 | Parvez | Rust |
 |---|---|
@@ -196,7 +241,7 @@ label = match code:
 - Integer literals default to `i32`. Annotate when you need another type: `x: u64 = 5`.
 - A fallible call in a non-`!` fn needs explicit handling, e.g. `.unwrap_or(0)` or `.is_err()`.
 - Casts (`as`) don't exist yet. Use typed literals (`x: u64 = 5`) or `.into()` / `T::from(x)` / `.try_into()?`.
-- Not supported yet: traits, generics on your own types, macros (`vec!`, `json!`), constants, and `if` as an expression (use `match cond: true -> a  false -> b`). If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
+- Not supported yet: traits, generics on your own types, macros (`vec!`, `json!`). If you need one of these, run `parvez show f.prvz -o f.rs` and write Rust.
 
 ## Security (enforced at compile time)
 Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `= fix: ...`). Write the safe form from the start:
