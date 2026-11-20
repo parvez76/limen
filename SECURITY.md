@@ -50,6 +50,12 @@ git clone https://github.com/parvez76/project-parvez && cd project-parvez && git
 grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 ```
 
+Release tags from v0.16.0 on are signed with the project's SSH signing key, listed in [`.github/allowed_signers`](.github/allowed_signers) (fingerprint `SHA256:FRGXW2DjW+ITeT31kbI1ZZTrpXsglQBuWgcIS4/q4JA`). GitHub shows them as Verified; to check locally:
+
+```bash
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.16.0
+```
+
 Installing from source (`cargo install --git https://github.com/parvez76/project-parvez --tag v0.16.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
