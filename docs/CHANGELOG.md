@@ -2,6 +2,10 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
+## v0.17.1
+- The repository is now `parvez76/parvez`. The installer moved to `https://parvez76.github.io/parvez/install.sh`; the old address no longer works.
+- `parvez upgrade` and the installer point at the new name, and accept build attestations made under the old one (v0.16.0, v0.17.0).
+
 ## v0.17.0
 - One-line installer: `curl -fsSL https://parvez76.github.io/parvez/install.sh | sh`. It verifies the download against `SHA256SUMS` (and the build attestation when `gh` is installed), installs to `~/.parvez/bin`, updates PATH, offers to install Rust, and says how to install a missing C linker.
 - `parvez upgrade [--version] [--check] [--force]`: verified self-update.

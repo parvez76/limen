@@ -1,4 +1,4 @@
-# PARVEZ v0.17.0 SPEC (AI system prompt)
+# PARVEZ v0.17.1 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
