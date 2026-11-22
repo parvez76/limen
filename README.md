@@ -13,7 +13,7 @@ A small language for HTTP services and command-line tools. It compiles to plain 
 - **Syntax:** indentation-based and compact. A JSON service with two routes and validation is [9 lines](docs/comparison/); a multi-user app with Postgres, sign-in, a page and tests is [about 90](examples/tasks/).
 - **Output:** readable Rust (axum, tokio, serde, sqlx). `rustc` does all type and borrow checking, and errors are mapped back to `.prvz` lines. There's no separate runtime library, and `parvez show` prints the generated Rust if you want to leave.
 - **Scope:** HTTP/JSON services, server-rendered HTML pages, WebSockets, background workers and CLI tools. Programs can call any Rust crate. No macros, lifetimes or `unsafe`.
-- **For AI agents:** [SPEC.md](SPEC.md) is written to be read by an agent (about 3,000 tokens for the core, more by topic), and `parvez mcp` lets an agent check its own code. Whether agents write correct Parvez more reliably than correct Rust **hasn't been measured yet**.
+- **For AI agents:** [SPEC.md](SPEC.md) is written to be read by an agent (about 3,000 tokens for the core, more by topic), and `parvez mcp` lets an agent check its own code. In a [first benchmark](bench/) of 8 small tasks, agents (Sonnet 5.5 and Haiku 5.5) wrote secure services in both Parvez and Rust with good tooling, every time: **no difference measured yet**. Harder tasks are next.
 
 ## What the compiler checks
 

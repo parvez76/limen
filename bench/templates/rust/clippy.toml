@@ -1,0 +1,6 @@
+# Banned calls, with the reason shown in the warning (clippy::disallowed_methods).
+disallowed-methods = [
+  { path = "sqlx::query", reason = "use the sqlx::query! macro so the SQL is checked against the database at compile time" },
+  { path = "sqlx::query_as", reason = "use the sqlx::query_as! macro so the SQL is checked against the database at compile time" },
+  { path = "sqlx::raw_sql", reason = "raw SQL strings bypass parameter binding" },
+]

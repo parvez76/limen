@@ -36,19 +36,31 @@ The short version: **you can't lint a language that permits everything into safe
 
 "Nearly" is deliberate. Parvez programs can call any Rust crate, and a crate function the rules don't know about can still reach a dangerous sink: for example, a third-party process-spawning library that isn't `std::process::Command`. A project can add such functions to the analysis with `[security.sinks]` in `parvez.toml`. The [known blind spots](../SECURITY.md#rules) are listed and kept in a test suite that fails if they change, so the list stays honest.
 
+## Prior art
+
+The idea that some mistakes shouldn't compile is not new. Parvez borrows from work that proved it:
+
+- **[Ur/Web](http://www.impredicative.com/ur/)** (Adam Chlipala, MIT): a language for web applications whose type system rules out SQL injection, cross-site scripting, invalid HTML and broken links at compile time. Its UrFlow analysis ([OSDI 2010](https://www.usenix.org/conference/osdi10/static-checking-dynamically-varying-security-policies-database-backed-applications)) also checks row-level access policies at compile time, which Parvez doesn't yet. It's the closest relative, and its guarantees are stronger than Parvez's in the areas it covers. Scooter & Sidecar (PLDI 2021) brings checked data policies to Rust web apps.
+- **[Jif](https://www.cs.cornell.edu/jif/)** (Cornell): Java extended with information-flow labels, so a value flowing where its label forbids is a compile error. The research foundation for taint tracking.
+- **[Ballerina](https://ballerina.io)** (WSO2): an integration language that put taint checking in the compiler: passing an untrusted value to a parameter marked `@untainted` (an SQL query, a file path) failed the build.
+- **Google's safe coding practices**, for example [`@CompileTimeConstant`](https://errorprone.info/bugpattern/CompileTimeConstant) in Error Prone and safe-HTML types: APIs that accept only constants or trusted types, enforced at build time across a very large codebase. The evidence that this works at scale.
+- **Perl's taint mode** (`perl -T`): the same idea, checked at run time, since the 1990s.
+
+What Parvez adds is a choice of audience. These systems assume an expert writing annotations, or a large company maintaining the tooling. Parvez assumes the author may be an AI agent that reads one specification, so the rules need no annotations, have no switch to turn them off, and are part of the grammar where possible (a route without an access policy isn't a valid program). It also compiles to ordinary Rust, so the way out is short.
+
 ## Why that matters now: agents and tired people
 
 The bet isn't on experts. Experts with good tooling are already fine. It's on the code that gets written fast:
 
 - **By AI agents.** An agent learns all of Parvez from one file ([SPEC.md](../SPEC.md), written as a system prompt), checks its own work with `parvez mcp`, and gets errors that point at the `.prvz` line it wrote, not at generated code. It can't silence a check, because there's nothing to silence it with except a written, visible waiver.
 - **By people at the end of a long day.** The Friday-afternoon endpoint is when the permission check gets forgotten. Parvez makes "forgot" a build error rather than a review comment.
-- **In fewer tokens.** In the one service measured so far, Parvez is 9 lines and 76 tokens where hand-written axum is 48 lines and 402 tokens ([both versions](comparison/)). Smaller code is quicker to review and leaves more of an agent's context for the actual problem. One measurement isn't a law; a larger example and an agent benchmark are next.
+- **In fewer tokens.** In the one service measured so far, Parvez is 9 lines and 76 tokens where hand-written axum is 48 lines and 402 tokens ([both versions](comparison/)). Smaller code is quicker to review and leaves more of an agent's context for the actual problem. One measurement isn't a law; a larger example is next.
 
 ## The costs, honestly
 
 Choosing Parvez over Rust means accepting these:
 
-- **Agents know Rust far better.** Models have seen enormous amounts of Rust and almost no Parvez. Parvez depends on its spec being in the agent's context. Whether agents write correct Parvez more reliably than correct Rust hasn't been measured yet; that benchmark is planned, with published prompts and transcripts.
+- **Agents know Rust far better.** Models have seen enormous amounts of Rust and almost no Parvez. Parvez depends on its spec being in the agent's context. Whether agents write correct Parvez more reliably than correct Rust isn't shown yet: in a [pilot benchmark](../bench/) of 8 small tasks, both languages scored 24 of 24 with two models, and Parvez cost more input tokens because the agent reads its spec first. Harder tasks (changes to an existing service) are next.
 - **A smaller toolbox.** No editor plugin or language server yet, a young ecosystem, one maintainer, and pre-1.0 syntax that can still change.
 - **Less expressive by design.** No macros, lifetimes or `unsafe`. When you need them, you leave.
 - **Leaving is cheap, though.** `parvez show` prints the generated Rust, and the `Cargo.toml` is already in `.parvez_build/`. You end up with a normal Rust project, not a migration.

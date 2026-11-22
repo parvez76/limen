@@ -1,0 +1,1 @@
+CREATE TABLE notes (id SERIAL PRIMARY KEY, owner_id INT NOT NULL REFERENCES users(id), body TEXT NOT NULL);
