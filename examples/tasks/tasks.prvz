@@ -1,0 +1,26 @@
+# Types, the sign-in guard and queries shared by the API (main.prvz) and the page (ui/board.msd).
+
+@json
+@derive(sqlx::FromRow)
+type Task: id: i64, title: str, done: bool
+
+@json
+type NewTask: title: str
+
+@json
+type Update: done: bool
+
+# Every API route and the page need a signed-in user: a bearer token or a browser session.
+async fn me(req) -> Claims!:
+    ret oidc_session(req).await?
+
+fn clean_title(raw: &str) -> str!:
+    t = raw.trim()
+    if t.is_empty() or t.chars().count() > 200: fail(422, code: "invalid_title", "a title is 1 to 200 characters")
+    ret t.to_string()
+
+async fn tasks_of(state, owner: &str) -> [Task]!:
+    ret sqlx::query_as("SELECT id, title, done FROM tasks WHERE owner = $1 ORDER BY id")
+        .bind(owner)
+        .fetch_all(&state.db)
+        .await?

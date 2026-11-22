@@ -136,6 +136,7 @@ Parvez makes security claims, so testing them should be easy. Paste your best at
 - [SPEC.md](SPEC.md): the complete language, written for humans and AI agents
 - [SECURITY.md](SECURITY.md): what Parvez enforces, mapped to CWE, OWASP and ASVS; how to verify a release; how to report a vulnerability
 - [Changelog](docs/CHANGELOG.md)
+- [examples/tasks](examples/tasks/): a multi-user service with Postgres, sign-in, a page and tests, in about 90 lines
 - [examples/](examples/)
 
 ¹ Counting non-blank lines, and tokens with OpenAI's `tiktoken` (`o200k_base`; `cl100k_base` gives 76 and 403). The Rust version handles the same cases: the two routes, the validation error, bad JSON, and JSON 404 and 405 responses. Both versions and how to check them are in [docs/comparison](docs/comparison/).

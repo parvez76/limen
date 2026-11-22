@@ -6,3 +6,6 @@
 # SBOMs written by `parvez build`
 /*.sbom.json
 /playground/target
+.parvez_build/
+/examples/tasks/main
+/examples/tasks/main.*
