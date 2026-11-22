@@ -28,7 +28,22 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
-      - run: cargo test --release --locked
+      - name: cargo test (failures are posted as annotations)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release --locked --no-fail-fast 2>&1 | tee test.log && exit 0
+          python3 - <<'PY'
+          import re
+          log = open("test.log", encoding="utf-8", errors="replace").read()
+          blocks = re.findall(r"^---- (\S+) stdout ----\n(.*?)(?=^---- |^failures:|\Z)", log, re.S | re.M)
+          if not blocks:
+              blocks = [("build", "\n".join(l for l in log.splitlines() if "error" in l)[-3000:])]
+          for name, body in blocks[:10]:
+              msg = body.strip()[-3000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::error title={name}::{msg}")
+          PY
+          exit 1
 
   build:
     needs: test
