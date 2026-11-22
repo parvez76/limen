@@ -16,6 +16,7 @@ mod scaffold;
 mod parser;
 mod sarif;
 mod security;
+mod sqlcheck;
 mod selfmgmt;
 mod typescript;
 
@@ -90,7 +91,13 @@ enum Cmd {
         check: bool,
     },
     /// Fast type/borrow check (`cargo check`) with .prvz-mapped errors. No binary.
-    Check { file: PathBuf },
+    Check {
+        file: PathBuf,
+        /// also check every query against the live database at DATABASE_URL (it is
+        /// only asked to describe them: nothing is executed)
+        #[arg(long)]
+        db: bool,
+    },
     /// Run the program's `test "..."` blocks (compile errors mapped to .prvz lines).
     Test {
         file: PathBuf,
@@ -178,7 +185,8 @@ fn real_main() -> Result<()> {
                 bail!("--output goes with --sarif");
             }
             let prog = load_program(&file)?;
-            let report = security::lint(&prog);
+            sql_gate(&file, &prog)?;
+            let report = security::lint_with(&prog, &deps::policy(&file)?.custom);
             if let Some(why) = &report.incomplete {
                 bail!("{}: the security analysis is incomplete ({why}); this is a Parvez bug, please report it", file.display());
             }
@@ -220,7 +228,10 @@ fn real_main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Check { file } => {
+        Cmd::Check { file, db } => {
+            if db {
+                sql_db_gate(&file)?;
+            }
             compile(&file, Mode::Check)?;
             eprintln!("parvez: ok {}", file.display());
         }
@@ -388,7 +399,7 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     }
     let prog = load_program(file)?;
     let files = prog.files.clone();
-    let report = security::lint(&prog);
+    let report = security::lint_with(&prog, &deps::policy(file)?.custom);
     // fail closed: an analysis that hit its safety limit must not pass as clean
     if let Some(why) = &report.incomplete {
         bail!("{}: the security analysis is incomplete ({why}); this is a Parvez bug, please report it", file.display());
@@ -396,6 +407,7 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     for (line, why) in &report.allowed {
         eprintln!("parvez: warning: {}: security checks disabled by @allow_insecure: {why}", locate(&files, *line));
     }
+    sql_gate(file, &prog)?;
     if !report.findings.is_empty() {
         let all: Vec<String> = report
             .findings
@@ -424,6 +436,107 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
     }
     Ok((files[0].1.clone(), prog))
 }
+
+/// SQL against `schema.sql` / `migrations/*.sql` next to the entry file, when present.
+fn sql_gate(file: &Path, prog: &ast::Program) -> Result<()> {
+    let Some(schema) = sqlcheck::load(file)? else { return Ok(()) };
+    let errors = sqlcheck::check(prog, &schema);
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = errors.iter().map(|(l, m)| format!("{}: {m}", locate(&prog.files, *l))).collect();
+    bail!("{}\n{}: {} SQL error(s) against {}", lines.join("\n"), file.display(), errors.len(), schema.source)
+}
+
+/// The database's own view of every literal query (`describe`, as `sqlx::query!`
+/// uses), via a small verifier program built once and cached.
+fn sql_db_gate(file: &Path) -> Result<()> {
+    let url = std::env::var("DATABASE_URL").map_err(|_| anyhow!("--db needs DATABASE_URL (it only describes queries; nothing is executed)"))?;
+    let prog = load_program(file)?;
+    let sites = sqlcheck::sites(&prog);
+    if sites.is_empty() {
+        eprintln!("parvez: no literal SQL queries to check against the database");
+        return Ok(());
+    }
+    let dir = std::env::current_dir()?.join(".parvez_build").join("_sqlverify");
+    std::fs::create_dir_all(dir.join("src"))?;
+    write_if_changed(&dir.join("Cargo.toml"), SQLVERIFY_TOML)?;
+    write_if_changed(&dir.join("src/main.rs"), SQLVERIFY_MAIN)?;
+    eprintln!("parvez: checking {} queries against the database...", sites.len());
+    let built = Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&dir).status().context("building the SQL verifier")?;
+    anyhow::ensure!(built.success(), "building the SQL verifier failed");
+    let queries = serde_json::to_string(&sites.iter().map(|s| s.sql.clone()).collect::<Vec<_>>())?;
+    let mut child = Command::new(dir.join("target/release").join(format!("sqlverify{}", std::env::consts::EXE_SUFFIX)))
+        .env("DATABASE_URL", url)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("running the SQL verifier")?;
+    child.stdin.take().expect("piped").write_all(queries.as_bytes())?;
+    let out = child.wait_with_output()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).context("reading the SQL verifier's output")?;
+    if let Some(e) = v["connect_error"].as_str() {
+        bail!("couldn't connect to DATABASE_URL: {e}");
+    }
+    let errors = sqlcheck::compare_with_db(&sites, v.as_array().map(Vec::as_slice).unwrap_or_default());
+    if errors.is_empty() {
+        eprintln!("parvez: {} queries match the database", sites.len());
+        return Ok(());
+    }
+    let lines: Vec<String> = errors.iter().map(|(l, m)| format!("{}: {m}", locate(&prog.files, *l))).collect();
+    bail!("{}\n{}: {} SQL error(s) against the database", lines.join("\n"), file.display(), errors.len())
+}
+
+const SQLVERIFY_TOML: &str = r#"[package]
+name = "sqlverify"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "tls-rustls"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+serde_json = "1"
+
+[workspace]
+"#;
+
+const SQLVERIFY_MAIN: &str = r#"// Asks Postgres to describe each query (prepare only, never execute), the same
+// information sqlx::query! uses at compile time. Reads a JSON list of SQL strings.
+use sqlx::{Column, Either, Executor, TypeInfo};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let url = std::env::var("DATABASE_URL").unwrap_or_default();
+    let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&url).await {
+        Ok(p) => p,
+        Err(e) => return println!("{}", serde_json::json!({ "connect_error": e.to_string() })),
+    };
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).unwrap();
+    let queries: Vec<String> = serde_json::from_str(&input).unwrap_or_default();
+    let mut out = vec![];
+    for q in &queries {
+        out.push(match (&pool).describe(q.as_str()).await {
+            Ok(d) => {
+                let params: Vec<String> = match d.parameters() {
+                    Some(Either::Left(ts)) => ts.iter().map(|t| t.name().to_string()).collect(),
+                    _ => vec![],
+                };
+                let columns: Vec<serde_json::Value> = d
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| serde_json::json!({ "name": c.name(), "type": c.type_info().name(), "nullable": d.nullable(i) }))
+                    .collect();
+                serde_json::json!({ "params": params, "columns": columns })
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        });
+    }
+    println!("{}", serde_json::Value::Array(out));
+}
+"#;
 
 /// Binary name from the file stem: `my-tool.prvz` -> `my_tool`.
 fn bin_name(file: &Path) -> String {
@@ -546,6 +659,7 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     if mode == Mode::Check || mode == Mode::Test {
         return Ok(Outcome::Built(None));
     }
+    dependency_policy_gate(file, &proj)?;
     advisory_gate(file, &proj)?;
     let exe_suffix = if target.is_some_and(|t| t.contains("windows")) { ".exe" } else if target.is_some() { "" } else { std::env::consts::EXE_SUFFIX };
     let exe = format!("{name}{exe_suffix}");
@@ -593,6 +707,31 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
 
 /// Fails the build when Cargo.lock has crates with known RustSec advisories
 /// (policy: PARVEZ_AUDIT / parvez.toml `[security] audit` = deny | warn | off).
+/// `[security] licenses` / `ban` in parvez.toml, checked against every compiled crate.
+fn dependency_policy_gate(file: &Path, proj: &Path) -> Result<()> {
+    let policy = deps::policy(file)?;
+    if policy.licenses.is_none() && policy.ban.is_empty() {
+        return Ok(());
+    }
+    let mut problems = vec![];
+    for (name, version, license) in audit::compiled_crates(proj)? {
+        if policy.ban.iter().any(|b| b == &name) {
+            problems.push(format!("  {name} {version}: banned in parvez.toml ([security] ban)"));
+        }
+        if let Some(allowed) = &policy.licenses {
+            match &license {
+                Some(l) if audit::license_allowed(l, allowed) => {}
+                Some(l) => problems.push(format!("  {name} {version}: license `{l}` isn't in [security] licenses")),
+                None => problems.push(format!("  {name} {version}: no license in its metadata")),
+            }
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    bail!("{}: {} dependency policy violation(s):\n{}", file.display(), problems.len(), problems.join("\n"))
+}
+
 fn advisory_gate(file: &Path, proj: &Path) -> Result<()> {
     let policy = deps::audit_policy(file)?;
     if policy == "off" {

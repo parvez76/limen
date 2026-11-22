@@ -2130,3 +2130,30 @@ fn openapi_describes_routes_types_and_access() {
     let both = parvez().args(["types", "--ts", "--openapi"]).output().unwrap();
     assert!(text(&both.stderr).contains("choose one"), "{}", text(&both.stderr));
 }
+
+#[test]
+fn project_rules_and_dependency_policy() {
+    let dir = scratch("policy020");
+    std::fs::write(
+        dir.join("parvez.toml"),
+        "[security]\ndisallow = [{ call = \"std::env::set_var\", reason = \"configuration comes from parvez.toml\" }]\nlicenses = [\"MIT\"]\nban = [\"serde\"]\n\n[security.sinks]\ncommand = [\"duct::cmd\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.prvz"),
+        "@public(\"demo\")\nroute GET \"/run/{tool}\" (tool: str) -> str!:\n    duct::cmd(&tool, [\"--version\"]).run()?\n    ret \"ok\"\n\nfn main_tool():\n    std::env::set_var(\"X\", \"1\")\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["lint", "app.prvz"]);
+    let so = text(&out.stdout);
+    assert!(so.contains("app.prvz:3: security[command-injection]: request input reaches `duct::cmd(..)`"), "{so}");
+    assert!(so.contains("app.prvz:7: security[disallowed-call]: `std::env::set_var(..)` is disallowed by parvez.toml: configuration comes from parvez.toml"), "{so}");
+    // the dependency policy is checked on build, against what's actually compiled
+    std::fs::write(dir.join("ok.prvz"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
+    let out = run_in(&dir, &["build", "ok.prvz"]);
+    let err = text(&out.stderr);
+    assert!(!out.status.success() && err.contains("dependency policy violation(s)"), "{err}");
+    assert!(err.contains("serde 1.") && err.contains("banned in parvez.toml"), "{err}");
+    assert!(err.contains("isn't in [security] licenses"), "{err}");
+    assert!(!exe(&dir, "ok").exists(), "no binary is shipped when the policy fails");
+}

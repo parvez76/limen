@@ -22,11 +22,12 @@ These checks run on every `build`, `run`, `check`, `test` and `show`; there's no
 | Check | What it catches | Limits |
 |---|---|---|
 | Access policy | A route, socket or page without `@guard(fn)` or `@public("reason")` | Doesn't check that a guard's logic is right |
-| SQL built from strings | Interpolated, concatenated or `format`-ed strings passed to SQL calls (`query`, `execute`, ...), anywhere | Doesn't check queries against a schema (`sqlx::query!` does); recognizes SQL calls by name |
-| Request data to files and processes | Route parameters, bodies, headers, WebSocket messages and database reads reaching `std::fs`, `File`, `OpenOptions` or `Command`, followed through functions, modules, traits, objects and `state:` with no depth limit | Only those sinks: a third-party crate that opens files or runs programs isn't recognized. Data passed through channels, and file, environment or HTTP-response contents, aren't treated as untrusted |
+| SQL built from strings | Interpolated, concatenated or `format`-ed strings passed to SQL calls (`query`, `execute`, ...), anywhere | Recognizes SQL calls by name; add others with `[security.sinks] sql` |
+| SQL against the schema | With `schema.sql` or `migrations/*.sql` next to the program: unknown tables and columns, placeholder count vs `.bind()`, bound-value types, `query_as` fields (selected, typed, `?` when the column can be NULL). `parvez check --db` also asks the live database to describe every query, as `sqlx::query!` does | Offline: names and simple types only, not function return types or views; SQL the parser can't read is skipped. `--db` needs a reachable database and only describes queries |
+| Request data to files and processes | Route parameters, bodies, headers, WebSocket messages and database reads reaching `std::fs`, `File`, `OpenOptions` or `Command`, followed through functions, modules, traits, objects and `state:` with no depth limit | Only those sinks, plus any added with `[security.sinks]` in `parvez.toml`. Data passed through channels, and file, environment or HTTP-response contents, aren't treated as untrusted |
 | Secrets | `Secret` values print as `[redacted]` and can't be serialized; passing `.expose()` to logs, prints, errors, pages or strings; secret-named `state:` fields typed `str`; credential-like literals | Literal detection is pattern- and entropy-based; copies made from `.expose()` aren't wiped from memory |
 
-Each rule maps to CWE, OWASP Top 10 and ASVS, `parvez lint --sarif` produces a report for code scanning, and the [adversarial test corpus](tests/security_corpus/) (including the known misses) runs on every change. Details and the full limits: [SECURITY.md](SECURITY.md).
+Projects can add their own rules in `parvez.toml`: banned calls with a reason (`[security] disallow`, like Clippy's `disallowed_methods`) and extra sinks. Each rule maps to CWE, OWASP Top 10 and ASVS, `parvez lint --sarif` produces a report for code scanning, and the [adversarial test corpus](tests/security_corpus/) (including the known misses) runs on every change. Details and the full limits: [SECURITY.md](SECURITY.md).
 
 ## What generated services do by default
 
@@ -35,7 +36,7 @@ Each rule maps to CWE, OWASP Top 10 and ASVS, `parvez lint --sarif` produces a r
 - `Content-Security-Policy` on pages, `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy` and `Cache-Control: no-store` headers.
 - JSON logs with request IDs, Prometheus `/metrics`, `/healthz` and `/readyz`.
 - Optional OpenID Connect: bearer tokens, or browser sign-in with encrypted session cookies, CSRF checks and back-channel logout.
-- On `parvez build`: dependencies checked against the RustSec advisory database (a known vulnerability fails the build) and a CycloneDX SBOM.
+- On `parvez build`: dependencies checked against the RustSec advisory database (a known vulnerability fails the build), an optional license allowlist and banned-crate list (`[security] licenses`, `ban`), and a CycloneDX SBOM.
 
 ## What it doesn't do
 
@@ -52,7 +53,7 @@ curl -fsSL https://parvez76.github.io/parvez/install.sh | sh        # Linux, mac
 irm https://parvez76.github.io/parvez/install.ps1 | iex             # Windows, in PowerShell
 ```
 
-The installers verify the download against the release's checksums before installing, and offer to install Rust if it's missing. Or build from source: `cargo install --git https://github.com/parvez76/parvez --tag v0.19.1 --locked`. Releases are signed and reproducible; see [verifying a release](SECURITY.md#verifying-a-release).
+The installers verify the download against the release's checksums before installing, and offer to install Rust if it's missing. Or build from source: `cargo install --git https://github.com/parvez76/parvez --tag v0.20.0 --locked`. Releases are signed and reproducible; see [verifying a release](SECURITY.md#verifying-a-release).
 
 ```bash
 parvez doctor                    # check the setup

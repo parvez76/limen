@@ -28,8 +28,8 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 | Version | Security fixes |
 |---|---|
-| 0.19.x | yes |
-| < 0.19 | no |
+| 0.20.x | yes |
+| < 0.20 | no |
 
 ## Verifying a release
 
@@ -41,13 +41,13 @@ Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.git
 # 1. checksum
 sha256sum -c SHA256SUMS --ignore-missing
 # 2. provenance: built from this repository by the release workflow
-gh attestation verify parvez-v0.19.1-x86_64-unknown-linux-musl.tar.gz --repo parvez76/parvez
+gh attestation verify parvez-v0.20.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/parvez
 ```
 
 Builds are reproducible: the workflow rebuilds the Linux binary from scratch in a different directory and refuses to publish if a single byte differs. You can check a release yourself with the same Rust version:
 
 ```bash
-git clone https://github.com/parvez76/parvez && cd parvez && git checkout v0.19.1
+git clone https://github.com/parvez76/parvez && cd parvez && git checkout v0.20.0
 .github/release-build.sh x86_64-unknown-linux-musl /tmp/rebuild   # prints the archive's SHA-256
 grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 ```
@@ -55,10 +55,10 @@ grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 Release tags from v0.16.0 on are signed with the project's SSH signing key, listed in [`.github/allowed_signers`](.github/allowed_signers) (fingerprint `SHA256:FRGXW2DjW+ITeT31kbI1ZZTrpXsglQBuWgcIS4/q4JA`). GitHub shows them as Verified; to check locally:
 
 ```bash
-git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.19.1
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.20.0
 ```
 
-Installing from source (`cargo install --git https://github.com/parvez76/parvez --tag v0.19.1 --locked`) uses the exact dependency versions in `Cargo.lock`.
+Installing from source (`cargo install --git https://github.com/parvez76/parvez --tag v0.20.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
 
@@ -121,6 +121,7 @@ The compile-time lint rules, as shown by `parvez lint --rules` and in every find
 | `hardcoded-secret` | literals in secret-named bindings, key-shaped literals, `secret("...")` | 798, 259 | A07 Identification and Authentication Failures | 2.10.4, 6.4.1 | 7.5 |
 | `secret-exposure` | `.expose()` reaching logs, output, errors, JSON or pages | 532, 200 | A09 Security Logging and Monitoring Failures | 7.1.1, 7.1.2 | 6.5 |
 | `secret-type` | a secret-named `state:` field typed `str` | 312, 316 | A04 Insecure Design | 8.3.6, 6.4.1 | 4.0 |
+| `disallowed-call` | a call listed in `[security] disallow` in parvez.toml | 676 | A04 Insecure Design | - | 5.0 |
 
 Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Method calls are resolved by the receiver's type, inferred from struct literals, annotations, parameter and `state:` field types, list elements (`[Disk(..)]`, `Vec<Box<dyn Store>>`) and the declared return types of your functions; calls through a `dyn Trait`, `Arc<dyn Trait>` or a generic bounded by a trait follow every implementation. Request data stored in a `state:` field taints every later read of it, in any route, worker or function, and the finding says where it was stored. A method that stores its argument in its object (`job.set_path(name)`) makes the object hold request data. Values read from the database (`fetch_one`, `fetch_all`, `query_as`, ...) are untrusted for file paths and commands, because an earlier request may have written them (second-order injection); a value declared as a number, `bool` or `char` is never treated as text. Known limits: data handed between tasks through a channel whose sending and receiving ends are different `state:` fields isn't followed; contents of files, environment variables and outgoing HTTP responses aren't treated as untrusted; and a method call on a value whose type can't be inferred is followed only when exactly one `impl` defines that name.
 
@@ -143,7 +144,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/parvez --tag v0.19.1 --locked
+      - run: cargo install --git https://github.com/parvez76/parvez --tag v0.20.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

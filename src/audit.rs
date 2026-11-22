@@ -49,6 +49,48 @@ pub fn compiled_packages(proj: &Path) -> Result<std::collections::HashSet<(Strin
 
 /// Writes a CycloneDX SBOM for the cargo project at `proj`. Returns the
 /// number of components.
+/// Every crate compiled into the binary: (name, version, license expression).
+pub fn compiled_crates(proj: &Path) -> Result<Vec<(String, String, Option<String>)>> {
+    let host = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("host: ").map(String::from)))
+        .context("detecting host target (rustc -vV)")?;
+    let meta = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--offline", "--filter-platform", &host])
+        .current_dir(proj)
+        .output()
+        .context("running cargo metadata")?;
+    anyhow::ensure!(meta.status.success(), "cargo metadata failed: {}", String::from_utf8_lossy(&meta.stderr));
+    let meta: Value = serde_json::from_slice(&meta.stdout)?;
+    let root = meta["resolve"]["root"].as_str().unwrap_or("").to_string();
+    let compiled = compiled_packages(proj)?;
+    Ok(meta["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["id"].as_str() != Some(root.as_str()))
+        .filter_map(|p| {
+            let key = (p["name"].as_str()?.to_string(), p["version"].as_str()?.to_string());
+            compiled.contains(&key).then(|| (key.0, key.1, p["license"].as_str().map(str::to_string)))
+        })
+        .collect())
+}
+
+/// Is an SPDX license expression satisfied by the allowed ids? `A OR B` needs one,
+/// `A AND B` needs both, `A WITH exception` counts as A, and `A/B` is the old form of OR.
+pub fn license_allowed(expr: &str, allowed: &[String]) -> bool {
+    let cleaned = expr.replace(['(', ')'], " ").replace('/', " OR ");
+    cleaned.split(" AND ").all(|term| {
+        term.split(" OR ").any(|alt| {
+            let id = alt.split(" WITH ").next().unwrap_or(alt).trim();
+            allowed.iter().any(|a| a.eq_ignore_ascii_case(id))
+        })
+    })
+}
+
 pub fn write_sbom(proj: &Path, app: &str, out: &Path) -> Result<usize> {
     // Only what is compiled into this binary: the host platform's dependency graph.
     let host = Command::new("rustc")
@@ -296,5 +338,21 @@ mod tests {
         assert_eq!(v[0].render(), "RUSTSEC-2099-0001 demo@1.2.0: Heap overflow in parse (patched: >= 1.4.2, < 2.0.0 | >= 2.1.0)");
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].adv.informational.as_deref(), Some("unmaintained"));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::license_allowed;
+
+    #[test]
+    fn spdx_expressions() {
+        let ok: Vec<String> = ["MIT", "Apache-2.0", "Unicode-3.0"].map(String::from).into();
+        assert!(license_allowed("MIT OR Apache-2.0", &ok));
+        assert!(license_allowed("Apache-2.0 WITH LLVM-exception", &ok));
+        assert!(license_allowed("(MIT OR Apache-2.0) AND Unicode-3.0", &ok));
+        assert!(license_allowed("MIT/Apache-2.0", &ok));
+        assert!(!license_allowed("GPL-3.0", &ok));
+        assert!(!license_allowed("MIT AND GPL-3.0", &ok));
     }
 }

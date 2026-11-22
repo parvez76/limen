@@ -8,14 +8,14 @@ Credit where it's due. These are good tools, and some are stronger than Parvez i
 
 | Concern | In Rust today | Compared with Parvez |
 |---|---|---|
-| Secrets in logs | The [`secrecy`](https://crates.io/crates/secrecy) crate: redacted `Debug`, zeroized on drop, no serialization unless you opt in, an explicit `expose_secret()` | Parvez's `Secret` is the same idea. What Parvez adds is a compile error when an exposed value reaches a log, print, error or page. |
-| SQL injection | [`sqlx::query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) checks the SQL against your real database schema at compile time, and takes a string literal, so there's nothing to interpolate | **Stronger than Parvez** in that lane: Parvez doesn't check queries against a schema. Parvez's rule covers the non-macro `sqlx::query(...)` path, which is the one people actually build strings for. |
-| Missing auth checks | Axum extractors: a handler that takes an `AuthUser` argument can't run without authentication. A custom router wrapper can require one on every route | Achievable, if every handler is written that way and every route goes through the wrapper. |
-| Banned calls, risky patterns | Clippy's [`disallowed_methods`](https://rust-lang.github.io/rust-clippy/master/index.html#disallowed_methods), custom lints ([Dylint](https://github.com/trailofbits/dylint)), [Semgrep](https://semgrep.dev) rules for Rust | Flexible and powerful, and you can write rules Parvez doesn't have. |
-| Vulnerable dependencies, SBOM | [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), `cargo-audit`, `cargo-cyclonedx` | Equivalent. Parvez runs the RustSec check and writes the SBOM on every build without setup. |
-| Memory safety | Rust | Identical: Parvez generates safe Rust and inherits it. |
+| Secrets in logs | The [`secrecy`](https://crates.io/crates/secrecy) crate: redacted `Debug`, zeroized on drop, no serialization unless you opt in, an explicit `expose_secret()` | **Stronger.** Parvez's `Secret` is the same idea, plus a compile error when an exposed value reaches a log, print, error or page. |
+| SQL | [`sqlx::query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) asks the database to describe the query at compile time (or reads a prepared cache), for the queries written with the macro | **Matches, and covers more.** Every literal query is checked offline against `schema.sql` or `migrations/` on every build (tables, columns, placeholder count, bound-value types, `query_as` fields and NULL-ability), and `parvez check --db` asks the live database to describe each one, as `sqlx::query!` does. SQL built from strings is a build error everywhere, not just where the macro was used. |
+| Missing auth checks | Axum extractors: a handler that takes an `AuthUser` argument can't run without authentication. A custom router wrapper can require one on every route | **Stronger.** In Parvez a route without `@guard` or `@public("reason")` isn't a valid program, so there's no wrapper to forget. |
+| Banned calls, risky patterns | Clippy's [`disallowed_methods`](https://rust-lang.github.io/rust-clippy/master/index.html#disallowed_methods), custom lints ([Dylint](https://github.com/trailofbits/dylint)), [Semgrep](https://semgrep.dev) rules for Rust | **Matches `disallowed_methods`, not Semgrep.** `[security] disallow` in `parvez.toml` bans calls with a reason, and `[security.sinks]` adds third-party functions to the request-data analysis. Arbitrary code patterns (Semgrep, Dylint) aren't supported. |
+| Vulnerable dependencies, licenses, SBOM | [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), `cargo-audit`, `cargo-cyclonedx` | **Matches the core of cargo-deny.** RustSec check, license allowlist (`[security] licenses`), banned crates (`[security] ban`) and an SBOM on every build, without setup. cargo-deny's source and duplicate-version checks aren't covered. |
+| Memory safety | Rust | **Identical:** Parvez generates safe Rust and inherits it. |
 
-If your team is experienced in Rust, reviews carefully, and has these tools wired into CI, you already have most of what Parvez offers. Keep using Rust.
+If your team is experienced in Rust, reviews carefully, and has these tools wired into CI on every project, you already have most of what Parvez offers. Keep using Rust.
 
 ## What's left: who decides that the checks run
 
@@ -34,7 +34,7 @@ In Parvez those decisions aren't available:
 
 The short version: **you can't lint a language that permits everything into safety. You can only shrink what it permits.** Rust has to allow everything a systems language needs; a checker on top of it has an unbounded surface to cover. Parvez is small on purpose, so its checks can cover nearly all of it.
 
-"Nearly" is deliberate. Parvez programs can call any Rust crate, and a crate function the rules don't know about can still reach a dangerous sink: for example, a third-party process-spawning library that isn't `std::process::Command`. The [known blind spots](../SECURITY.md#rules) are listed and kept in a test suite that fails if they change, so the list stays honest.
+"Nearly" is deliberate. Parvez programs can call any Rust crate, and a crate function the rules don't know about can still reach a dangerous sink: for example, a third-party process-spawning library that isn't `std::process::Command`. A project can add such functions to the analysis with `[security.sinks]` in `parvez.toml`. The [known blind spots](../SECURITY.md#rules) are listed and kept in a test suite that fails if they change, so the list stays honest.
 
 ## Why that matters now: agents and tired people
 

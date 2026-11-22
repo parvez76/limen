@@ -156,6 +156,56 @@ pub fn service_config(prvz: &Path) -> Result<crate::codegen::ServiceConfig> {
     Ok(cfg)
 }
 
+/// `[security]` rules in parvez.toml: banned calls, extra sinks, and the
+/// dependency policy (allowed licenses, banned crates).
+#[derive(Debug, Default)]
+pub struct Policy {
+    pub custom: crate::security::Custom,
+    /// SPDX license ids allowed for every compiled crate; None = any
+    pub licenses: Option<Vec<String>>,
+    /// crates that must not be compiled in
+    pub ban: Vec<String>,
+}
+
+pub fn policy(prvz: &Path) -> Result<Policy> {
+    let mut p = Policy::default();
+    let Some(t) = load_table(prvz)? else { return Ok(p) };
+    let Some(Value::Table(sec)) = t.get("security") else { return Ok(p) };
+    let strings = |v: Option<&Value>, what: &str| -> Result<Vec<String>> {
+        match v {
+            None => Ok(vec![]),
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|x| x.as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("parvez.toml: {what} must be a list of strings")))
+                .collect(),
+            Some(_) => anyhow::bail!("parvez.toml: {what} must be a list of strings"),
+        }
+    };
+    if let Some(Value::Array(rules)) = sec.get("disallow") {
+        for r in rules {
+            match r {
+                Value::String(c) => p.custom.disallow.push((c.clone(), "listed in [security] disallow".into())),
+                Value::Table(t) => {
+                    let call = t.get("call").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("parvez.toml: each [security] disallow entry needs `call`"))?;
+                    let why = t.get("reason").and_then(|v| v.as_str()).unwrap_or("listed in [security] disallow");
+                    p.custom.disallow.push((call.to_string(), why.to_string()));
+                }
+                _ => anyhow::bail!("parvez.toml: [security] disallow entries are strings or {{ call, reason }}"),
+            }
+        }
+    }
+    if let Some(Value::Table(sinks)) = sec.get("sinks") {
+        p.custom.path_sinks = strings(sinks.get("path"), "[security.sinks] path")?;
+        p.custom.command_sinks = strings(sinks.get("command"), "[security.sinks] command")?;
+        p.custom.sql_sinks = strings(sinks.get("sql"), "[security.sinks] sql")?;
+    }
+    if sec.contains_key("licenses") {
+        p.licenses = Some(strings(sec.get("licenses"), "[security] licenses")?);
+    }
+    p.ban = strings(sec.get("ban"), "[security] ban")?;
+    Ok(p)
+}
+
 /// Advisory policy: `PARVEZ_AUDIT` env, else `[security] audit` in
 /// parvez.toml, else "deny". One of "deny" | "warn" | "off".
 pub fn audit_policy(prvz: &Path) -> Result<String> {

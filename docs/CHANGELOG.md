@@ -2,6 +2,12 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
+## v0.20.0
+- SQL checked against the schema, offline, on every build: with `schema.sql` or `migrations/*.sql` next to the program, every literal query is checked for unknown tables and columns, placeholder count against `.bind()` calls, bound-value types, and `query_as` fields (selected, typed, `?` when the column can be NULL).
+- `parvez check --db`: every query is also described by the live database at `DATABASE_URL`, the same information `sqlx::query!` uses (nothing is executed).
+- Project rules in `parvez.toml`: `[security] disallow` (banned calls with a reason, rule `disallowed-call`) and `[security.sinks]` (third-party file, command and SQL functions added to the analysis).
+- Dependency policy: `[security] licenses` (SPDX allowlist) and `ban`, checked against every compiled crate on build.
+
 ## v0.19.1
 - The v0.19.0 changes below, released. The v0.19.0 tag was never published: its release tests found `examples/tasks/main.prvz` missing from the repository (an ignore rule for build outputs matched it).
 

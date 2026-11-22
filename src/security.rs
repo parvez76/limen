@@ -122,6 +122,16 @@ pub const RULES: &[Rule] = &[
         fix: FIX_EXPOSE,
     },
     Rule {
+        id: "disallowed-call",
+        title: "A call this project disallows",
+        description: "A function or method listed in `[security] disallow` in parvez.toml is called.",
+        cwe: &[676],
+        owasp: "A04:2021 Insecure Design",
+        asvs: &[],
+        severity: "5.0",
+        fix: FIX_DISALLOW,
+    },
+    Rule {
         id: "secret-type",
         title: "Secret held as plain `str`",
         description: "A `state:` field with a secret-like name is typed `str`, so it can be logged, serialized and stays in memory after use.",
@@ -132,6 +142,29 @@ pub const RULES: &[Rule] = &[
         fix: FIX_SECRET_TYPE,
     },
 ];
+
+/// Project rules from `[security]` in parvez.toml: banned calls (like Clippy's
+/// `disallowed_methods`) and extra sinks, so a third-party crate that opens files,
+/// runs programs or runs SQL is checked like `std::fs`, `Command` and `sqlx`.
+/// A pattern is a path (`duct::cmd`, matching that call or a `use`d `cmd`) or,
+/// with a leading dot, a method name (`.read_to_string`).
+#[derive(Clone, Debug, Default)]
+pub struct Custom {
+    pub disallow: Vec<(String, String)>,
+    pub path_sinks: Vec<String>,
+    pub command_sinks: Vec<String>,
+    pub sql_sinks: Vec<String>,
+}
+
+fn call_matches(name: &str, pat: &str) -> bool {
+    !pat.starts_with('.') && (name == pat || name.ends_with(&format!("::{pat}")) || pat.ends_with(&format!("::{name}")))
+}
+
+fn method_matches(m: &str, pat: &str) -> bool {
+    pat.strip_prefix('.') == Some(m)
+}
+
+const FIX_DISALLOW: &str = "use the alternative given in parvez.toml's reason, or remove the entry from [security] disallow";
 
 pub fn rule(id: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.id == id)
@@ -165,11 +198,17 @@ const FIX_SECRET_TYPE: &str = "store it as a Secret so it can't be logged or ser
 const OUTPUT_SINKS: &[&str] = &["print", "eprint", "log_info", "log_warn", "log_error", "fail", "assert", "assert_eq", "json", "json_encode", "json_pretty", "metric_inc"];
 const FIX_SECRET: &str = "load secrets at runtime as a Secret: `api_key: Secret = env_secret(\"API_KEY\")?` in `state:`; never commit them";
 
+#[cfg_attr(not(test), allow(dead_code))] // used by the playground and the tests
 pub fn lint(prog: &Program) -> Report {
+    lint_with(prog, &Custom::default())
+}
+
+pub fn lint_with(prog: &Program, custom: &Custom) -> Report {
     let test_mods = prog.test_only_modules();
     let items: Vec<(&[String], &Item)> =
         prog.all_items().into_iter().filter(|(m, i)| !prog.is_test_scope(m, i, &test_mods)).collect();
     let mut fx = Fx::new(prog, &items);
+    fx.custom = custom.clone();
     let mut incomplete = (!fx.summarize()).then(|| "function summaries did not converge".to_string());
     // guards run on every request before the handler: their inputs are untrusted too
     let mut guards: HashSet<String> = HashSet::new();
@@ -329,6 +368,8 @@ struct Fx<'a> {
     state_elems: HashMap<String, String>,
     /// `state:` fields holding request data -> where it was stored ("file:line")
     stored: std::rc::Rc<HashMap<String, String>>,
+    /// project rules from parvez.toml
+    custom: Custom,
 }
 
 struct FnInfo<'a> {
@@ -392,6 +433,7 @@ impl<'a> Fx<'a> {
             state_types: HashMap::new(),
             state_elems: HashMap::new(),
             stored: Default::default(),
+            custom: Custom::default(),
         };
         let mut traits: HashSet<String> = HashSet::new();
         for (_, item) in items {
@@ -1129,6 +1171,22 @@ impl<'f, 'a> Linter<'f, 'a> {
             let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
             self.taint_sink(line, "path-traversal", format!("{src} reaches `{name}(..)` unsanitized"), &format!("`{name}(..)`"), FIX_PATH);
         }
+        let custom = &self.fx.custom;
+        if let Some((_, why)) = custom.disallow.iter().find(|(p, _)| call_matches(name, p)) {
+            let msg = format!("`{name}(..)` is disallowed by parvez.toml: {why}");
+            self.push(line, "disallowed-call", msg, FIX_DISALLOW);
+        }
+        if custom.path_sinks.iter().any(|p| call_matches(name, p)) && args.iter().any(|a| tainted(a, cx)) {
+            let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+            self.taint_sink(line, "path-traversal", format!("{src} reaches `{name}(..)` unsanitized"), &format!("`{name}(..)`"), FIX_PATH);
+        }
+        if self.fx.custom.command_sinks.iter().any(|p| call_matches(name, p)) && args.iter().any(|a| tainted(a, cx)) {
+            let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+            self.taint_sink(line, "command-injection", format!("{src} reaches `{name}(..)`"), &format!("`{name}(..)`"), FIX_CMD);
+        }
+        if self.fx.custom.sql_sinks.iter().any(|p| call_matches(name, p)) && args.iter().any(|a| is_dynamic(a, cx)) {
+            self.push(line, "sql-injection", format!("`{name}(..)` receives a string built from interpolation/concatenation"), FIX_SQL);
+        }
         if let Some(key) = self.fx.resolve(&self.module, name) {
             self.through_call(&key, name, None, args, line, cx);
         }
@@ -1161,6 +1219,22 @@ impl<'f, 'a> Linter<'f, 'a> {
         if m == "open" && chain_mentions(recv, "OpenOptions") && args.iter().any(|a| tainted(a, cx)) {
             let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
             self.taint_sink(line, "path-traversal", format!("{src} reaches `OpenOptions::open(..)` unsanitized"), "`OpenOptions::open(..)`", FIX_PATH);
+        }
+        let custom = &self.fx.custom;
+        if let Some((_, why)) = custom.disallow.iter().find(|(p, _)| method_matches(m, p)) {
+            let msg = format!("`.{m}(..)` is disallowed by parvez.toml: {why}");
+            self.push(line, "disallowed-call", msg, FIX_DISALLOW);
+        }
+        if custom.path_sinks.iter().any(|p| method_matches(m, p)) && args.iter().any(|a| tainted(a, cx)) {
+            let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+            self.taint_sink(line, "path-traversal", format!("{src} reaches `.{m}(..)` unsanitized"), &format!("`.{m}(..)`"), FIX_PATH);
+        }
+        if self.fx.custom.command_sinks.iter().any(|p| method_matches(m, p)) && args.iter().any(|a| tainted(a, cx)) {
+            let src = self.source(&args.iter().collect::<Vec<_>>(), cx);
+            self.taint_sink(line, "command-injection", format!("{src} reaches `.{m}(..)`"), &format!("`.{m}(..)`"), FIX_CMD);
+        }
+        if self.fx.custom.sql_sinks.iter().any(|p| method_matches(m, p)) && args.iter().any(|a| is_dynamic(a, cx)) {
+            self.push(line, "sql-injection", format!("`.{m}(..)` receives a string built from interpolation/concatenation"), FIX_SQL);
         }
         // `x.helper(..)` on a user type, a `dyn Trait` or a bounded generic
         for key in self.method_targets(recv, m, cx) {
@@ -1442,7 +1516,7 @@ mod tests {
         assert!(pushed.len() >= 6, "{pushed:?}");
         for id in pushed {
             let r = rule(id).unwrap_or_else(|| panic!("rule {id} has no catalog entry"));
-            assert!(!r.cwe.is_empty() && !r.asvs.is_empty() && r.owasp.contains(":2021"), "{id}");
+            assert!(!r.cwe.is_empty() && (!r.asvs.is_empty() || id == "disallowed-call") && r.owasp.contains(":2021"), "{id}");
         }
         assert!(rule("nope").is_none());
     }
