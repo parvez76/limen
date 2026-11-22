@@ -27,6 +27,7 @@
   <p>Its compiler always runs a fixed set of security checks: a route without an access policy, SQL built from strings, request data reaching the filesystem or a process, and secrets reaching logs are build errors. Each check has documented limits.</p>
   <p class="muted"><strong>Status:</strong> experimental and pre-1.0. One maintainer, not independently audited.</p>
 
+  <p><img src="https://raw.githubusercontent.com/parvez76/parvez/main/docs/demo/demo.svg" alt="An admin route without an access policy is refused by parvez check; adding a guard makes it compile" style="max-width:100%;height:auto;border-radius:8px"></p>
   <p><a href="play/"><strong>Try it in your browser →</strong></a> The real compiler, running here: write a route, watch it refuse the insecure version. No install.</p>
   <p class="muted">Why a language, and not a Rust crate? <a href="https://github.com/parvez76/parvez/blob/main/docs/WHY-A-LANGUAGE.md">The honest answer</a>, starting with what Rust tools already do well.</p>
 

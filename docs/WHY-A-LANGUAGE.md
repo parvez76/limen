@@ -60,6 +60,6 @@ Choosing Parvez over Rust means accepting these:
 | An experienced Rust team owns the code long-term | Agents write much of the code, or many people touch it briefly |
 | You need macros, lifetimes, `unsafe`, or full control | It's a backend service or a DevOps tool, the shape Parvez is built for |
 | You'll maintain the lint setup in every repository | You want the checks on by default, with exceptions visible |
-| You need SQL checked against the real schema | Readable Rust as a way out is enough insurance |
+| You need arbitrary custom lint patterns (Semgrep, Dylint) | Readable Rust as a way out is enough insurance |
 
 Both are reasonable. Parvez exists for the right-hand column.

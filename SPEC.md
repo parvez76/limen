@@ -1,4 +1,4 @@
-# PARVEZ v0.20.0 SPEC (AI system prompt)
+# PARVEZ v0.21.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -343,7 +343,7 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 - A method that stores its argument in its object (`self.path = p`, `self.items.push(p)`) makes the receiver hold request data: after `job.set_path(name)`, `job.path` is untrusted.
 - Database reads (`fetch_one`, `fetch_all`, `fetch_optional`, `query_as`/`query_scalar` results) are untrusted for file paths and commands (second-order injection): "data read from the database (an earlier request may have stored it) reaches ...". Declare numeric results with their type (`n: i64 = ...`), which is never treated as text.
 - Request data stored in a `state:` field (`*state.f.lock().unwrap() = x`, `state.f.lock().unwrap().push(x)`, a lock guard, or a helper that stores its argument) taints every later read of that field, in any route, `every` worker or function. The finding names where it was stored: "request input stored in `state.last` (at app.prvz:14) reaches ...".
-- SQL against the schema: when `schema.sql` (or `migrations/*.sql`, in name order) sits next to the main file, every query whose SQL is a literal is checked on every build: tables and columns exist, the number of `$n` placeholders equals the `.bind()` calls, bound values fit their columns' types, and a `query_as` row type has every field selected with a fitting type and `?` where the column can be NULL. `parvez check --db` also asks the database at `DATABASE_URL` to describe each query (nothing is executed) and checks the same things against its answer.
+- SQL against the schema: when `schema.sql` (or `migrations/*.sql`, in name order) sits next to the main file, every query whose SQL is a literal is checked on every build: tables and columns exist, the number of `$n` placeholders equals the `.bind()` calls, bound values fit their columns' types, and a `query_as` row type has every field selected with a fitting type and `?` where the column can be NULL. Every query is found wherever it is (match arms, closures, `spawn`, tests, workers), and each build prints `SQL: N of M queries checked`; literal SQL the parser can't read is skipped with a warning naming its line. `parvez check --db` also asks the database at `DATABASE_URL` to describe each query (nothing is executed) and checks the same things against its answer.
 - Project rules in `parvez.toml`:
   ```toml
   [security]

@@ -507,11 +507,29 @@ pub struct Site {
     row: Option<(String, Vec<(String, Type)>)>,
 }
 
+/// How many of the program's SQL calls were actually checked. Every call to
+/// `query` / `query_as` / `query_scalar` counts, wherever it is.
+#[derive(Debug, Default)]
+pub struct Coverage {
+    pub recognized: usize,
+    pub checked: usize,
+    /// SQL that isn't a literal (built at run time, or passed in a variable)
+    pub not_literal: Vec<usize>,
+    /// literal SQL the parser couldn't read
+    pub unparsed: Vec<usize>,
+}
+
 struct Ctx<'a> {
     schema: &'a Schema,
     structs: HashMap<String, &'a StructDef>,
     errors: Vec<(usize, String)>,
     sites: Vec<Site>,
+    cov: Coverage,
+}
+
+fn is_sql_call(name: &str) -> bool {
+    let f = name.rsplit("::").next().unwrap_or(name);
+    matches!(f, "query" | "query_as" | "query_scalar") && (name.starts_with("sqlx::") || !name.contains("::"))
 }
 
 impl Ctx<'_> {
@@ -562,7 +580,12 @@ impl Ctx<'_> {
             _ => None,
         };
         self.sites.push(Site { line, sql: text.clone(), binds: binds.iter().map(|b| self.type_of(b, vars)).collect(), row: row_struct });
-        let Some(a) = analyze(self.schema, &text) else { return };
+        self.cov.recognized += 1;
+        let Some(a) = analyze(self.schema, &text) else {
+            self.cov.unparsed.push(line);
+            return;
+        };
+        self.cov.checked += 1;
         for m in a.errors {
             self.errors.push((line, format!("SQL: {m}")));
         }
@@ -622,36 +645,149 @@ impl Ctx<'_> {
         }
     }
 
+    // The walk is an exhaustive match over every statement and expression form
+    // (no `_ =>` arms): new syntax doesn't compile until it's handled here, so
+    // no query can sit somewhere this check never looks.
     fn block(&mut self, b: &Block, vars: &mut HashMap<String, Type>, ret: Option<&Type>) {
         for s in b {
+            let l = s.line;
             match &s.stmt {
+                Stmt::Render(parts) => {
+                    for p in parts {
+                        match p {
+                            HtmlPart::Value(e, _) => self.walk(e, l, None, vars, ret),
+                            HtmlPart::Markup(_) => {}
+                        }
+                    }
+                }
                 Stmt::Let { name, ty, value, .. } => {
-                    self.check_query(s.line, value, ty.as_ref(), vars);
+                    self.walk(value, l, ty.as_ref(), vars, ret);
                     if let Some(t) = ty {
                         vars.insert(name.clone(), t.clone());
                     }
                 }
-                Stmt::Ret(Some(e)) => self.check_query(s.line, e, ret, vars),
-                Stmt::Expr(e) => self.check_query(s.line, e, None, vars),
-                Stmt::Assign { value, .. } => self.check_query(s.line, value, None, vars),
+                Stmt::Assign { target, value, .. } => {
+                    self.walk(target, l, None, vars, ret);
+                    self.walk(value, l, None, vars, ret);
+                }
+                Stmt::Expr(e) | Stmt::LetTuple { value: e, .. } => self.walk(e, l, None, vars, ret),
+                Stmt::Ret(Some(e)) => self.walk(e, l, ret, vars, ret),
+                Stmt::Ret(None) | Stmt::Break | Stmt::Continue => {}
                 Stmt::If { branches, els } => {
-                    for (_, b) in branches {
+                    for (c, b) in branches {
+                        self.walk(c, l, None, vars, ret);
                         self.block(b, &mut vars.clone(), ret);
                     }
                     if let Some(b) = els {
                         self.block(b, &mut vars.clone(), ret);
                     }
                 }
-                Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Loop(body) => self.block(body, &mut vars.clone(), ret),
-                _ => {}
+                Stmt::For { iter, body, .. } => {
+                    self.walk(iter, l, None, vars, ret);
+                    self.block(body, &mut vars.clone(), ret);
+                }
+                Stmt::While { cond, body } => {
+                    self.walk(cond, l, None, vars, ret);
+                    self.block(body, &mut vars.clone(), ret);
+                }
+                Stmt::Loop(body) => self.block(body, &mut vars.clone(), ret),
             }
+        }
+    }
+
+    fn closure(&mut self, b: &ClosureBody, line: usize, vars: &HashMap<String, Type>, ret: Option<&Type>) {
+        match b {
+            ClosureBody::Expr(x) => self.walk(x, line, None, vars, ret),
+            ClosureBody::Block(b) => self.block(b, &mut vars.clone(), None),
+        }
+    }
+
+    fn walk(&mut self, e: &Expr, line: usize, expected: Option<&Type>, vars: &HashMap<String, Type>, ret: Option<&Type>) {
+        if query_chain(e).is_some() {
+            self.check_query(line, e, expected, vars);
+            return;
+        }
+        let w = |this: &mut Self, x: &Expr| this.walk(x, line, None, vars, ret);
+        match e {
+            Expr::Call(name, _, args) => {
+                if is_sql_call(name) {
+                    self.cov.recognized += 1;
+                    self.cov.not_literal.push(line);
+                }
+                for a in args {
+                    w(self, a);
+                }
+            }
+            Expr::Method(x, _, _, args) => {
+                w(self, x);
+                for a in args {
+                    w(self, a);
+                }
+            }
+            Expr::If(c, a, b) => {
+                w(self, c);
+                w(self, a);
+                w(self, b);
+            }
+            Expr::LetPat(_, x)
+            | Expr::Unary(_, x)
+            | Expr::Ref(x, _)
+            | Expr::Field(x, _)
+            | Expr::Try(x)
+            | Expr::Await(x)
+            | Expr::Named(_, x)
+            | Expr::Cast(x, _) => w(self, x),
+            Expr::Binary(a, _, b) | Expr::Range(a, b, _) | Expr::Index(a, b) => {
+                w(self, a);
+                w(self, b);
+            }
+            Expr::List(xs) | Expr::Tuple(xs) => {
+                for x in xs {
+                    w(self, x);
+                }
+            }
+            Expr::StructLit(_, fs) => {
+                for (_, x) in fs {
+                    w(self, x);
+                }
+            }
+            Expr::Map(kvs) => {
+                for (k, v) in kvs {
+                    w(self, k);
+                    w(self, v);
+                }
+            }
+            Expr::Str(parts) => {
+                for p in parts {
+                    match p {
+                        StrPart::Interp(x, _) => w(self, x),
+                        StrPart::Lit(_) => {}
+                    }
+                }
+            }
+            Expr::Match(x, arms) => {
+                w(self, x);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        self.walk(g, a.line, None, vars, ret);
+                    }
+                    self.block(&a.body, &mut vars.clone(), ret);
+                }
+            }
+            Expr::Closure { body, .. } | Expr::Spawn(body) => self.closure(body, line, vars, ret),
+            Expr::Catch { expr, handler, .. } => {
+                w(self, expr);
+                self.closure(handler, line, vars, ret);
+            }
+            Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Ident(_) => {}
         }
     }
 }
 
 /// Check every literal query in the program. Returns (encoded line, message).
-pub fn check(prog: &Program, schema: &Schema) -> Vec<(usize, String)> {
-    scan(prog, schema).0
+pub fn check(prog: &Program, schema: &Schema) -> (Vec<(usize, String)>, Coverage) {
+    let (errors, _, cov) = scan(prog, schema);
+    (errors, cov)
 }
 
 /// Every literal query in the program, for `parvez check --db`.
@@ -701,33 +837,41 @@ pub fn compare_with_db(sites: &[Site], described: &[serde_json::Value]) -> Vec<(
     out
 }
 
-fn scan(prog: &Program, schema: &Schema) -> (Vec<(usize, String)>, Vec<Site>) {
+fn scan(prog: &Program, schema: &Schema) -> (Vec<(usize, String)>, Vec<Site>, Coverage) {
     let items = prog.all_items();
     let structs = items
         .iter()
         .filter_map(|(_, i)| if let Item::Struct(s) = i { Some((s.name.clone(), s)) } else { None })
         .collect();
-    let mut cx = Ctx { schema, structs, errors: vec![], sites: vec![] };
+    let mut cx = Ctx { schema, structs, errors: vec![], sites: vec![], cov: Coverage::default() };
+    let fn_body = |cx: &mut Ctx, f: &FnDef| {
+        let mut vars: HashMap<String, Type> = f.params.iter().cloned().collect();
+        cx.block(&f.body, &mut vars, f.ret.as_ref());
+    };
+    // every item that can hold code, tests included
     for (_, item) in &items {
-        let (params, body, ret) = match item {
-            Item::Route(r) => (&r.params, &r.body, r.ret.as_ref()),
-            Item::Fn(f) => (&f.params, &f.body, f.ret.as_ref()),
-            _ => continue,
-        };
-        let mut vars: HashMap<String, Type> = params.iter().cloned().collect();
-        cx.block(body, &mut vars, ret);
-    }
-    for (_, item) in &items {
-        if let Item::Impl(i) = item {
-            for m in &i.methods {
-                let mut vars: HashMap<String, Type> = m.params.iter().cloned().collect();
-                cx.block(&m.body, &mut vars, m.ret.as_ref());
+        match item {
+            Item::Route(r) => {
+                let mut vars: HashMap<String, Type> = r.params.iter().cloned().collect();
+                cx.block(&r.body, &mut vars, r.ret.as_ref());
             }
+            Item::Fn(f) => fn_body(&mut cx, f),
+            Item::Impl(i) => i.methods.iter().for_each(|m| fn_body(&mut cx, m)),
+            Item::Trait(t) => t.methods.iter().for_each(|m| fn_body(&mut cx, m)),
+            Item::Every(e) => cx.block(&e.body, &mut HashMap::new(), None),
+            Item::Test(t) => cx.block(&t.body, &mut HashMap::new(), None),
+            Item::State(st) => {
+                for (_, ty, value, line) in &st.fields {
+                    cx.walk(value, *line, Some(ty), &HashMap::new(), None);
+                }
+            }
+            Item::Const { value, ty, line, .. } => cx.walk(value, *line, Some(ty), &HashMap::new(), None),
+            Item::Struct(_) | Item::Enum(_) | Item::Use(_) | Item::Import(_) | Item::Embed { .. } => {}
         }
     }
     cx.errors.sort();
     cx.errors.dedup();
-    (cx.errors, cx.sites)
+    (cx.errors, cx.sites, cx.cov)
 }
 
 #[cfg(test)]
@@ -745,7 +889,7 @@ mod tests {
              state:\n    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(\"x\")?\n@public\nroute GET \"/t/{{id}}/{{name}}\" (state, id: i64, name: str) -> [Task]!:\n{body}"
         );
         let prog = parse(lex(&src).unwrap()).unwrap();
-        check(&prog, &Schema::from_sql(SCHEMA).unwrap()).into_iter().map(|(_, m)| m).collect()
+        check(&prog, &Schema::from_sql(SCHEMA).unwrap()).0.into_iter().map(|(_, m)| m).collect()
     }
 
     #[test]
@@ -780,7 +924,33 @@ mod tests {
         assert!(e.iter().any(|m| m.contains("$1 is `tasks.done` (BOOLEAN), but the value bound is str")), "{e:?}");
         let e = errors("    ret sqlx::query_as(\"SELECT t.id, t.titel, t.done FROM tasks t\").fetch_all(&state.db).await?\n");
         assert!(e.iter().any(|m| m.contains("column `titel` isn't in table `tasks`")), "{e:?}");
-        // SQL the parser can't read is skipped, not guessed at
+        // SQL the parser can't read is skipped, not guessed at (and counted: see coverage_counts_every_query)
         assert!(errors("    ret sqlx::query_as(\"SELECT FROM WHERE (((\").fetch_all(&state.db).await?\n").is_empty());
+    }
+
+    #[test]
+    fn queries_in_nested_code_are_checked() {
+        // match arms, closures, spawn and test blocks: each was invisible before v0.21
+        for (label, code) in [
+            ("match arm", "    m = match id:\n        1 -> sqlx::query(\"SELECT titel FROM tasks\").execute(&state.db)\n        _ -> sqlx::query(\"SELECT 1\").execute(&state.db)\n    ret []\n"),
+            ("closure", "    f = |x: i64| sqlx::query(\"SELECT titel FROM tasks WHERE id = $1\").bind(x)\n    ret []\n"),
+            ("spawn", "    h = spawn:\n        sqlx::query(\"SELECT titel FROM tasks\").execute(&state.db).await\n    ret []\n"),
+        ] {
+            let e = errors(code);
+            assert!(e.iter().any(|m| m.contains("column `titel` isn't in `tasks`")), "{label}: {e:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_counts_every_query() {
+        let src = "state:\n    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(\"x\")?\n@public\nroute GET \"/t\" (state) -> str!:\n    \
+            sqlx::query(\"SELECT id FROM tasks\").execute(&state.db).await?\n    \
+            sqlx::query(\"SELECT FROM WHERE (((\").execute(&state.db).await?\n    \
+            q = \"SELECT 1\"\n    sqlx::query(&q).execute(&state.db).await?\n    ret \"ok\"\n\
+            test \"sql in a test\":\n    sqlx::query(\"SELECT titel FROM tasks\").execute(&pool).await?\n";
+        let prog = parse(lex(src).unwrap()).unwrap();
+        let (errs, cov) = check(&prog, &Schema::from_sql(SCHEMA).unwrap());
+        assert_eq!((cov.recognized, cov.checked, cov.unparsed.len(), cov.not_literal.len()), (4, 2, 1, 1), "{cov:?}");
+        assert!(errs.iter().any(|(_, m)| m.contains("column `titel`")), "SQL in tests is checked too: {errs:?}");
     }
 }

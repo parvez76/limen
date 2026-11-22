@@ -440,7 +440,16 @@ pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
 /// SQL against `schema.sql` / `migrations/*.sql` next to the entry file, when present.
 fn sql_gate(file: &Path, prog: &ast::Program) -> Result<()> {
     let Some(schema) = sqlcheck::load(file)? else { return Ok(()) };
-    let errors = sqlcheck::check(prog, &schema);
+    let (errors, cov) = sqlcheck::check(prog, &schema);
+    // coverage on every build: a skipped query must never look like a checked one
+    let mut line = format!("parvez: SQL: {} of {} queries checked against {}", cov.checked, cov.recognized, schema.source);
+    if !cov.not_literal.is_empty() {
+        line.push_str(&format!("; {} not a literal (built at run time or passed in a variable), so not checked here", cov.not_literal.len()));
+    }
+    eprintln!("{line}");
+    for l in &cov.unparsed {
+        eprintln!("parvez: warning: {}: this SQL couldn't be parsed, so it wasn't checked against the schema", locate(&prog.files, *l));
+    }
     if errors.is_empty() {
         return Ok(());
     }

@@ -45,6 +45,32 @@ jobs:
           cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
           node playground/test.mjs playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - name: cargo test (failures are posted as annotations)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release --locked --no-fail-fast 2>&1 | tee test.log && exit 0
+          python3 - <<'PY'
+          import re
+          log = open("test.log", encoding="utf-8", errors="replace").read()
+          blocks = re.findall(r"^---- (\S+) stdout ----\n(.*?)(?=^---- |^failures:|\Z)", log, re.S | re.M)
+          if not blocks:
+              blocks = [("build", "\n".join(l for l in log.splitlines() if "error" in l)[-3000:])]
+          for name, body in blocks[:10]:
+              msg = body.strip()[-3000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::error title={name}::{msg}")
+          PY
+          exit 1
+
   windows:
     runs-on: windows-latest
     steps:

@@ -1,10 +1,13 @@
 [package]
 name = "parvez"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
-description = "Parvez: Python-dense syntax that transpiles to Rust"
+description = "A small language for HTTP services and CLI tools that compiles to Rust, with built-in security checks"
 license = "MIT"
 repository = "https://github.com/parvez76/parvez"
+keywords = ["language", "transpiler", "security", "rust", "backend"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.104"

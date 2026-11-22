@@ -2,6 +2,12 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
+## v0.21.0
+- **Breaking:** the SQL schema check now finds queries everywhere: inside `match` arms, closures, `spawn`, `catch` handlers, tests, `every` workers, `state:` and constants. Before, queries in those places were silently skipped, so a program that built with v0.20 can now fail with SQL errors it always had.
+- Every build of a program with a schema prints `SQL: N of M queries checked`, and warns with the line of any literal SQL the parser can't read, instead of skipping it silently.
+- CI runs the full test suite on macOS too.
+- crates.io metadata: description, keywords, categories.
+
 ## v0.20.0
 - SQL checked against the schema, offline, on every build: with `schema.sql` or `migrations/*.sql` next to the program, every literal query is checked for unknown tables and columns, placeholder count against `.bind()` calls, bound-value types, and `query_as` fields (selected, typed, `?` when the column can be NULL).
 - `parvez check --db`: every query is also described by the live database at `DATABASE_URL`, the same information `sqlx::query!` uses (nothing is executed).

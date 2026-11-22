@@ -23,7 +23,7 @@ These checks run on every `build`, `run`, `check`, `test` and `show`; there's no
 |---|---|---|
 | Access policy | A route, socket or page without `@guard(fn)` or `@public("reason")` | Doesn't check that a guard's logic is right |
 | SQL built from strings | Interpolated, concatenated or `format`-ed strings passed to SQL calls (`query`, `execute`, ...), anywhere | Recognizes SQL calls by name; add others with `[security.sinks] sql` |
-| SQL against the schema | With `schema.sql` or `migrations/*.sql` next to the program: unknown tables and columns, placeholder count vs `.bind()`, bound-value types, `query_as` fields (selected, typed, `?` when the column can be NULL). `parvez check --db` also asks the live database to describe every query, as `sqlx::query!` does | Offline: names and simple types only, not function return types or views; SQL the parser can't read is skipped. `--db` needs a reachable database and only describes queries |
+| SQL against the schema | With `schema.sql` or `migrations/*.sql` next to the program: unknown tables and columns, placeholder count vs `.bind()`, bound-value types, `query_as` fields (selected, typed, `?` when the column can be NULL). `parvez check --db` also asks the live database to describe every query, as `sqlx::query!` does | Offline: names and simple types only, not function return types or views. Every build prints how many queries were checked; SQL the parser can't read is skipped with a warning naming the line. `--db` needs a reachable database and only describes queries |
 | Request data to files and processes | Route parameters, bodies, headers, WebSocket messages and database reads reaching `std::fs`, `File`, `OpenOptions` or `Command`, followed through functions, modules, traits, objects and `state:` with no depth limit | Only those sinks, plus any added with `[security.sinks]` in `parvez.toml`. Data passed through channels, and file, environment or HTTP-response contents, aren't treated as untrusted |
 | Secrets | `Secret` values print as `[redacted]` and can't be serialized; passing `.expose()` to logs, prints, errors, pages or strings; secret-named `state:` fields typed `str`; credential-like literals | Literal detection is pattern- and entropy-based; copies made from `.expose()` aren't wiped from memory |
 
@@ -44,7 +44,7 @@ Projects can add their own rules in `parvez.toml`: banned calls with a reason (`
 - It doesn't replace Rust. It needs the Rust toolchain and a C linker (the installer and `parvez doctor` help with both).
 - It covers backend services and tools, not general-purpose programming.
 - It has no editor plugin or language server yet.
-- Its tests run on Linux and Windows in CI (Windows support is beta). macOS binaries are built and released, but the test suite doesn't run on macOS in CI yet.
+- Its tests run on Linux, macOS and Windows in CI (Windows support is beta).
 
 ## Install
 
@@ -53,7 +53,7 @@ curl -fsSL https://parvez76.github.io/parvez/install.sh | sh        # Linux, mac
 irm https://parvez76.github.io/parvez/install.ps1 | iex             # Windows, in PowerShell
 ```
 
-The installers verify the download against the release's checksums before installing, and offer to install Rust if it's missing. Or build from source: `cargo install --git https://github.com/parvez76/parvez --tag v0.20.0 --locked`. Releases are signed and reproducible; see [verifying a release](SECURITY.md#verifying-a-release).
+The installers verify the download against the release's checksums before installing, and offer to install Rust if it's missing. Or build from source: `cargo install --git https://github.com/parvez76/parvez --tag v0.21.0 --locked`. Releases are signed and reproducible; see [verifying a release](SECURITY.md#verifying-a-release).
 
 ```bash
 parvez doctor                    # check the setup
