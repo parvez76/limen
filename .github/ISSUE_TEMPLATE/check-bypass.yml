@@ -1,0 +1,31 @@
+name: Security check bypass
+description: Code that gets request data, injectable SQL or a secret past Parvez's checks
+labels: [security-check, bypass]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you: this is the most useful report there is. If you've found a vulnerability in Parvez itself (the compiler, generated services, installers or releases), please don't file it here; report it privately as described in SECURITY.md.
+  - type: input
+    id: link
+    attributes:
+      label: Playground link
+      description: Reproduce it at https://parvez76.github.io/parvez/play/ and press Share. Or paste the code below.
+  - type: textarea
+    id: code
+    attributes:
+      label: Code
+      render: python
+      placeholder: the smallest .prvz program that shows it
+  - type: textarea
+    id: why
+    attributes:
+      label: What should have been caught
+      description: 'Which line, and what reaches what. For example: "line 7, the route''s name parameter reaches std::fs::read_to_string through helper()".'
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Parvez version
+      placeholder: parvez --version

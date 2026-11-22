@@ -135,6 +135,7 @@ Parvez makes security claims, so testing them should be easy. Paste your best at
 - [Reference](docs/REFERENCE.md): the language at a glance, every command, what's built into every service, full-stack services with Masud pages
 - [SPEC.md](SPEC.md): the complete language, written for humans and AI agents
 - [SECURITY.md](SECURITY.md): what Parvez enforces, mapped to CWE, OWASP and ASVS; how to verify a release; how to report a vulnerability
+- [Contributing](CONTRIBUTING.md): break a check, build and test, pull requests
 - [Changelog](docs/CHANGELOG.md)
 - [examples/tasks](examples/tasks/): a multi-user service with Postgres, sign-in, a page and tests, in about 90 lines
 - [examples/](examples/)

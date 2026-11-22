@@ -1,0 +1,25 @@
+name: False alarm
+description: Safe code that Parvez refuses
+labels: [security-check, false-alarm]
+body:
+  - type: input
+    id: link
+    attributes:
+      label: Playground link
+      description: Reproduce it at https://parvez76.github.io/parvez/play/ and press Share. Or paste the code below.
+  - type: textarea
+    id: code
+    attributes:
+      label: Code
+      render: python
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it's safe
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Parvez version
+      placeholder: parvez --version

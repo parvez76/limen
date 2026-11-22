@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability privately
+    url: https://github.com/parvez76/parvez/security/advisories/new
+    about: Vulnerabilities in Parvez itself (compiler, generated services, installers, releases). Please don't open a public issue.
