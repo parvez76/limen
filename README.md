@@ -4,6 +4,8 @@
 
 The Parvez language is small, built for backend services and DevOps tools that people and AI agents write together. It compiles to plain, readable Rust. You write a few lines. The compiler refuses the route nobody guarded, the secret headed for a log, and the query pasted together from strings. What you get back is one native binary.
 
+![An AI agent's admin route without an access policy is refused by `parvez check`; adding a guard makes it compile](docs/demo/demo.svg)
+
 **[Try it in your browser](https://parvez76.github.io/parvez/play/)**: the real compiler, compiled to WebAssembly. No install.
 
 **Why a language, and not a Rust crate?** [The honest answer](docs/WHY-A-LANGUAGE.md), starting with what Rust tools already do well.
