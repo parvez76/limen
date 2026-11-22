@@ -2,7 +2,10 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
-## v0.19.0
+## v0.19.1
+- The v0.19.0 changes below, released. The v0.19.0 tag was never published: its release tests found `examples/tasks/main.prvz` missing from the repository (an ignore rule for build outputs matched it).
+
+## v0.19.0 (not published)
 - `parvez_spec` (MCP) returns the core language by default, about 3,000 tokens instead of the whole 11,800-token spec, plus an index; `parvez_spec(topic)` returns one chapter (`http`, `security`, `tests`, `masud`, `oidc`, `browser`, `modules`, `crates`, `generics`, `frontend`, `observability`, `cli`), and `all` the whole spec. A CLI tool needs about 3,100 tokens of spec, a web service (core, `http`, `security`) about 7,100.
 - `parvez types --openapi`: an OpenAPI 3.1 description of a service (routes, JSON schemas, success statuses, errors, bearer-token security, and each route's guards or public reason), validated against the OpenAPI 3.1 schema in tests.
 
