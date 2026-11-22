@@ -4,7 +4,7 @@ import { PRESETS } from "./presets.js";
 
 const $ = (id) => document.getElementById(id);
 const src = $("src"), gutter = $("gutter"), findingsEl = $("findings"), rustEl = $("rust"), statusEl = $("status");
-const CORPUS = ["flows", "sql", "secrets", "traits", "stores", "objects_db", "deep_chain", "state_chain", "known_miss"];
+const CORPUS = ["flows", "sql", "secrets", "traits", "stores", "channels", "objects_db", "deep_chain", "state_chain", "known_miss"];
 
 // ---- the compiler ----------------------------------------------------------------
 let pz = null;

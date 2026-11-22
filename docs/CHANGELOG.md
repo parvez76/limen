@@ -4,6 +4,7 @@ Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked
 
 ## v0.21.0
 - **Breaking:** the SQL schema check now finds queries everywhere: inside `match` arms, closures, `spawn`, `catch` handlers, tests, `every` workers, `state:` and constants. Before, queries in those places were silently skipped, so a program that built with v0.20 can now fail with SQL errors it always had.
+- Security checks follow request data through channels: a `state:` sender connects to the receivers of the same element type, and `tx, rx = channel()` links locally. This was the last documented blind spot apart from file, environment and HTTP-response contents. Also **breaking** in the same sense: code that sent request data through a channel into a file path or command now fails.
 - Every build of a program with a schema prints `SQL: N of M queries checked`, and warns with the line of any literal SQL the parser can't read, instead of skipping it silently.
 - CI runs the full test suite on macOS too.
 - crates.io metadata: description, keywords, categories.

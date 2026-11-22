@@ -43,7 +43,7 @@ jobs:
           cp -r site/. _site/
           cp playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm _site/play/parvez.wasm
           mkdir -p _site/play/presets
-          for c in flows sql secrets traits stores objects_db deep_chain state_chain known_miss; do
+          for c in flows sql secrets traits stores channels objects_db deep_chain state_chain known_miss; do
             cp "tests/security_corpus/$c.prvz" _site/play/presets/
           done
           cp install.sh install.ps1 _site/

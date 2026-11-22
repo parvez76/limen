@@ -228,6 +228,10 @@ pub fn lint_with(prog: &Program, custom: &Custom) -> Report {
         let mut stored = (*fx.stored).clone();
         for (field, at) in &run.writes {
             stored.entry(field.clone()).or_insert_with(|| at.clone());
+            // data sent on a channel arrives at its receivers
+            for rx in fx.channels.get(field).into_iter().flatten() {
+                stored.entry(rx.clone()).or_insert_with(|| format!("{at}, sent through `state.{field}`"));
+            }
         }
         if stored.len() == fx.stored.len() {
             break;
@@ -370,6 +374,8 @@ struct Fx<'a> {
     stored: std::rc::Rc<HashMap<String, String>>,
     /// project rules from parvez.toml
     custom: Custom,
+    /// channel sender field -> the receiver fields of the same element type
+    channels: HashMap<String, Vec<String>>,
 }
 
 struct FnInfo<'a> {
@@ -416,6 +422,29 @@ fn carries_text(t: &Type) -> bool {
     !matches!(t, Type::Named(n, a) if a.is_empty() && SCALARS.contains(&n.as_str()))
 }
 
+/// A channel end: (is the sender, element type), seeing through Mutex/Arc/...
+fn channel_end(t: &Type) -> Option<(bool, String)> {
+    match t {
+        Type::Ref(x, _) => channel_end(x),
+        Type::Named(n, args) => {
+            let base = last_segment(n);
+            if WRAPPERS.contains(&base) && args.len() == 1 {
+                return channel_end(&args[0]);
+            }
+            let elem = args.first().map(|a| format!("{a:?}")).unwrap_or_default();
+            match base {
+                "Sender" | "UnboundedSender" | "SyncSender" => Some((true, elem)),
+                "Receiver" | "UnboundedReceiver" => Some((false, elem)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `tx, rx = mpsc::channel()` and friends.
+const CHANNEL_CTORS: &[&str] = &["channel", "unbounded_channel", "sync_channel", "bounded", "unbounded"];
+
 fn qualify(module: &[String], name: &str) -> String {
     if module.is_empty() { name.to_string() } else { format!("{}::{name}", module.join("::")) }
 }
@@ -434,6 +463,7 @@ impl<'a> Fx<'a> {
             state_elems: HashMap::new(),
             stored: Default::default(),
             custom: Custom::default(),
+            channels: HashMap::new(),
         };
         let mut traits: HashSet<String> = HashSet::new();
         for (_, item) in items {
@@ -494,6 +524,14 @@ impl<'a> Fx<'a> {
                     }
                     if let Some(d) = fx.elem_desc(ty, &HashMap::new()) {
                         fx.state_elems.insert(name.clone(), d);
+                    }
+                }
+                // channel ends: a sender connects to every receiver of the same element type
+                let ends: Vec<(&String, bool, String)> = st.fields.iter().filter_map(|(n, t, _, _)| channel_end(t).map(|(s, e)| (n, s, e))).collect();
+                for (sender, _, elem) in ends.iter().filter(|e| e.1) {
+                    let rx: Vec<String> = ends.iter().filter(|e| !e.1 && &e.2 == elem).map(|e| e.0.clone()).collect();
+                    if !rx.is_empty() {
+                        fx.channels.insert((*sender).clone(), rx);
                     }
                 }
             }
@@ -657,6 +695,8 @@ struct Cx {
     stored: std::rc::Rc<HashMap<String, String>>,
     /// name -> the type of its elements (`[Disk(..)]`, `Vec<Box<dyn Store>>`)
     elems: HashMap<String, String>,
+    /// local channel: sender name -> receiver name (`tx, rx = mpsc::channel()`)
+    links: HashMap<String, String>,
     /// database reads count as untrusted (off in summaries' probes)
     db: bool,
 }
@@ -913,6 +953,10 @@ impl<'f, 'a> Linter<'f, 'a> {
             if n == "self" {
                 self.self_write = true;
             }
+            // `tx.send(x)`: what's sent comes out of the receiver
+            if let Some(rx) = cx.links.get(&n).cloned() {
+                cx.taint.insert(rx);
+            }
             cx.taint.insert(n);
         }
     }
@@ -987,6 +1031,11 @@ impl<'f, 'a> Linter<'f, 'a> {
                 if tainted(value, cx) {
                     cx.taint.extend(names.iter().map(|(n, _)| n.clone()));
                 }
+                if let (Expr::Call(f, _, _), [(tx, _), (rx, _)]) = (value, names.as_slice())
+                    && CHANNEL_CTORS.contains(&last_segment(f))
+                {
+                    cx.links.insert(tx.clone(), rx.clone());
+                }
             }
             Stmt::Ret(None) | Stmt::Break | Stmt::Continue => {}
             Stmt::If { branches, els } => {
@@ -996,6 +1045,9 @@ impl<'f, 'a> Linter<'f, 'a> {
                     if let Expr::LetPat(p, x) = c {
                         if tainted(x, cx) {
                             inner.taint.extend(pattern_binds(p));
+                            if let Some(f) = stored_from(x, cx).filter(|_| !tainted(x, &cx.without_stored())) {
+                                inner.via.extend(pattern_binds(p).into_iter().map(|b| (b, f.clone())));
+                            }
                         }
                         if is_dynamic(x, cx) {
                             inner.dynamic.extend(pattern_binds(p));

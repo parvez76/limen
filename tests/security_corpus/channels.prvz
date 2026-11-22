@@ -1,0 +1,31 @@
+# Request data handed between tasks through channels.
+state:
+    tx: tokio::sync::mpsc::UnboundedSender<String> = jobs_sender()
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>> = jobs_receiver()
+    count_tx: tokio::sync::mpsc::UnboundedSender<i64> = counts_sender()
+    count_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<i64>> = counts_receiver()
+    note_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>> = notes_sender()
+    note_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> = notes_receiver()
+
+@public("corpus")
+route POST "/jobs/{name}" (state, name: str) -> str!:
+    # the receiving end is a different `state:` field
+    state.tx.send(name.clone())?
+    state.note_tx.send("fixed".as_bytes().to_vec())?
+    ret "queued"
+
+every 1m (state):
+    if let Some(job) = state.rx.lock().await.recv().await:
+        Command::new(job).status()  # expect: command-injection
+    if let Some(n) = state.count_rx.lock().await.recv().await:
+        std::fs::read_to_string("/srv/report-{n}.txt")
+    if let Some(note) = state.note_rx.lock().await.recv().await:
+        std::fs::write("/srv/notes.bin", note)
+
+@public("corpus")
+route POST "/local/{name}" (name: str) -> str!:
+    # a channel made and used inside one handler
+    tx, rx = std::sync::mpsc::channel()
+    tx.send(name.clone())?
+    got = rx.recv()?
+    ret std::fs::read_to_string(got)?  # expect: path-traversal

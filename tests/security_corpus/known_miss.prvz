@@ -1,19 +1,5 @@
 # Documented blind spots (SECURITY.md). Each must NOT be reported yet; when the
 # analysis catches one, turn its annotation into `expect`.
-state:
-    tx: tokio::sync::mpsc::UnboundedSender<String> = jobs_sender()
-    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>> = jobs_receiver()
-
-@public("corpus")
-route POST "/m/{name}" (state, name: str) -> str!:
-    # handed to another task through a channel: the receiving end is a different field
-    state.tx.send(name.clone())?
-    ret "queued"
-
-every 1m (state):
-    if let Some(job) = state.rx.lock().await.recv().await:
-        Command::new(job).status()  # known-miss: command-injection
-
 @public("corpus")
 route GET "/m2" -> str!:
     # other external input: a file's or an HTTP response's contents used as a path
