@@ -3,7 +3,10 @@ name: ci
 on:
   push:
     branches: [main, 'ci/**']
+    # docs and the site don't need the test suite (the pages workflow deploys the site)
+    paths-ignore: ['**.md', 'docs/**', 'site/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'site/**']
 
 permissions:
   contents: read
