@@ -2114,7 +2114,7 @@ fn openapi_describes_routes_types_and_access() {
     assert_eq!(d["openapi"], "3.1.0");
     // SQL coverage is printed on every check of a program with a schema
     let lint = parvez().current_dir(&root).args(["lint", "main.prvz"]).output().unwrap();
-    assert!(text(&lint.stderr).contains("parvez: SQL: 4 of 4 queries checked against ./schema.sql"), "{}", text(&lint.stderr));
+    assert!(text(&lint.stderr).contains("parvez: SQL: 4 of 4 queries checked against schema.sql"), "{}", text(&lint.stderr));
     let create = &d["paths"]["/api/tasks"]["post"];
     assert!(create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/Task", "{create}");
     assert_eq!(create["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/NewTask");

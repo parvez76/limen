@@ -430,8 +430,29 @@ fn send(port: u16, c: &Case, extra: &[(String, String)]) -> std::io::Result<(u16
     s.write_all(head.as_bytes())?;
     // The server may reject (413) and close before reading everything.
     let _ = s.write_all(&c.body);
+    // Keep what arrived even if the connection is then reset: when a server
+    // rejects an oversized body and closes, some systems (macOS) reset the
+    // connection, and read_to_end would throw the 413 away.
     let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
+    let mut buf = [0u8; 8192];
+    let reset = loop {
+        match s.read(&mut buf) {
+            Ok(0) => break None,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => break Some(e),
+        }
+    };
+    if raw.is_empty()
+        && let Some(e) = reset
+    {
+        // the server closed before answering: for an oversized body that's a
+        // rejection (it refused to read it); for anything else it's a dropped request
+        if c.body.len() > 1024 * 1024 && matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe) {
+            return Ok((413, "(connection closed before the oversized body was read)".into(), true));
+        }
+        return Err(e);
+    }
     let text = String::from_utf8_lossy(&raw).to_string();
     let status = text.get(9..12).and_then(|x| x.parse().ok()).ok_or_else(|| std::io::Error::other("no HTTP status line"))?;
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));

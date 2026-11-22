@@ -56,7 +56,12 @@ pub fn load(entry: &Path) -> anyhow::Result<Option<Schema>> {
     if files.is_empty() {
         return Ok(None);
     }
-    let mut schema = Schema { source: files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", "), ..Default::default() };
+    // `schema.sql`, `migrations/001.sql`: `/` on every platform, no leading `./`
+    let shown = |f: &Path| {
+        let s = f.display().to_string().replace('\\', "/");
+        s.strip_prefix("./").map(str::to_string).unwrap_or(s)
+    };
+    let mut schema = Schema { source: files.iter().map(|f| shown(f)).collect::<Vec<_>>().join(", "), ..Default::default() };
     for f in &files {
         let text = std::fs::read_to_string(f)?;
         let stmts = Parser::parse_sql(&PostgreSqlDialect {}, &text)
