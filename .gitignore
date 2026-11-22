@@ -8,4 +8,7 @@
 /playground/target
 .parvez_build/
 /examples/tasks/main
-/examples/tasks/main.*
+/examples/tasks/main.exe
+/examples/tasks/main.sha256
+/examples/tasks/main.exe.sha256
+/examples/tasks/*.sbom.json

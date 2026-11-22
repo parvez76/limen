@@ -1,0 +1,63 @@
+# Tasks: a small multi-user to-do service. Each signed-in user sees only their own tasks.
+# Postgres (sqlx), OpenID Connect sign-in (Keycloak, Entra ID, Auth0...), a JSON API,
+# a server-rendered page, and tests. See README.md to run it.
+import tasks
+import ui.board
+
+state:
+    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(&env("DATABASE_URL", "postgres://localhost/tasks"))?
+
+@guard(tasks::me)
+route GET "/api/tasks" (state, auth) -> [tasks::Task]!:
+    ret tasks::tasks_of(state, &auth.sub).await?
+
+@guard(tasks::me)
+route POST "/api/tasks" (state, auth, body: tasks::NewTask) -> tasks::Task!:
+    title = tasks::clean_title(&body.title)?
+    task: tasks::Task = sqlx::query_as("INSERT INTO tasks (owner, title) VALUES ($1, $2) RETURNING id, title, done")
+        .bind(&auth.sub)
+        .bind(&title)
+        .fetch_one(&state.db)
+        .await?
+    status(201)
+    ret task
+
+@guard(tasks::me)
+route PATCH "/api/tasks/{id}" (state, auth, id: i64, body: tasks::Update) -> tasks::Task!:
+    # the owner check is part of the query: another user's task is simply "not found"
+    found: tasks::Task? = sqlx::query_as("UPDATE tasks SET done = $1 WHERE id = $2 AND owner = $3 RETURNING id, title, done")
+        .bind(body.done)
+        .bind(id)
+        .bind(&auth.sub)
+        .fetch_optional(&state.db)
+        .await?
+    match found:
+        Some(t) -> ret t
+        None -> fail(404, code: "not_found", "no such task")
+
+@guard(tasks::me)
+route DELETE "/api/tasks/{id}" (state, auth, id: i64)!:
+    gone = sqlx::query("DELETE FROM tasks WHERE id = $1 AND owner = $2")
+        .bind(id)
+        .bind(&auth.sub)
+        .execute(&state.db)
+        .await?
+    if gone.rows_affected() == 0: fail(404, code: "not_found", "no such task")
+    status(204)
+
+test "the API needs a signed-in user":
+    app = test_app().await?
+    res = app.get("/api/tasks").await?
+    assert_eq(res.status, 401)
+    res = app.post("/api/tasks", &tasks::NewTask(title: "x")).await?
+    assert_eq(res.status, 401)
+
+test "titles are trimmed and limited":
+    assert_eq(tasks::clean_title("  buy milk ").unwrap(), "buy milk")
+    assert(tasks::clean_title("   ").is_err(), "blank title")
+    assert(tasks::clean_title(&"x".repeat(201)).is_err(), "201 characters")
+
+test "the service reports healthy without a database round trip":
+    app = test_app().await?
+    res = app.get("/healthz").await?
+    assert_eq(res.status, 200)
