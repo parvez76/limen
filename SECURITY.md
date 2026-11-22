@@ -28,8 +28,8 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 | Version | Security fixes |
 |---|---|
-| 0.18.x | yes |
-| < 0.18 | no |
+| 0.19.x | yes |
+| < 0.19 | no |
 
 ## Verifying a release
 
@@ -41,13 +41,13 @@ Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.git
 # 1. checksum
 sha256sum -c SHA256SUMS --ignore-missing
 # 2. provenance: built from this repository by the release workflow
-gh attestation verify parvez-v0.18.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/parvez
+gh attestation verify parvez-v0.19.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/parvez
 ```
 
 Builds are reproducible: the workflow rebuilds the Linux binary from scratch in a different directory and refuses to publish if a single byte differs. You can check a release yourself with the same Rust version:
 
 ```bash
-git clone https://github.com/parvez76/parvez && cd parvez && git checkout v0.18.0
+git clone https://github.com/parvez76/parvez && cd parvez && git checkout v0.19.0
 .github/release-build.sh x86_64-unknown-linux-musl /tmp/rebuild   # prints the archive's SHA-256
 grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 ```
@@ -55,10 +55,10 @@ grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 Release tags from v0.16.0 on are signed with the project's SSH signing key, listed in [`.github/allowed_signers`](.github/allowed_signers) (fingerprint `SHA256:FRGXW2DjW+ITeT31kbI1ZZTrpXsglQBuWgcIS4/q4JA`). GitHub shows them as Verified; to check locally:
 
 ```bash
-git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.18.0
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.19.0
 ```
 
-Installing from source (`cargo install --git https://github.com/parvez76/parvez --tag v0.18.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
+Installing from source (`cargo install --git https://github.com/parvez76/parvez --tag v0.19.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
 
@@ -143,7 +143,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/parvez --tag v0.18.0 --locked
+      - run: cargo install --git https://github.com/parvez76/parvez --tag v0.19.0 --locked
       - run: parvez lint main.prvz --sarif -o parvez.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()

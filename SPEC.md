@@ -1,4 +1,4 @@
-# PARVEZ v0.18.0 SPEC (AI system prompt)
+# PARVEZ v0.19.0 SPEC (AI system prompt)
 
 You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
@@ -176,6 +176,8 @@ Place `@embed_dir("web/dist")` on its own line in the entry file. The directory 
 Explicit routes and pages take precedence. GET and HEAD serve assets with extension-based MIME types, directory indexes and extensionless HTML exports. Unmatched extensionless paths serve the root index for SPA navigation, but only to browser navigations (`Accept: text/html`). An API client calling a wrong path gets the JSON 404. Missing file-like paths return 404, and methods other than GET/HEAD on unmatched paths return 404 too.
 
 `parvez types --ts [entry.prvz] [--out types.ts]` follows transitive imports from `main.prvz` by default. It works before the frontend build exists. Without `--out` it writes to stdout. It exports each `@json` model, a corresponding `Input` type that accounts for serde defaults, and `Routes` indexed by method and path. For example, `Routes["POST /events/{id}"]["body"]` is the JSON request type. Path parameters live in `params`, query parameters in `query`, and the success payload in `response`. Unit enum variants become string literals and variants with payloads become externally tagged unions.
+
+`parvez types --openapi [entry.prvz] [--out api.json]` writes an OpenAPI 3.1 description instead: every route's path and query parameters, JSON request and response schemas (serde's wire format, as above), the success status set by `status(N)`, the shared `{"error", "code"}` error shape, a bearer-token security scheme for routes whose guard calls `oidc`/`oidc_session`, and each operation's guards or `@public` reason in `x-parvez-access`. WebSockets and the built-in endpoints aren't listed.
 
 ## Masud v0.1
 

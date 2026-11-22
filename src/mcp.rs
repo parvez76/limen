@@ -12,6 +12,69 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 const SPEC: &str = include_str!("../SPEC.md");
+
+/// Sections of SPEC.md served on request (topic, heading prefix, what it covers).
+/// Everything else is the core, sent by default with an index of these: an agent
+/// writing a CLI tool doesn't need the HTTP, security or sign-in chapters.
+const TOPICS: &[(&str, &str, &str)] = &[
+    ("http", "## HTTP services", "routes, `state:`, guards, request access, status codes, WebSockets"),
+    ("security", "## Security", "the compile-time security rules and the safe way to write SQL, commands, file paths and secrets"),
+    ("tests", "## Tests", "`test` blocks, `test_app()` and assertions"),
+    ("masud", "## Masud", "server-rendered HTML pages (`.msd`)"),
+    ("oidc", "## OIDC", "validating bearer tokens from Keycloak, Entra ID, Auth0"),
+    ("browser", "## Browser sign-in", "sign-in and sessions for Masud pages"),
+    ("modules", "## Files and modules", "multi-file programs and `import`"),
+    ("crates", "## Crates", "using Rust crates and `parvez.toml`"),
+    ("generics", "## Generics, traits", "generics, traits, `dyn`, `priv`"),
+    ("frontend", "## Embedded frontend", "serving a built frontend and exporting TypeScript types"),
+    ("observability", "## Observability", "logs, metrics and health checks every service gets"),
+    ("cli", "## CLI", "every `parvez` command"),
+];
+
+/// SPEC.md split at `## ` headings: (heading line, whole section).
+fn spec_sections() -> (&'static str, Vec<(&'static str, &'static str)>) {
+    let starts: Vec<usize> = SPEC.match_indices("\n## ").map(|(i, _)| i + 1).collect();
+    let preamble = &SPEC[..starts.first().copied().unwrap_or(SPEC.len())];
+    let sections = starts
+        .iter()
+        .enumerate()
+        .map(|(n, &i)| {
+            let end = starts.get(n + 1).copied().unwrap_or(SPEC.len());
+            let body = &SPEC[i..end];
+            (body.lines().next().unwrap_or(""), body)
+        })
+        .collect();
+    (preamble, sections)
+}
+
+/// `parvez_spec`: the core by default, one topic, or `all`.
+fn spec(topic: Option<&str>) -> Result<String, String> {
+    let (preamble, sections) = spec_sections();
+    match topic.map(str::trim).filter(|t| !t.is_empty()) {
+        Some("all") => Ok(SPEC.to_string()),
+        Some(t) => {
+            let Some((_, prefix, _)) = TOPICS.iter().find(|(name, ..)| *name == t) else {
+                let names: Vec<&str> = TOPICS.iter().map(|(n, ..)| *n).collect();
+                return Err(format!("unknown topic {t:?}; topics: {}, all", names.join(", ")));
+            };
+            Ok(sections.iter().filter(|(h, _)| h.starts_with(prefix)).map(|(_, b)| *b).collect())
+        }
+        None => {
+            let mut out = preamble.to_string();
+            for (h, body) in &sections {
+                if !TOPICS.iter().any(|(_, prefix, _)| h.starts_with(prefix)) {
+                    out.push_str(body);
+                }
+            }
+            out.push_str("\n## More topics (call parvez_spec with `topic`)\nWriting a web service? Fetch `http` and `security` first.\n");
+            for (name, _, what) in TOPICS {
+                out.push_str(&format!("- `{name}`: {what}\n"));
+            }
+            out.push_str("- `all`: the whole spec\n");
+            Ok(out)
+        }
+    }
+}
 const PROTOCOL: &str = "2025-06-18";
 
 pub fn serve() -> Result<()> {
@@ -53,7 +116,8 @@ pub fn handle(req: &Value) -> Option<Value> {
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "parvez", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "Parvez (.prvz) is a token-dense language that compiles to Rust. \
-                Call parvez_spec once to learn the syntax, write code, then loop on parvez_check \
+                Call parvez_spec to learn the core syntax (and parvez_spec with a topic, e.g. `http` or `security`, \
+                for the parts your program needs), write code, then loop on parvez_check \
                 until it returns ok. Errors point at .prvz lines."
         })),
         "ping" => Ok(json!({})),
@@ -79,8 +143,8 @@ fn tools() -> Value {
     json!([
         {
             "name": "parvez_spec",
-            "description": "Returns the Parvez language spec (SPEC.md): everything needed to write valid .prvz code.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "Returns the Parvez language spec. With no topic: the core language and an index of topics (http, security, tests, masud, oidc, browser, modules, crates, generics, frontend, observability, cli). With a topic: that section. `all`: the whole spec.",
+            "inputSchema": { "type": "object", "properties": { "topic": { "type": "string", "description": "a topic from the index, or `all`" } } }
         },
         {
             "name": "parvez_check",
@@ -129,7 +193,10 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
     match name {
-        "parvez_spec" => Ok(text(SPEC, false)),
+        "parvez_spec" => Ok(match spec(args["topic"].as_str()) {
+            Ok(t) => text(&t, false),
+            Err(e) => text(&e, true),
+        }),
         "parvez_check" => {
             let (file, root, shown) = match source_file(args) {
                 Ok(x) => x,
@@ -207,6 +274,26 @@ mod tests {
         let t = r["result"]["content"][0]["text"].as_str().unwrap();
         assert!(t.starts_with("# PARVEZ"));
         assert_eq!(r["result"]["isError"], false);
+        // the core leaves out topic chapters but lists them
+        assert!(t.contains("## Statements") && !t.contains("## HTTP services") && t.contains("- `http`:"), "{t}");
+        assert!(t.len() < SPEC.len() / 2);
+    }
+
+    #[test]
+    fn spec_topics_cover_every_section_once() {
+        let (_, sections) = spec_sections();
+        // every topic matches exactly one section; core + topics = the whole spec
+        for (name, prefix, _) in TOPICS {
+            assert_eq!(sections.iter().filter(|(h, _)| h.starts_with(prefix)).count(), 1, "topic {name}");
+        }
+        let topics: usize = TOPICS.iter().map(|(n, ..)| spec(Some(n)).unwrap().len()).sum();
+        let core = spec(None).unwrap();
+        let index_len = core.len() - core.find("\n## More topics").unwrap();
+        assert_eq!(core.len() - index_len + topics, SPEC.len());
+        assert_eq!(spec(Some("all")).unwrap(), SPEC);
+        assert!(spec(Some("nope")).unwrap_err().contains("topics: http"));
+        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parvez_spec","arguments":{"topic":"security"}}})).unwrap();
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with("## Security"));
     }
 
     #[test]

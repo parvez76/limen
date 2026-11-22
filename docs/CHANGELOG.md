@@ -2,7 +2,11 @@
 
 Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
 
-## Unreleased
+## v0.19.0
+- `parvez_spec` (MCP) returns the core language by default, about 3,000 tokens instead of the whole 11,800-token spec, plus an index; `parvez_spec(topic)` returns one chapter (`http`, `security`, `tests`, `masud`, `oidc`, `browser`, `modules`, `crates`, `generics`, `frontend`, `observability`, `cli`), and `all` the whole spec. A CLI tool needs about 3,100 tokens of spec, a web service (core, `http`, `security`) about 7,100.
+- `parvez types --openapi`: an OpenAPI 3.1 description of a service (routes, JSON schemas, success statuses, errors, bearer-token security, and each route's guards or public reason), validated against the OpenAPI 3.1 schema in tests.
+
+## Site and docs (no release needed)
 - Playground: https://parvez76.github.io/parvez/play/ runs the real parser, security checks and Rust generator in the browser (WebAssembly, built from this repository; no third-party code). Examples include the adversarial corpus; Share links carry the code in the URL. CI and the Pages build require it to report exactly what the CLI reports on the corpus.
 
 ## v0.18.0

@@ -10,6 +10,7 @@ mod fuzz;
 mod lexer;
 mod masud;
 mod mcp;
+mod openapi;
 mod fmt;
 mod scaffold;
 mod parser;
@@ -100,8 +101,12 @@ enum Cmd {
     Mcp,
     /// Emit the JSON models and HTTP contracts of an entry point and its imports.
     Types {
-        #[arg(long, required = true)]
+        /// TypeScript declarations
+        #[arg(long)]
         ts: bool,
+        /// an OpenAPI 3.1 description (JSON)
+        #[arg(long)]
+        openapi: bool,
         #[arg(default_value = "main.prvz")]
         file: PathBuf,
         #[arg(long)]
@@ -243,9 +248,16 @@ fn real_main() -> Result<()> {
             let status = child.wait().context("running cargo test")?;
             std::process::exit(status.code().unwrap_or(1));
         }
-        Cmd::Types { file, out, .. } => {
+        Cmd::Types { file, out, ts, openapi } => {
+            if ts == openapi {
+                bail!("choose one: --ts (TypeScript) or --openapi (OpenAPI 3.1)");
+            }
             let prog = load_program(&file)?;
-            let ts = typescript::generate(&prog)?;
+            let ts = if openapi {
+                openapi::generate(&prog, &bin_name(&file))?
+            } else {
+                typescript::generate(&prog)?
+            };
             if let Some(out) = out {
                 write_if_changed(&out, &ts)?;
             } else {

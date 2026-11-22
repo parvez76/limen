@@ -115,7 +115,7 @@ parvez test main.prvz
 parvez run main.prvz               # http://localhost:8080
 ```
 
-Both installers check the download against the release's published checksums before installing anything, and offer to set up Rust if you don't have it. On Windows, Rust also needs Microsoft's C++ build tools; `parvez doctor` gives the one-line `winget` command. You can also use Parvez inside WSL with the Linux installer. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/parvez --tag v0.18.0 --locked`.
+Both installers check the download against the release's published checksums before installing anything, and offer to set up Rust if you don't have it. On Windows, Rust also needs Microsoft's C++ build tools; `parvez doctor` gives the one-line `winget` command. You can also use Parvez inside WSL with the Linux installer. The first build compiles the web stack once (about 30 seconds on an 8-core laptop, longer on smaller machines); later builds reuse it. `parvez upgrade` keeps you current, verified the same way. You can also [verify a release by hand](SECURITY.md#verifying-a-release) or build from source with `cargo install --git https://github.com/parvez76/parvez --tag v0.19.0 --locked`.
 
 ## Break it
 

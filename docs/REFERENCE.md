@@ -45,6 +45,7 @@ There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue
 | Command | What it does |
 |---|---|
 | `parvez types --ts app.prvz --out types.ts` | Exports TypeScript request, response, and JSON model types across imports |
+| `parvez types --openapi app.prvz --out api.json` | Writes an OpenAPI 3.1 description: routes, JSON schemas, success statuses, errors, and who may call each route |
 | `parvez check app.prvz` | Fast type and borrow check (`cargo check`) with `.prvz`-mapped errors, for agent loops |
 | `parvez run app.prvz [-- args]` | Builds the program and runs it |
 | `parvez build app.prvz [--target <triple>]` | Builds a release binary (`./app`, or `./app-<triple>` when cross-compiling, e.g. static `x86_64-unknown-linux-musl`) plus `app.sha256` |
@@ -57,7 +58,7 @@ There's also `if`/`elif`/`else`, `for x in ...:`, `while`, `break` and `continue
 | `parvez test app.prvz [filter]` | Runs `test "..."` blocks, with in-process HTTP tests via `test_app()` |
 | `parvez doctor` | Checks the setup (Rust 1.88+, cargo, the C linker or, on Windows, the Visual Studio C++ build tools, git, advisory database, targets, PATH) and prints the fix for anything missing |
 | `parvez upgrade [--version vX.Y.Z] [--check]` | Updates to a newer release after verifying it (SHA256SUMS, and the build attestation when `gh` is installed) |
-| `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec`, `parvez_check`, `parvez_eject` tools (`claude mcp add parvez -- parvez mcp`) |
+| `parvez mcp` | MCP server on stdio for AI agents: `parvez_spec` (the core language, about 3,000 tokens, plus topics on request such as `http` and `security`), `parvez_check`, `parvez_eject` (`claude mcp add parvez -- parvez mcp`) |
 | `parvez show app.prvz [-o app.rs] [--map]` | Prints the generated Rust (`--map` adds `// @prvz:N` line comments), or writes it with `-o` |
 
 Builds happen in `.parvez_build/<name>/` in the current directory, and cargo reuses that cache between builds.

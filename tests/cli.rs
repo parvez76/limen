@@ -442,7 +442,9 @@ fn mcp_server_tools() {
     assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 3);
 
     let (err, spec) = m.tool(3, "parvez_spec", json!({}));
-    assert!(!err && spec.contains("## HTTP services"));
+    assert!(!err && spec.contains("## Statements") && !spec.contains("## HTTP services") && spec.contains("- `http`:"), "{spec}");
+    let (err, http) = m.tool(30, "parvez_spec", json!({"topic": "http"}));
+    assert!(!err && http.starts_with("## HTTP services"), "{http}");
 
     let (err, out) = m.tool(4, "parvez_check", json!({"code": "fn size(s: &str) -> i32:\n    ret s.len()\n\nfn main():\n    print(size(\"x\"))\n"}));
     assert!(err, "{out}");
@@ -2101,4 +2103,30 @@ fn doctor_reports_the_toolchain() {
     if cfg!(target_os = "linux") {
         assert!(so.contains("FAIL  no C linker"), "{so}");
     }
+}
+
+#[test]
+fn openapi_describes_routes_types_and_access() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/tasks");
+    let out = parvez().current_dir(&root).args(["types", "--openapi", "main.prvz"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let d: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(d["openapi"], "3.1.0");
+    let create = &d["paths"]["/api/tasks"]["post"];
+    assert!(create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/Task", "{create}");
+    assert_eq!(create["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/NewTask");
+    assert_eq!(create["security"][0]["bearer"], serde_json::json!([]));
+    assert_eq!(create["x-parvez-access"]["guards"][0], "tasks::me");
+    assert!(d["paths"]["/api/tasks/{id}"]["delete"]["responses"]["204"].is_object());
+    assert_eq!(d["paths"]["/api/tasks/{id}"]["patch"]["parameters"][0]["schema"]["type"], "integer");
+    assert_eq!(d["components"]["schemas"]["Task"]["required"], serde_json::json!(["id", "title", "done"]));
+    assert_eq!(d["components"]["securitySchemes"]["bearer"]["scheme"], "bearer");
+    // public routes say why, and need no credentials
+    let svc = parvez().current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")).args(["types", "--openapi", "service.prvz"]).output().unwrap();
+    let s: serde_json::Value = serde_json::from_slice(&svc.stdout).unwrap();
+    let health = s["paths"].as_object().unwrap().values().flat_map(|ops| ops.as_object().unwrap().values()).find(|o| o["x-parvez-access"]["public"].is_string()).expect("a public route");
+    assert_eq!(health["security"], serde_json::json!([]));
+    // exactly one format at a time
+    let both = parvez().args(["types", "--ts", "--openapi"]).output().unwrap();
+    assert!(text(&both.stderr).contains("choose one"), "{}", text(&both.stderr));
 }
