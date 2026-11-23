@@ -1,5 +1,7 @@
 # Limen
 
+**The threshold code crosses before it runs.** A language for code written by AI agents.
+
 A small language for HTTP services and command-line tools. It compiles to plain Rust, and its compiler always runs a fixed set of security checks: a route without an access policy, SQL built from strings, request data reaching the filesystem or a process, and secrets reaching logs are build errors.
 
 **Status:** experimental and pre-1.0. One maintainer, not independently audited. Syntax and defaults can still change.

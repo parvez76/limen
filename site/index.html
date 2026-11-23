@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Limen language: a small language that compiles to Rust, with built-in security checks</title>
+<title>Limen: a language for code written by AI agents, with built-in security checks</title>
 <meta name="description" content="Limen is a small, experimental language for HTTP services and CLI tools. It compiles to Rust, and its compiler always checks access policies, SQL built from strings, request data reaching files and processes, and secrets reaching logs.">
 <style>
   :root { color-scheme: light dark; --fg: #1d1f23; --bg: #fbfbfa; --muted: #5d6470; --code: #f0f1f3; --accent: #1a7f37; }
@@ -23,6 +23,7 @@
 <body>
 <main>
   <h1>Limen</h1>
+  <p class="tag"><strong>The threshold code crosses before it runs.</strong> A language for code written by AI agents.</p>
   <p class="tag">A small language for HTTP services and command-line tools. It compiles to plain Rust.</p>
   <p>Its compiler always runs a fixed set of security checks: a route without an access policy, SQL built from strings, request data reaching the filesystem or a process, and secrets reaching logs are build errors. Each check has documented limits.</p>
   <p class="muted"><strong>Status:</strong> experimental and pre-1.0. One maintainer, not independently audited.</p>
