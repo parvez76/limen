@@ -10,6 +10,46 @@ A small language for HTTP services and command-line tools. It compiles to plain 
 
 [Try it in your browser](https://parvez76.github.io/limen/play/) (the real compiler, as WebAssembly; no install) · [Why a language, and not a Rust crate?](docs/WHY-A-LANGUAGE.md) · [How it was built](docs/HOW-IT-WAS-BUILT.md)
 
+## What it looks like
+
+A route that returns a user's own note. It reads like Python, with Rust's types and crates (the database calls are plain [sqlx](https://docs.rs/sqlx)):
+
+```limen
+state:
+    db: sqlx::PgPool = sqlx::PgPool::connect_lazy(&env("DATABASE_URL", "postgres://localhost/notes"))?
+
+@json
+@derive(sqlx::FromRow)
+type Note: id: i64, body: str
+
+async fn signed_in(req) -> Claims!:
+    ret oidc_session(req).await?
+
+@public("load balancer health check")
+route GET "/health" -> str:
+    ret "ok"
+
+@guard(signed_in)
+route GET "/notes/{id}" (state, auth, id: i64) -> Note!:
+    note: Note? = sqlx::query_as("SELECT id, body FROM notes WHERE id = $1 AND owner = $2")
+        .bind(id)
+        .bind(&auth.sub)
+        .fetch_optional(&state.db)
+        .await?
+    match note:
+        Some(n) -> ret n
+        None -> fail(404, "no such note")
+```
+
+Remove the `@guard` line and it doesn't build:
+
+```
+limen: error: main.lmn:15: route GET /notes/{id} has no access policy. Add @guard(fn) to require sign-in
+or another check, or @public("why anyone may call it") to serve it to everyone (Limen denies by default)
+```
+
+More in [Limen by example](docs/TOUR.md).
+
 ## What it is
 
 - **Syntax:** indentation-based and compact. A JSON service with two routes and validation is [9 lines](docs/comparison/); a multi-user app with Postgres, sign-in, a page and tests is [about 90](examples/tasks/).
@@ -67,6 +107,7 @@ limen run main.lmn             # http://localhost:8080
 ## Learn more
 
 - [Why a language, and not a Rust crate?](docs/WHY-A-LANGUAGE.md): what existing Rust tools already do, and where Limen differs
+- [Limen by example](docs/TOUR.md): the syntax in short, checked snippets
 - [Reference](docs/REFERENCE.md): the language at a glance, every command, what's built into services
 - [SPEC.md](SPEC.md): the full language definition
 - [SECURITY.md](SECURITY.md): the rules and their limits, how to verify a release, how to report a vulnerability
