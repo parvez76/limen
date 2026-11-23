@@ -1,4 +1,4 @@
-//! `parvez lint --sarif`: security findings as SARIF 2.1.0, the format GitHub
+//! `limen lint --sarif`: security findings as SARIF 2.1.0, the format GitHub
 //! code scanning, Azure DevOps, GitLab and most security dashboards ingest.
 //! Each rule carries its CWE / OWASP / ASVS references and a severity score;
 //! findings inside `@allow_insecure` items are exported as suppressed results
@@ -7,8 +7,8 @@ use crate::security::{Finding, RULES, Report};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-const INFO_URI: &str = "https://github.com/parvez76/parvez";
-const RULES_URI: &str = "https://github.com/parvez76/parvez/blob/main/SECURITY.md#rules";
+const INFO_URI: &str = "https://github.com/parvez76/limen";
+const RULES_URI: &str = "https://github.com/parvez76/limen/blob/main/SECURITY.md#rules";
 
 /// `files` are (display path, source) as loaded; paths become repo-relative URIs.
 pub fn report(report: &Report, files: &[(String, String)]) -> Value {
@@ -60,7 +60,7 @@ pub fn report(report: &Report, files: &[(String, String)]) -> Value {
         "version": "2.1.0",
         "runs": [{
             "tool": {"driver": {
-                "name": "parvez",
+                "name": "limen",
                 "semanticVersion": env!("CARGO_PKG_VERSION"),
                 "version": env!("CARGO_PKG_VERSION"),
                 "informationUri": INFO_URI,
@@ -113,8 +113,8 @@ mod tests {
     #[test]
     fn rules_and_uris() {
         assert_eq!(camel("sql-injection"), "SqlInjection");
-        assert_eq!(encode("a b/c#d.prvz"), "a%20b/c%23d.prvz");
-        assert_eq!(uri_for("./x/y.prvz", None), "x/y.prvz");
+        assert_eq!(encode("a b/c#d.lmn"), "a%20b/c%23d.lmn");
+        assert_eq!(uri_for("./x/y.lmn", None), "x/y.lmn");
         let v = report(&Report { findings: vec![], allowed: vec![], suppressed: vec![], incomplete: None }, &[]);
         let rules = v["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
         assert_eq!(rules.len(), RULES.len());

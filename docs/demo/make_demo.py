@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate demo.svg: a looping terminal animation built from the REAL output of
-`parvez` (run at generation time), so the demo can't drift from the compiler.
-   python3 docs/demo/make_demo.py [path-to-parvez]"""
+`limen` (run at generation time), so the demo can't drift from the compiler.
+   python3 docs/demo/make_demo.py [path-to-limen]"""
 import html, os, shutil, subprocess, sys, tempfile, textwrap
 
-PARVEZ = sys.argv[1] if len(sys.argv) > 1 else shutil.which("parvez") or "parvez"
+LIMEN = sys.argv[1] if len(sys.argv) > 1 else shutil.which("limen") or "limen"
 UNGUARDED = '''route GET "/admin/users" -> str:
     ret "everyone"
 '''
@@ -17,25 +17,25 @@ route GET "/admin/users" (auth) -> str:
 '''
 
 def run(args, cwd):
-    p = subprocess.run([PARVEZ, *args], cwd=cwd, capture_output=True, text=True, env={**os.environ, "NO_COLOR": "1"})
+    p = subprocess.run([LIMEN, *args], cwd=cwd, capture_output=True, text=True, env={**os.environ, "NO_COLOR": "1"})
     return (p.stdout + p.stderr).strip()
 
 with tempfile.TemporaryDirectory() as d:
-    open(os.path.join(d, "admin.prvz"), "w").write(UNGUARDED)
-    refused = run(["check", "admin.prvz"], d).splitlines()[-1]
-    open(os.path.join(d, "admin.prvz"), "w").write(GUARDED)
-    lint_ok = run(["lint", "admin.prvz"], d).splitlines()[-1]
-    routes = run(["routes", "admin.prvz"], d).splitlines()[:2]
+    open(os.path.join(d, "admin.lmn"), "w").write(UNGUARDED)
+    refused = run(["check", "admin.lmn"], d).splitlines()[-1]
+    open(os.path.join(d, "admin.lmn"), "w").write(GUARDED)
+    lint_ok = run(["lint", "admin.lmn"], d).splitlines()[-1]
+    routes = run(["routes", "admin.lmn"], d).splitlines()[:2]
 
 # (kind, text): kind = cmd (typed), out, err, ok, file, note
 steps = [("note", "# An agent wrote an admin endpoint. It forgot the permission check."),
-         ("cmd", "cat admin.prvz")]
+         ("cmd", "cat admin.lmn")]
 steps += [("file", l) for l in UNGUARDED.rstrip().splitlines()]
-steps += [("cmd", "parvez check admin.prvz")]
+steps += [("cmd", "limen check admin.lmn")]
 steps += [("err", l) for l in textwrap.wrap(refused, 96, subsequent_indent="  ")]
-steps += [("note", "# Add a guard: say who may call the route."), ("cmd", "cat admin.prvz")]
+steps += [("note", "# Add a guard: say who may call the route."), ("cmd", "cat admin.lmn")]
 steps += [("file", l) for l in GUARDED.rstrip().splitlines()]
-steps += [("cmd", "parvez lint admin.prvz"), ("ok", lint_ok), ("cmd", "parvez routes admin.prvz")]
+steps += [("cmd", "limen lint admin.lmn"), ("ok", lint_ok), ("cmd", "limen routes admin.lmn")]
 steps += [("out", l) for l in routes]
 
 LH, PAD, TOP, CW = 19, 18, 44, 7.85         # line height, padding, title bar, char width (px)
@@ -71,13 +71,13 @@ for i, (kind, text, start, dur) in enumerate(timeline):
                    f"#t{i}{{fill-opacity:0;animation:s{i} {TOTAL:.2f}s linear infinite}}")
         body.append(f'<text id="t{i}" x="{PAD}" y="{y}" fill="{color}">{esc}</text>')
 
-svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="Parvez refuses an admin route without an access policy; adding @guard fixes it">
-<title>Parvez: the unguarded route doesn't compile; one line fixes it</title>
+svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="Limen refuses an admin route without an access policy; adding @guard fixes it">
+<title>Limen: the unguarded route doesn't compile; one line fixes it</title>
 <style>text{{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}}{"".join(css)}</style>
 <rect width="{W}" height="{H}" rx="10" fill="#0d1117"/>
 <rect width="{W}" height="{TOP-8}" rx="10" fill="#161b22"/><rect y="{TOP-18}" width="{W}" height="10" fill="#161b22"/>
 <circle cx="22" cy="18" r="6" fill="#ff5f56"/><circle cx="42" cy="18" r="6" fill="#ffbd2e"/><circle cx="62" cy="18" r="6" fill="#27c93f"/>
-<text x="{W/2}" y="22" fill="#8b949e" text-anchor="middle">parvez</text>
+<text x="{W/2}" y="22" fill="#8b949e" text-anchor="middle">limen</text>
 {"".join(body)}
 </svg>
 '''

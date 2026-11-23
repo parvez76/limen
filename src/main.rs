@@ -1,4 +1,4 @@
-//! `parvez` — the Parvez (.prvz) compiler: transpiles to Rust, builds with cargo.
+//! `limen` — the Limen (.lmn) compiler: transpiles to Rust, builds with cargo.
 
 mod ast;
 mod audit;
@@ -27,7 +27,7 @@ use std::io::Write;
 use std::process::Command;
 
 #[derive(Parser)]
-#[command(name = "parvez", version, about = "Parvez: Python-dense syntax, Rust-grade binaries")]
+#[command(name = "limen", version, about = "Limen: Python-dense syntax, Rust-grade binaries")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -45,7 +45,7 @@ enum Cmd {
     },
     /// Access map for review: every route, socket and page with its guards or @public reason.
     Routes {
-        #[arg(default_value = "main.prvz")]
+        #[arg(default_value = "main.lmn")]
         file: PathBuf,
         /// machine-readable output
         #[arg(long)]
@@ -54,7 +54,7 @@ enum Cmd {
     /// Security lint only (no build): findings with CWE / OWASP / ASVS references.
     /// Exits 1 when there are findings. `--sarif` writes SARIF 2.1.0 for code scanning.
     Lint {
-        #[arg(default_value = "main.prvz")]
+        #[arg(default_value = "main.lmn")]
         file: PathBuf,
         /// SARIF 2.1.0 output (GitHub code scanning, Azure DevOps, GitLab, DefectDojo)
         #[arg(long)]
@@ -66,7 +66,7 @@ enum Cmd {
         #[arg(long)]
         rules: bool,
     },
-    /// Update parvez to the newest release (or --version vX.Y.Z), verified against
+    /// Update limen to the newest release (or --version vX.Y.Z), verified against
     /// the release's SHA256SUMS and, with the `gh` CLI, its build attestation.
     Upgrade {
         #[arg(long)]
@@ -80,9 +80,9 @@ enum Cmd {
     },
     /// Check the setup: Rust toolchain, git, advisory database, targets, PATH.
     Doctor,
-    /// Create a new project: parvez.toml, main.prvz with a route and a test, ui/, .gitignore.
+    /// Create a new project: limen.toml, main.lmn with a route and a test, ui/, .gitignore.
     New { name: String },
-    /// Format .prvz and .msd files in place (a directory is searched recursively).
+    /// Format .lmn and .msd files in place (a directory is searched recursively).
     Fmt {
         #[arg(default_value = ".")]
         paths: Vec<PathBuf>,
@@ -90,7 +90,7 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
-    /// Fast type/borrow check (`cargo check`) with .prvz-mapped errors. No binary.
+    /// Fast type/borrow check (`cargo check`) with .lmn-mapped errors. No binary.
     Check {
         file: PathBuf,
         /// also check every query against the live database at DATABASE_URL (it is
@@ -98,13 +98,13 @@ enum Cmd {
         #[arg(long)]
         db: bool,
     },
-    /// Run the program's `test "..."` blocks (compile errors mapped to .prvz lines).
+    /// Run the program's `test "..."` blocks (compile errors mapped to .lmn lines).
     Test {
         file: PathBuf,
         /// only tests whose name contains this
         filter: Option<String>,
     },
-    /// Run an MCP server on stdio (tools: parvez_spec, parvez_check, parvez_eject).
+    /// Run an MCP server on stdio (tools: limen_spec, limen_check, limen_eject).
     Mcp,
     /// Emit the JSON models and HTTP contracts of an entry point and its imports.
     Types {
@@ -114,7 +114,7 @@ enum Cmd {
         /// an OpenAPI 3.1 description (JSON)
         #[arg(long)]
         openapi: bool,
-        #[arg(default_value = "main.prvz")]
+        #[arg(default_value = "main.lmn")]
         file: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -134,7 +134,7 @@ enum Cmd {
         file: PathBuf,
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Append `// @prvz:N` source-line comments.
+        /// Append `// @lmn:N` source-line comments.
         #[arg(long)]
         map: bool,
     },
@@ -150,11 +150,11 @@ fn main() {
     match worker.join() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            eprintln!("parvez: error: {e:#}");
+            eprintln!("limen: error: {e:#}");
             std::process::exit(1);
         }
         Err(_) => {
-            eprintln!("parvez: error: internal compiler error (please report it with the input that caused it)");
+            eprintln!("limen: error: internal compiler error (please report it with the input that caused it)");
             std::process::exit(101);
         }
     }
@@ -168,7 +168,7 @@ fn real_main() -> Result<()> {
                 TARGET.set(t).expect("target is set once");
             }
             let bin = compile(&file, Mode::Release)?.expect("release build yields a binary");
-            eprintln!("parvez: built {}", bin.display());
+            eprintln!("limen: built {}", bin.display());
         }
         Cmd::New { name } => scaffold::new_project(&std::env::current_dir()?, &name)?,
         Cmd::Routes { file, json } => print_routes(&file, json)?,
@@ -188,7 +188,7 @@ fn real_main() -> Result<()> {
             sql_gate(&file, &prog)?;
             let report = security::lint_with(&prog, &deps::policy(&file)?.custom);
             if let Some(why) = &report.incomplete {
-                bail!("{}: the security analysis is incomplete ({why}); this is a Parvez bug, please report it", file.display());
+                bail!("{}: the security analysis is incomplete ({why}); this is a Limen bug, please report it", file.display());
             }
             let n = report.findings.len();
             if sarif {
@@ -205,16 +205,16 @@ fn real_main() -> Result<()> {
                 }
             }
             for (line, why) in &report.allowed {
-                eprintln!("parvez: note: {}: @allow_insecure: {why}", locate(&prog.files, *line));
+                eprintln!("limen: note: {}: @allow_insecure: {why}", locate(&prog.files, *line));
             }
             if !report.suppressed.is_empty() {
-                eprintln!("parvez: {} finding(s) waived by @allow_insecure", report.suppressed.len());
+                eprintln!("limen: {} finding(s) waived by @allow_insecure", report.suppressed.len());
             }
             if n > 0 {
-                eprintln!("parvez: {n} security finding(s) in {}", file.display());
+                eprintln!("limen: {n} security finding(s) in {}", file.display());
                 std::process::exit(1);
             }
-            eprintln!("parvez: no security findings in {}", file.display());
+            eprintln!("limen: no security findings in {}", file.display());
         }
         Cmd::Fmt { paths, check } => {
             let mut changed = Vec::new();
@@ -223,7 +223,7 @@ fn real_main() -> Result<()> {
             }
             if check && !changed.is_empty() {
                 for f in &changed {
-                    eprintln!("parvez: would reformat {}", f.display());
+                    eprintln!("limen: would reformat {}", f.display());
                 }
                 std::process::exit(1);
             }
@@ -233,16 +233,16 @@ fn real_main() -> Result<()> {
                 sql_db_gate(&file)?;
             }
             compile(&file, Mode::Check)?;
-            eprintln!("parvez: ok {}", file.display());
+            eprintln!("limen: ok {}", file.display());
         }
         Cmd::Test { file, filter } => {
             compile(&file, Mode::Test)?;
-            let proj = std::env::current_dir()?.join(".parvez_build").join(bin_name(&file));
+            let proj = std::env::current_dir()?.join(".limen_build").join(bin_name(&file));
             let mut args = vec!["test".to_string(), "--quiet".into(), "--".into()];
             if let Some(f) = filter {
                 args.push(test_filter(&f));
             }
-            let table = std::fs::read_to_string(proj.join("prvz.map")).unwrap_or_default();
+            let table = std::fs::read_to_string(proj.join("lmn.map")).unwrap_or_default();
             let places: Vec<&str> = table.lines().collect();
             let mut child = Command::new("cargo")
                 .args(&args)
@@ -304,7 +304,7 @@ fn real_main() -> Result<()> {
     Ok(())
 }
 
-/// .prvz source -> (source text, Rust source + source map).
+/// .lmn source -> (source text, Rust source + source map).
 pub(crate) fn transpile(file: &Path) -> Result<(String, codegen::Generated)> {
     let (src, mut prog) = parse_checked(file)?;
     let base = file
@@ -327,7 +327,7 @@ fn locate(files: &[(String, String)], encoded: usize) -> String {
     format!("{name}:{line}")
 }
 
-/// "line N: msg" (N encoded) -> "file.prvz:N: msg".
+/// "line N: msg" (N encoded) -> "file.lmn:N: msg".
 fn located(files: &[(String, String)], e: anyhow::Error) -> anyhow::Error {
     let m = e.to_string();
     match m.strip_prefix("line ").and_then(|r| r.split_once(": ")) {
@@ -337,7 +337,7 @@ fn located(files: &[(String, String)], e: anyhow::Error) -> anyhow::Error {
 }
 
 /// Reads the main file and every file it (transitively) imports:
-/// `import auth.tokens` -> `<main dir>/auth/tokens.prvz`. Each file is lexed
+/// `import auth.tokens` -> `<main dir>/auth/tokens.lmn`. Each file is lexed
 /// with an encoded line base so errors and the source map name the file.
 fn load_program(file: &Path) -> Result<ast::Program> {
     let mut files: Vec<(String, String)> = Vec::new();
@@ -347,7 +347,7 @@ fn load_program(file: &Path) -> Result<ast::Program> {
 
 fn load_into(file: &Path, files: &mut Vec<(String, String)>) -> Result<ast::Program> {
     let src = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    // `sub/store.prvz` on every platform, so messages, maps and SARIF read the same on Windows
+    // `sub/store.lmn` on every platform, so messages, maps and SARIF read the same on Windows
     let shown = file.display().to_string();
     let shown = if cfg!(windows) { shown.replace('\\', "/") } else { shown };
     files.push((shown, src.clone()));
@@ -359,7 +359,7 @@ fn load_into(file: &Path, files: &mut Vec<(String, String)>) -> Result<ast::Prog
         if modules.iter().any(|m| m.path == imp.path) {
             continue;
         }
-        let rel = format!("{}.prvz", imp.path.join("/"));
+        let rel = format!("{}.lmn", imp.path.join("/"));
         let mut path = base.join(&rel);
         let msd = path.with_extension("msd");
         if msd.exists() {
@@ -392,20 +392,27 @@ fn imports(items: &[ast::Item]) -> Vec<ast::ImportDef> {
     items.iter().filter_map(|i| if let ast::Item::Import(d) = i { Some(d.clone()) } else { None }).collect()
 }
 
-/// Read, parse (with imports) and security-lint a .prvz program.
+/// Read, parse (with imports) and security-lint a .lmn program.
 pub(crate) fn parse_checked(file: &Path) -> Result<(String, ast::Program)> {
-    if file.extension().and_then(|e| e.to_str()) != Some("prvz") {
-        bail!("{}: expected a .prvz file", file.display());
+    if file.extension().and_then(|e| e.to_str()) == Some("prvz") {
+        bail!("{}: Parvez was renamed to Limen in v0.22.0; rename .prvz files to .lmn (and parvez.toml to limen.toml)", file.display());
+    }
+    if file.extension().and_then(|e| e.to_str()) != Some("lmn") {
+        bail!("{}: expected a .lmn file", file.display());
+    }
+    let dir = file.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    if dir.join("parvez.toml").exists() && !dir.join("limen.toml").exists() {
+        bail!("{}: Parvez was renamed to Limen in v0.22.0; rename parvez.toml to limen.toml", dir.join("parvez.toml").display());
     }
     let prog = load_program(file)?;
     let files = prog.files.clone();
     let report = security::lint_with(&prog, &deps::policy(file)?.custom);
     // fail closed: an analysis that hit its safety limit must not pass as clean
     if let Some(why) = &report.incomplete {
-        bail!("{}: the security analysis is incomplete ({why}); this is a Parvez bug, please report it", file.display());
+        bail!("{}: the security analysis is incomplete ({why}); this is a Limen bug, please report it", file.display());
     }
     for (line, why) in &report.allowed {
-        eprintln!("parvez: warning: {}: security checks disabled by @allow_insecure: {why}", locate(&files, *line));
+        eprintln!("limen: warning: {}: security checks disabled by @allow_insecure: {why}", locate(&files, *line));
     }
     sql_gate(file, &prog)?;
     if !report.findings.is_empty() {
@@ -442,13 +449,13 @@ fn sql_gate(file: &Path, prog: &ast::Program) -> Result<()> {
     let Some(schema) = sqlcheck::load(file)? else { return Ok(()) };
     let (errors, cov) = sqlcheck::check(prog, &schema);
     // coverage on every build: a skipped query must never look like a checked one
-    let mut line = format!("parvez: SQL: {} of {} queries checked against {}", cov.checked, cov.recognized, schema.source);
+    let mut line = format!("limen: SQL: {} of {} queries checked against {}", cov.checked, cov.recognized, schema.source);
     if !cov.not_literal.is_empty() {
         line.push_str(&format!("; {} not a literal (built at run time or passed in a variable), so not checked here", cov.not_literal.len()));
     }
     eprintln!("{line}");
     for l in &cov.unparsed {
-        eprintln!("parvez: warning: {}: this SQL couldn't be parsed, so it wasn't checked against the schema", locate(&prog.files, *l));
+        eprintln!("limen: warning: {}: this SQL couldn't be parsed, so it wasn't checked against the schema", locate(&prog.files, *l));
     }
     if errors.is_empty() {
         return Ok(());
@@ -464,14 +471,14 @@ fn sql_db_gate(file: &Path) -> Result<()> {
     let prog = load_program(file)?;
     let sites = sqlcheck::sites(&prog);
     if sites.is_empty() {
-        eprintln!("parvez: no literal SQL queries to check against the database");
+        eprintln!("limen: no literal SQL queries to check against the database");
         return Ok(());
     }
-    let dir = std::env::current_dir()?.join(".parvez_build").join("_sqlverify");
+    let dir = std::env::current_dir()?.join(".limen_build").join("_sqlverify");
     std::fs::create_dir_all(dir.join("src"))?;
     write_if_changed(&dir.join("Cargo.toml"), SQLVERIFY_TOML)?;
     write_if_changed(&dir.join("src/main.rs"), SQLVERIFY_MAIN)?;
-    eprintln!("parvez: checking {} queries against the database...", sites.len());
+    eprintln!("limen: checking {} queries against the database...", sites.len());
     let built = Command::new("cargo").args(["build", "--release", "-q"]).current_dir(&dir).status().context("building the SQL verifier")?;
     anyhow::ensure!(built.success(), "building the SQL verifier failed");
     let queries = serde_json::to_string(&sites.iter().map(|s| s.sql.clone()).collect::<Vec<_>>())?;
@@ -489,7 +496,7 @@ fn sql_db_gate(file: &Path) -> Result<()> {
     }
     let errors = sqlcheck::compare_with_db(&sites, v.as_array().map(Vec::as_slice).unwrap_or_default());
     if errors.is_empty() {
-        eprintln!("parvez: {} queries match the database", sites.len());
+        eprintln!("limen: {} queries match the database", sites.len());
         return Ok(());
     }
     let lines: Vec<String> = errors.iter().map(|(l, m)| format!("{}: {m}", locate(&prog.files, *l))).collect();
@@ -547,7 +554,7 @@ async fn main() {
 }
 "#;
 
-/// Binary name from the file stem: `my-tool.prvz` -> `my_tool`.
+/// Binary name from the file stem: `my-tool.lmn` -> `my_tool`.
 fn bin_name(file: &Path) -> String {
     let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("app");
     let mut n: String =
@@ -574,7 +581,7 @@ fn test_filter(f: &str) -> String {
 pub(crate) enum Outcome {
     /// Success; the binary path in `Release` mode.
     Built(Option<PathBuf>),
-    /// rustc errors, already mapped to .prvz lines.
+    /// rustc errors, already mapped to .lmn lines.
     Errors(Vec<String>),
 }
 
@@ -589,33 +596,33 @@ fn compile(file: &Path, mode: Mode) -> Result<Option<PathBuf>> {
             let path = file.display();
             // a setup problem, not a program error: say how to fix it
             if errors.iter().any(|e| e.contains("linker `cc` not found") || e.contains("linker `cc` failed") && e.contains("No such file")) {
-                bail!("{path}: Rust can't find a C linker (`cc`) on this machine; run `parvez doctor` for the command that installs it");
+                bail!("{path}: Rust can't find a C linker (`cc`) on this machine; run `limen doctor` for the command that installs it");
             }
-            bail!("{path}: {} error(s). Generated Rust: `parvez show --map {path}`", errors.len())
+            bail!("{path}: {} error(s). Generated Rust: `limen show --map {path}`", errors.len())
         }
     }
 }
 
-/// Transpile into `<root>/.parvez_build/<name>/` and run cargo. In `Release`
+/// Transpile into `<root>/.limen_build/<name>/` and run cargo. In `Release`
 /// mode the binary is copied to `<root>/<name>`.
 pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome> {
     let (src, generated) = transpile(file)?;
     let code = &generated.code;
     let name = bin_name(file);
     let cwd = root.to_path_buf();
-    let proj = cwd.join(".parvez_build").join(&name);
+    let proj = cwd.join(".limen_build").join(&name);
     std::fs::create_dir_all(proj.join("src"))?;
 
     let overrides = deps::load_overrides(file)?;
     let deps = deps::dependencies(&generated.deps, overrides.as_ref());
     let dev_deps = deps::dependencies(&generated.dev_deps, overrides.as_ref());
     for c in deps::unpinned(&deps).into_iter().chain(deps::unpinned(&dev_deps)) {
-        eprintln!("parvez: note: crate `{c}` is not in the known list; using latest (pin it in parvez.toml)");
+        eprintln!("limen: note: crate `{c}` is not in the known list; using latest (pin it in limen.toml)");
     }
     write_if_changed(&proj.join("Cargo.toml"), &deps::manifest(&name, deps, dev_deps))?;
     write_if_changed(&proj.join("src/main.rs"), code)?;
     if !proj.join("target").exists() {
-        eprintln!("parvez: first build of `{name}`: fetching and compiling dependencies...");
+        eprintln!("limen: first build of `{name}`: fetching and compiling dependencies...");
     }
 
     let target = TARGET.get().filter(|_| mode == Mode::Release);
@@ -638,7 +645,7 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     if !out.status.success() {
         let path = file.display().to_string();
         let modules = generated.files.get(1..).unwrap_or(&[]);
-        let ctx = diagnostics::Ctx { prvz_path: &path, prvz_src: &src, rust_src: code, map: &generated.map, modules };
+        let ctx = diagnostics::Ctx { lmn_path: &path, lmn_src: &src, rust_src: code, map: &generated.map, modules };
         let errors = diagnostics::render(&String::from_utf8_lossy(&out.stdout), &ctx);
         if errors.is_empty() {
             // Not a compile error (network, toolchain, ...): show cargo's own output.
@@ -649,7 +656,7 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
                 bail!(
                     "cargo build failed for {path} (target {t}): no linker for that target. Install its cross toolchain \
                      (e.g. `sudo apt install gcc-aarch64-linux-gnu` and set CARGO_TARGET_{}_LINKER), or install \
-                     `cargo-zigbuild` + zig and parvez uses it automatically",
+                     `cargo-zigbuild` + zig and limen uses it automatically",
                     t.to_uppercase().replace('-', "_")
                 );
             }
@@ -659,11 +666,11 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     }
 
     if mode == Mode::Test {
-        // `parvez test` rewrites `panicked at src/main.rs:N:C` with this table.
+        // `limen test` rewrites `panicked at src/main.rs:N:C` with this table.
         let path = file.display().to_string();
         let modules = generated.files.get(1..).unwrap_or(&[]);
-        let ctx = diagnostics::Ctx { prvz_path: &path, prvz_src: &src, rust_src: code, map: &generated.map, modules };
-        write_if_changed(&proj.join("prvz.map"), &diagnostics::location_table(&ctx))?;
+        let ctx = diagnostics::Ctx { lmn_path: &path, lmn_src: &src, rust_src: code, map: &generated.map, modules };
+        write_if_changed(&proj.join("lmn.map"), &diagnostics::location_table(&ctx))?;
     }
     if mode == Mode::Check || mode == Mode::Test {
         return Ok(Outcome::Built(None));
@@ -683,13 +690,13 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     let dest = cwd.join(&out_name);
     // Copy beside the target, then rename: replacing a running binary in
     // place fails ("text file busy"); a rename swaps it atomically.
-    let tmp = cwd.join(format!(".{out_name}.parvez-tmp"));
+    let tmp = cwd.join(format!(".{out_name}.limen-tmp"));
     std::fs::copy(&built, &tmp).with_context(|| format!("copying binary to {}", tmp.display()))?;
     // Windows won't replace a running .exe (the service you're rebuilding), but it
     // will rename one: move it aside under a unique name. Leftovers from earlier
     // builds are removed once nothing runs them any more.
     if cfg!(windows) {
-        let prefix = format!(".{out_name}.parvez-old");
+        let prefix = format!(".{out_name}.limen-old");
         for e in std::fs::read_dir(&cwd).into_iter().flatten().flatten() {
             if e.file_name().to_string_lossy().starts_with(&prefix) {
                 let _ = std::fs::remove_file(e.path()); // still running: try next time
@@ -705,18 +712,18 @@ pub(crate) fn compile_at(file: &Path, mode: Mode, root: &Path) -> Result<Outcome
     // `<binary>.sha256` in `sha256sum` format: `sha256sum -c app.sha256` verifies it
     let digest = sha256_hex(&std::fs::read(&dest)?);
     std::fs::write(cwd.join(format!("{out_name}.sha256")), format!("{digest}  {out_name}\n"))?;
-    eprintln!("parvez: sha256 {digest}  {out_name}");
+    eprintln!("limen: sha256 {digest}  {out_name}");
     let sbom = cwd.join(format!("{name}.sbom.json"));
     match audit::write_sbom(&proj, &name, &sbom) {
-        Ok(n) => eprintln!("parvez: sbom {} ({n} components)", sbom.display()),
-        Err(e) => eprintln!("parvez: warning: could not write SBOM: {e:#}"),
+        Ok(n) => eprintln!("limen: sbom {} ({n} components)", sbom.display()),
+        Err(e) => eprintln!("limen: warning: could not write SBOM: {e:#}"),
     }
     Ok(Outcome::Built(Some(dest)))
 }
 
 /// Fails the build when Cargo.lock has crates with known RustSec advisories
-/// (policy: PARVEZ_AUDIT / parvez.toml `[security] audit` = deny | warn | off).
-/// `[security] licenses` / `ban` in parvez.toml, checked against every compiled crate.
+/// (policy: LIMEN_AUDIT / limen.toml `[security] audit` = deny | warn | off).
+/// `[security] licenses` / `ban` in limen.toml, checked against every compiled crate.
 fn dependency_policy_gate(file: &Path, proj: &Path) -> Result<()> {
     let policy = deps::policy(file)?;
     if policy.licenses.is_none() && policy.ban.is_empty() {
@@ -725,7 +732,7 @@ fn dependency_policy_gate(file: &Path, proj: &Path) -> Result<()> {
     let mut problems = vec![];
     for (name, version, license) in audit::compiled_crates(proj)? {
         if policy.ban.iter().any(|b| b == &name) {
-            problems.push(format!("  {name} {version}: banned in parvez.toml ([security] ban)"));
+            problems.push(format!("  {name} {version}: banned in limen.toml ([security] ban)"));
         }
         if let Some(allowed) = &policy.licenses {
             match &license {
@@ -748,12 +755,12 @@ fn advisory_gate(file: &Path, proj: &Path) -> Result<()> {
     }
     let db = match audit::advisory_db() {
         audit::Db::Unavailable(why) => {
-            eprintln!("parvez: warning: dependency advisory check skipped: {why}");
+            eprintln!("limen: warning: dependency advisory check skipped: {why}");
             return Ok(());
         }
         audit::Db::Ready(db, stale) => {
             if let Some(w) = stale {
-                eprintln!("parvez: warning: {w}");
+                eprintln!("limen: warning: {w}");
             }
             db
         }
@@ -761,7 +768,7 @@ fn advisory_gate(file: &Path, proj: &Path) -> Result<()> {
     let compiled = audit::compiled_packages(proj)?;
     let (vulns, notes) = audit::scan_filtered(&proj.join("Cargo.lock"), &db, Some(&compiled))?;
     for n in &notes {
-        eprintln!("parvez: note: {} advisory: {}", n.adv.informational.as_deref().unwrap_or("info"), n.render());
+        eprintln!("limen: note: {} advisory: {}", n.adv.informational.as_deref().unwrap_or("info"), n.render());
     }
     if vulns.is_empty() {
         return Ok(());
@@ -769,16 +776,16 @@ fn advisory_gate(file: &Path, proj: &Path) -> Result<()> {
     let list: Vec<String> = vulns.iter().map(|v| format!("  {}", v.render())).collect();
     let msg = format!("{} known-vulnerable dependenc{}:\n{}", vulns.len(), if vulns.len() == 1 { "y" } else { "ies" }, list.join("\n"));
     if policy == "warn" {
-        eprintln!("parvez: warning: {msg}");
+        eprintln!("limen: warning: {msg}");
         return Ok(());
     }
     bail!(
-        "{msg}\nrun `parvez heal {}` to move to patched versions (PARVEZ_AUDIT=warn overrides)",
+        "{msg}\nrun `limen heal {}` to move to patched versions (LIMEN_AUDIT=warn overrides)",
         file.display()
     )
 }
 
-/// `parvez heal`: `cargo update` to the newest semver-compatible releases,
+/// `limen heal`: `cargo update` to the newest semver-compatible releases,
 /// re-scan, re-check, and report anything that needs a breaking upgrade.
 fn heal(file: &Path) -> Result<()> {
     let root = std::env::current_dir()?;
@@ -786,11 +793,11 @@ fn heal(file: &Path) -> Result<()> {
         errors.iter().for_each(|e| eprintln!("{e}"));
         bail!("{}: fix compile errors before healing", file.display());
     }
-    let proj = root.join(".parvez_build").join(bin_name(file));
+    let proj = root.join(".limen_build").join(bin_name(file));
     let db = match audit::advisory_db() {
         audit::Db::Ready(db, stale) => {
             if let Some(w) = stale {
-                eprintln!("parvez: warning: {w}");
+                eprintln!("limen: warning: {w}");
             }
             db
         }
@@ -814,11 +821,11 @@ fn heal(file: &Path) -> Result<()> {
         bail!("updated dependencies no longer compile with {}; see errors above", file.display());
     }
     for u in &updates {
-        eprintln!("parvez: heal: {u}");
+        eprintln!("limen: heal: {u}");
     }
     let fixed = before.iter().filter(|b| !after.iter().any(|a| a.adv.id == b.adv.id && a.package == b.package)).count();
     eprintln!(
-        "parvez: heal: {} update(s), {fixed} advisor{} fixed, {} remaining",
+        "limen: heal: {} update(s), {fixed} advisor{} fixed, {} remaining",
         updates.len(),
         if fixed == 1 { "y" } else { "ies" },
         after.len()
@@ -827,9 +834,9 @@ fn heal(file: &Path) -> Result<()> {
         return Ok(());
     }
     for v in &after {
-        eprintln!("parvez: heal: needs a breaking upgrade: {}", v.render());
+        eprintln!("limen: heal: needs a breaking upgrade: {}", v.render());
         eprintln!(
-            "    pin a patched major in parvez.toml: [dependencies] {} = \"<version matching: {}>\" (if it is a transitive dependency, upgrade the crate that pulls it in)",
+            "    pin a patched major in limen.toml: [dependencies] {} = \"<version matching: {}>\" (if it is a transitive dependency, upgrade the crate that pulls it in)",
             v.package,
             v.adv.patched.join(" | ")
         );
@@ -851,20 +858,20 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(bin_name(Path::new("a/my-tool.prvz")), "my_tool");
-        assert_eq!(bin_name(Path::new("9x.prvz")), "app_9x");
+        assert_eq!(bin_name(Path::new("a/my-tool.lmn")), "my_tool");
+        assert_eq!(bin_name(Path::new("9x.lmn")), "app_9x");
     }
 
     #[test]
     fn example_transpiles() {
-        let (_, g) = transpile(Path::new("examples/hello.prvz")).unwrap();
+        let (_, g) = transpile(Path::new("examples/hello.lmn")).unwrap();
         let code = g.code;
         assert!(code.contains("fn main() -> anyhow::Result<()> {"));
         assert!(code.contains("struct User {"));
     }
 }
 
-/// `--target` for the current `parvez build` (set once from the command line).
+/// `--target` for the current `limen build` (set once from the command line).
 static TARGET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -910,7 +917,7 @@ fn check_target(target: &str) -> Result<()> {
     Ok(())
 }
 
-/// `parvez routes`: who may call what. Built-in endpoints are listed too, so the
+/// `limen routes`: who may call what. Built-in endpoints are listed too, so the
 /// map is the service's complete surface.
 fn print_routes(file: &Path, json: bool) -> Result<()> {
     let prog = load_program(file)?;
@@ -936,7 +943,7 @@ fn print_routes(file: &Path, json: bool) -> Result<()> {
         }
     }
     let mut builtin = vec![("GET", "/healthz", "PUBLIC (built-in health check)"), ("GET", "/readyz", "PUBLIC (built-in readiness)"),
-        ("GET", "/metrics", "PUBLIC unless PARVEZ_METRICS_TOKEN is set (built-in)")];
+        ("GET", "/metrics", "PUBLIC unless LIMEN_METRICS_TOKEN is set (built-in)")];
     if uses_session {
         builtin.extend([("GET", "/auth/login", "PUBLIC (built-in sign-in)"), ("GET", "/auth/callback", "PUBLIC (built-in sign-in)"),
             ("POST", "/auth/logout", "same-origin only (built-in)"), ("POST", "/auth/backchannel-logout", "IdP-signed logout token (built-in)")]);

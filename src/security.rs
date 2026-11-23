@@ -1,4 +1,4 @@
-//! Compile-time security checks on the `.prvz` AST. Insecure patterns are
+//! Compile-time security checks on the `.lmn` AST. Insecure patterns are
 //! compile errors with a concrete fix; `@allow_insecure("reason")` on a
 //! `fn` / `route` / `state` opts that item out (and is reported on build).
 //!
@@ -124,7 +124,7 @@ pub const RULES: &[Rule] = &[
     Rule {
         id: "disallowed-call",
         title: "A call this project disallows",
-        description: "A function or method listed in `[security] disallow` in parvez.toml is called.",
+        description: "A function or method listed in `[security] disallow` in limen.toml is called.",
         cwe: &[676],
         owasp: "A04:2021 Insecure Design",
         asvs: &[],
@@ -143,7 +143,7 @@ pub const RULES: &[Rule] = &[
     },
 ];
 
-/// Project rules from `[security]` in parvez.toml: banned calls (like Clippy's
+/// Project rules from `[security]` in limen.toml: banned calls (like Clippy's
 /// `disallowed_methods`) and extra sinks, so a third-party crate that opens files,
 /// runs programs or runs SQL is checked like `std::fs`, `Command` and `sqlx`.
 /// A pattern is a path (`duct::cmd`, matching that call or a `use`d `cmd`) or,
@@ -164,7 +164,7 @@ fn method_matches(m: &str, pat: &str) -> bool {
     pat.strip_prefix('.') == Some(m)
 }
 
-const FIX_DISALLOW: &str = "use the alternative given in parvez.toml's reason, or remove the entry from [security] disallow";
+const FIX_DISALLOW: &str = "use the alternative given in limen.toml's reason, or remove the entry from [security] disallow";
 
 pub fn rule(id: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.id == id)
@@ -344,7 +344,7 @@ fn analyze(fx: &Fx, items: &[(&[String], &Item)], guards: &HashSet<String>) -> R
 #[derive(Clone, Debug, PartialEq)]
 struct Sink {
     rule: &'static str,
-    /// "`std::fs::read(..)` at files.prvz:3", the deepest sink in the call chain
+    /// "`std::fs::read(..)` at files.lmn:3", the deepest sink in the call chain
     what: String,
     fix: &'static str,
 }
@@ -372,7 +372,7 @@ struct Fx<'a> {
     state_elems: HashMap<String, String>,
     /// `state:` fields holding request data -> where it was stored ("file:line")
     stored: std::rc::Rc<HashMap<String, String>>,
-    /// project rules from parvez.toml
+    /// project rules from limen.toml
     custom: Custom,
     /// channel sender field -> the receiver fields of the same element type
     channels: HashMap<String, Vec<String>>,
@@ -1225,7 +1225,7 @@ impl<'f, 'a> Linter<'f, 'a> {
         }
         let custom = &self.fx.custom;
         if let Some((_, why)) = custom.disallow.iter().find(|(p, _)| call_matches(name, p)) {
-            let msg = format!("`{name}(..)` is disallowed by parvez.toml: {why}");
+            let msg = format!("`{name}(..)` is disallowed by limen.toml: {why}");
             self.push(line, "disallowed-call", msg, FIX_DISALLOW);
         }
         if custom.path_sinks.iter().any(|p| call_matches(name, p)) && args.iter().any(|a| tainted(a, cx)) {
@@ -1274,7 +1274,7 @@ impl<'f, 'a> Linter<'f, 'a> {
         }
         let custom = &self.fx.custom;
         if let Some((_, why)) = custom.disallow.iter().find(|(p, _)| method_matches(m, p)) {
-            let msg = format!("`.{m}(..)` is disallowed by parvez.toml: {why}");
+            let msg = format!("`.{m}(..)` is disallowed by limen.toml: {why}");
             self.push(line, "disallowed-call", msg, FIX_DISALLOW);
         }
         if custom.path_sinks.iter().any(|p| method_matches(m, p)) && args.iter().any(|a| tainted(a, cx)) {
@@ -1546,8 +1546,8 @@ mod tests {
         assert_eq!(r.findings.iter().map(|f| f.line).collect::<Vec<_>>(), [7]);
         assert_eq!(r.allowed, [(3, "internal admin tool, input is trusted".to_string())]);
         let f = &r.findings[0];
-        assert!(f.render("app.prvz").starts_with("app.prvz:7: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized\n     = fix: join untrusted"));
-        assert!(f.render("app.prvz").ends_with("\n     = see: CWE-22, OWASP A01:2021 Broken Access Control, ASVS 12.3.1, ASVS 12.3.2"));
+        assert!(f.render("app.lmn").starts_with("app.lmn:7: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized\n     = fix: join untrusted"));
+        assert!(f.render("app.lmn").ends_with("\n     = see: CWE-22, OWASP A01:2021 Broken Access Control, ASVS 12.3.1, ASVS 12.3.2"));
         // the waived finding is still known (SARIF exports it as suppressed)
         let [(w, why)] = r.suppressed.as_slice() else { panic!("{:?}", r.suppressed) };
         assert_eq!((w.line, w.rule, why.as_str()), (4, "path-traversal", "internal admin tool, input is trusted"));

@@ -12,10 +12,10 @@ body:
     id: repro
     attributes:
       label: How to reproduce
-      description: The smallest .prvz program and the command you ran
+      description: The smallest .lmn program and the command you ran
       render: python
   - type: textarea
     id: doctor
     attributes:
-      label: Output of `parvez doctor`
+      label: Output of `limen doctor`
       render: text

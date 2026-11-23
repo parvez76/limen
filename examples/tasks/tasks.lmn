@@ -1,4 +1,4 @@
-# Types, the sign-in guard and queries shared by the API (main.prvz) and the page (ui/board.msd).
+# Types, the sign-in guard and queries shared by the API (main.lmn) and the page (ui/board.msd).
 
 @json
 @derive(sqlx::FromRow)

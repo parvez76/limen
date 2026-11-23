@@ -1,6 +1,14 @@
 # Changelog
 
-Parvez is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
+Limen (named Parvez until v0.22.0) is pre-1.0: a minor version can change syntax or defaults. Entries marked **Breaking** say what to change. Release tags from v0.16.0 on are signed; see [SECURITY.md](../SECURITY.md#verifying-a-release).
+
+## v0.22.0
+- **Breaking: Parvez is now Limen.** *Limen* is Latin for "threshold": the compiler is the threshold code crosses before it runs. Everything that carried the old name changes, with no compatibility layer (the project is pre-1.0):
+  - the command `parvez` → `limen`; source files `.prvz` → `.lmn`; `parvez.toml` → `limen.toml`; the build directory `.parvez_build/` → `.limen_build/`. Old names fail with an error that says what to rename.
+  - generated services: environment variables `PARVEZ_*` → `LIMEN_*` (for example `LIMEN_CSP`, `LIMEN_OIDC_ISSUER`, `LIMEN_METRICS_TOKEN`), metrics `parvez_*` → `limen_*`, the session cookie `parvez_session` → `limen_session`.
+  - MCP tools `parvez_check`, `parvez_spec`, `parvez_eject` → `limen_check`, `limen_spec`, `limen_eject`.
+  - the repository is github.com/parvez76/limen and the site parvez76.github.io/limen. The crate is published as `limen-lang` (the name `limen` was taken), and installs the `limen` command.
+  - **Existing installs:** `parvez upgrade` can't reach this release. Install again with the new installer, then remove `~/.parvez`.
 
 ## v0.21.0
 - **Breaking:** the SQL schema check now finds queries everywhere: inside `match` arms, closures, `spawn`, `catch` handlers, tests, `every` workers, `state:` and constants. Before, queries in those places were silently skipped, so a program that built with v0.20 can now fail with SQL errors it always had.

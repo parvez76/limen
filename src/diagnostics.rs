@@ -1,9 +1,9 @@
 //! Turns rustc JSON diagnostics (from `cargo build --message-format=json`)
-//! into compact errors that point at `.prvz` lines via the codegen source map.
+//! into compact errors that point at `.lmn` lines via the codegen source map.
 //!
 //! Output shape (one block per error, grep- and agent-friendly):
 //! ```text
-//! app.prvz:7: error[E0308]: mismatched types
+//! app.lmn:7: error[E0308]: mismatched types
 //!    7 |     p = port(" 8080 ")?
 //!      = expected `&str`, found `String`
 //!      = line 3: function defined here
@@ -14,18 +14,18 @@
 use serde_json::Value;
 
 pub struct Ctx<'a> {
-    /// `.prvz` path as the user typed it
-    pub prvz_path: &'a str,
-    pub prvz_src: &'a str,
+    /// `.lmn` path as the user typed it
+    pub lmn_path: &'a str,
+    pub lmn_src: &'a str,
     pub rust_src: &'a str,
-    /// Rust line (1-based) -> `.prvz` line, see `codegen::Generated::map`
+    /// Rust line (1-based) -> `.lmn` line, see `codegen::Generated::map`
     pub map: &'a [usize],
     /// (name, source) of imported files; index k-1 for file k of an encoded line
     pub modules: &'a [(String, String)],
 }
 
 impl Ctx<'_> {
-    fn prvz_line(&self, rust_line: u64) -> usize {
+    fn lmn_line(&self, rust_line: u64) -> usize {
         let i = rust_line.saturating_sub(1) as usize;
         self.map.get(i).copied().unwrap_or(0)
     }
@@ -33,13 +33,13 @@ impl Ctx<'_> {
     fn place(&self, n: usize) -> (&str, usize) {
         let (k, line) = crate::ast::split_line(n);
         match k {
-            0 => (self.prvz_path, line),
+            0 => (self.lmn_path, line),
             _ => (self.modules.get(k - 1).map(|m| m.0.as_str()).unwrap_or("?"), line),
         }
     }
     fn src_line(&self, n: usize) -> Option<&str> {
         let (k, line) = crate::ast::split_line(n);
-        let src = if k == 0 { self.prvz_src } else { self.modules.get(k - 1)?.1.as_str() };
+        let src = if k == 0 { self.lmn_src } else { self.modules.get(k - 1)?.1.as_str() };
         src.lines().nth(line.checked_sub(1)?)
     }
     fn rust_line(&self, n: u64) -> Option<&str> {
@@ -47,7 +47,7 @@ impl Ctx<'_> {
     }
 }
 
-/// One `.prvz` location per generated Rust line (`file:line`, or empty).
+/// One `.lmn` location per generated Rust line (`file:line`, or empty).
 pub fn location_table(ctx: &Ctx) -> String {
     let mut out = String::new();
     for n in ctx.map {
@@ -60,7 +60,7 @@ pub fn location_table(ctx: &Ctx) -> String {
     out
 }
 
-/// `thread 't' panicked at src/main.rs:120:9:` -> `... panicked at app.prvz:14:`.
+/// `thread 't' panicked at src/main.rs:120:9:` -> `... panicked at app.lmn:14:`.
 /// Lines without a known location are left alone.
 pub fn map_panic_location(line: &str, places: &[&str]) -> String {
     // rustc writes `src\\main.rs` on Windows
@@ -130,10 +130,10 @@ fn render_one(msg: &Value, ctx: &Ctx) -> String {
     let primary = spans.iter().find(|s| s["is_primary"] == true).or(spans.first()).copied();
 
     let Some(primary) = primary else {
-        return format!("{}: error{code}: {text}\n", ctx.prvz_path);
+        return format!("{}: error{code}: {text}\n", ctx.lmn_path);
     };
     let rust_ln = primary["line_start"].as_u64().unwrap_or(0);
-    let ln = ctx.prvz_line(rust_ln);
+    let ln = ctx.lmn_line(rust_ln);
 
     let mut s = String::new();
     if ln > 0 {
@@ -143,7 +143,7 @@ fn render_one(msg: &Value, ctx: &Ctx) -> String {
             s.push_str(&format!("{l:>4} | {src}\n"));
         }
     } else {
-        s.push_str(&format!("{} (generated line {rust_ln}): error{code}: {text}\n", ctx.prvz_path));
+        s.push_str(&format!("{} (generated line {rust_ln}): error{code}: {text}\n", ctx.lmn_path));
     }
 
     let mut notes: Vec<String> = Vec::new();
@@ -172,7 +172,7 @@ fn render_one(msg: &Value, ctx: &Ctx) -> String {
             continue;
         }
         if let Some(label) = sp["label"].as_str() {
-            let l = ctx.prvz_line(sp["line_start"].as_u64().unwrap_or(0));
+            let l = ctx.lmn_line(sp["line_start"].as_u64().unwrap_or(0));
             note(format!("{}{label}", at(l)));
         }
     }
@@ -181,7 +181,7 @@ fn render_one(msg: &Value, ctx: &Ctx) -> String {
         let m = child["message"].as_str().unwrap_or("");
         let l = our_spans(child)
             .first()
-            .map(|sp| ctx.prvz_line(sp["line_start"].as_u64().unwrap_or(0)))
+            .map(|sp| ctx.lmn_line(sp["line_start"].as_u64().unwrap_or(0)))
             .unwrap_or(0);
         note(format!("{}{level}: {m}", at(l)));
     }
@@ -199,19 +199,19 @@ mod tests {
     use super::*;
 
     const RUST: &str = "// header\n#![allow(unused)]\nfn port(raw: &str) -> i32 {\n    0\n}\nfn main() {\n    let p = port(String::from(\"80\"));\n}\n";
-    const PRVZ: &str = "fn port(raw: &str) -> i32:\n    ret 0\nfn main():\n    p = port(\"80\")\n";
+    const LMN: &str = "fn port(raw: &str) -> i32:\n    ret 0\nfn main():\n    p = port(\"80\")\n";
     const MAP: [usize; 8] = [0, 0, 1, 2, 2, 3, 4, 4];
 
     fn ctx() -> Ctx<'static> {
-        Ctx { prvz_path: "app.prvz", prvz_src: PRVZ, rust_src: RUST, map: &MAP, modules: &[] }
+        Ctx { lmn_path: "app.lmn", lmn_src: LMN, rust_src: RUST, map: &MAP, modules: &[] }
     }
 
     #[test]
-    fn panic_locations_point_at_prvz_lines() {
-        let places = ["", "app.prvz:3", "store.prvz:9"];
+    fn panic_locations_point_at_lmn_lines() {
+        let places = ["", "app.lmn:3", "store.lmn:9"];
         assert_eq!(
             map_panic_location("thread 'tests::t' (42) panicked at src/main.rs:3:9:", &places),
-            "thread 'tests::t' (42) panicked at store.prvz:9:"
+            "thread 'tests::t' (42) panicked at store.lmn:9:"
         );
         // unknown or unmapped lines stay as they are
         assert_eq!(
@@ -230,11 +230,11 @@ mod tests {
             "spans":[{"file_name":"/rustc/abc/library/alloc/src/macros.rs","line_start":116,"is_primary":true,"label":"expected `&str`, found `String`",
             "expansion":{"span":{"file_name":"src/main.rs","line_start":7,"is_primary":false}}}],"children":[]}}"#;
         let out = render(&msg.replace('\n', ""), &ctx());
-        assert!(out[0].starts_with("app.prvz:4: error[E0308]: mismatched types"), "{}", out[0]);
+        assert!(out[0].starts_with("app.lmn:4: error[E0308]: mismatched types"), "{}", out[0]);
     }
 
     #[test]
-    fn maps_error_to_prvz_line() {
+    fn maps_error_to_lmn_line() {
         let json = r#"{"reason":"compiler-artifact"}
 {"reason":"compiler-message","message":{"message":"mismatched types","code":{"code":"E0308"},"level":"error","spans":[{"file_name":"src/main.rs","line_start":7,"is_primary":true,"label":"expected `&str`, found `String`"},{"file_name":"src/main.rs","line_start":7,"is_primary":false,"label":"arguments to this function are incorrect"}],"children":[{"message":"function defined here","level":"note","spans":[{"file_name":"src/main.rs","line_start":3,"is_primary":true,"label":null}]},{"message":"consider borrowing here","level":"help","spans":[]}]}}
 {"reason":"compiler-message","message":{"message":"aborting due to 1 previous error","code":null,"level":"error","spans":[],"children":[]}}
@@ -242,7 +242,7 @@ not json at all"#;
         let errs = render(json, &ctx());
         assert_eq!(errs.len(), 1);
         let e = &errs[0];
-        assert!(e.starts_with("app.prvz:4: error[E0308]: mismatched types\n"), "{e}");
+        assert!(e.starts_with("app.lmn:4: error[E0308]: mismatched types\n"), "{e}");
         assert!(e.contains("   4 |     p = port(\"80\")\n"));
         assert!(e.contains("= expected `&str`, found `String`"));
         assert!(e.contains("= arguments to this function are incorrect"));
@@ -254,13 +254,13 @@ not json at all"#;
 
     #[test]
     fn maps_errors_into_module_files() {
-        let modules = [("store.prvz".to_string(), "fn f() -> i32:\n    ret \"x\"\n".to_string())];
+        let modules = [("store.lmn".to_string(), "fn f() -> i32:\n    ret \"x\"\n".to_string())];
         let map = [0, 0, 1, 2, 2, 3, 4, 1_000_002];
-        let ctx = Ctx { prvz_path: "app.prvz", prvz_src: PRVZ, rust_src: RUST, map: &map, modules: &modules };
+        let ctx = Ctx { lmn_path: "app.lmn", lmn_src: LMN, rust_src: RUST, map: &map, modules: &modules };
         let json = r#"{"reason":"compiler-message","message":{"message":"mismatched types","code":{"code":"E0308"},"level":"error","spans":[{"file_name":"src/main.rs","line_start":8,"is_primary":true,"label":"expected `i32`"},{"file_name":"src/main.rs","line_start":3,"is_primary":false,"label":"return type"}],"children":[]}}"#;
         let e = &render(json, &ctx)[0];
-        assert!(e.starts_with("store.prvz:2: error[E0308]: mismatched types\n   2 |     ret \"x\"\n"), "{e}");
-        assert!(e.contains("= app.prvz:1: return type"), "{e}");
+        assert!(e.starts_with("store.lmn:2: error[E0308]: mismatched types\n   2 |     ret \"x\"\n"), "{e}");
+        assert!(e.contains("= app.lmn:1: return type"), "{e}");
     }
 
     #[test]
@@ -268,6 +268,6 @@ not json at all"#;
         let json = r#"{"reason":"compiler-message","message":{"message":"unused","code":null,"level":"warning","spans":[],"children":[]}}
 {"reason":"compiler-message","message":{"message":"boom","code":null,"level":"error","spans":[{"file_name":"/rustc/x/library/core/src/lib.rs","line_start":9,"is_primary":true,"label":"here"}],"children":[]}}"#;
         let errs = render(json, &ctx());
-        assert_eq!(errs, vec!["app.prvz: error: boom\n".to_string()]);
+        assert_eq!(errs, vec!["app.lmn: error: boom\n".to_string()]);
     }
 }

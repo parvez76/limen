@@ -1,4 +1,4 @@
-//! `parvez upgrade` and `parvez doctor`: keeping an installation current and healthy.
+//! `limen upgrade` and `limen doctor`: keeping an installation current and healthy.
 //!
 //! Upgrades download the release archive for this platform, check it against the
 //! release's SHA256SUMS (and its GitHub build attestation when the `gh` CLI is
@@ -9,18 +9,18 @@ use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REPO: &str = "parvez76/parvez";
+const REPO: &str = "parvez76/limen";
 /// The name releases before the rename (v0.16.0, v0.17.0) were attested under.
 const LEGACY_REPO: &str = "parvez76/project-parvez";
 /// Minimum Rust for the generated code (edition 2024, let-chains).
 const MIN_RUST: (u64, u64) = (1, 88);
 
 fn download_base() -> String {
-    std::env::var("PARVEZ_DOWNLOAD_BASE").unwrap_or_else(|_| format!("https://github.com/{REPO}/releases/download"))
+    std::env::var("LIMEN_DOWNLOAD_BASE").unwrap_or_else(|_| format!("https://github.com/{REPO}/releases/download"))
 }
 
 fn latest_url() -> String {
-    std::env::var("PARVEZ_LATEST_URL").unwrap_or_else(|_| format!("https://github.com/{REPO}/releases/latest"))
+    std::env::var("LIMEN_LATEST_URL").unwrap_or_else(|_| format!("https://github.com/{REPO}/releases/latest"))
 }
 
 /// The release target for the platform this binary was built for.
@@ -87,14 +87,14 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
     // binaries earlier Windows upgrades moved aside (in use then, usually free now)
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            if e.file_name().to_string_lossy().starts_with(".parvez.old") {
+            if e.file_name().to_string_lossy().starts_with(".limen.old") {
                 let _ = std::fs::remove_file(e.path());
             }
         }
     }
     let Some(target) = target() else {
         bail!(
-            "no prebuilt Parvez for {}/{}; update from source with `cargo install --git https://github.com/{REPO} --locked`",
+            "no prebuilt Limen for {}/{}; update from source with `cargo install --git https://github.com/{REPO} --locked`",
             std::env::consts::OS,
             std::env::consts::ARCH
         );
@@ -112,28 +112,28 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
     let wanted = version_of(&tag);
     if check {
         if wanted > current {
-            println!("parvez {current} -> {tag} is available; run `parvez upgrade`");
+            println!("limen {current} -> {tag} is available; run `limen upgrade`");
         } else {
-            println!("parvez {current} is up to date");
+            println!("limen {current} is up to date");
         }
         return Ok(());
     }
     if wanted == current && !force {
-        eprintln!("parvez: already at {tag}");
+        eprintln!("limen: already at {tag}");
         return Ok(());
     }
     let exe = std::env::current_exe()?.canonicalize()?;
     if exe.components().any(|c| c.as_os_str() == ".cargo") && !force {
         bail!(
-            "this parvez was installed with cargo ({}); update it the same way:\n    cargo install --git https://github.com/{REPO} --tag {tag} --locked\n(or pass --force to replace it with the release binary)",
+            "this limen was installed with cargo ({}); update it the same way:\n    cargo install --git https://github.com/{REPO} --tag {tag} --locked\n(or pass --force to replace it with the release binary)",
             exe.display()
         );
     }
 
     let tmp = tempdir()?;
-    let archive = format!("parvez-{tag}-{target}.tar.gz");
+    let archive = format!("limen-{tag}-{target}.tar.gz");
     let base = download_base();
-    eprintln!("parvez: downloading {tag} for {target}");
+    eprintln!("limen: downloading {tag} for {target}");
     let a = tmp.join(&archive);
     let s = tmp.join("SHA256SUMS");
     for (url, dest) in [(format!("{base}/{tag}/{archive}"), &a), (format!("{base}/{tag}/SHA256SUMS"), &s)] {
@@ -150,7 +150,7 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
     if actual != expected {
         bail!("checksum mismatch for {archive} (expected {expected}, got {actual}); nothing was changed");
     }
-    eprintln!("parvez: checksum OK");
+    eprintln!("limen: checksum OK");
     if which("gh").is_some() {
         let verify = |repo: &str| {
             Command::new("gh").args(["attestation", "verify"]).arg(&a).args(["--repo", repo]).output().is_ok_and(|o| o.status.success())
@@ -159,18 +159,18 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
         if !ok {
             bail!("the GitHub build attestation for {archive} did not verify; nothing was changed");
         }
-        eprintln!("parvez: build attestation OK");
+        eprintln!("limen: build attestation OK");
     }
     let status = Command::new("tar").arg("-xzf").arg(&a).arg("-C").arg(&tmp).status().context("`tar` is needed to unpack releases")?;
     if !status.success() {
         bail!("could not unpack {archive}");
     }
-    let new_bin = tmp.join(format!("parvez-{tag}-{target}")).join(format!("parvez{}", std::env::consts::EXE_SUFFIX));
+    let new_bin = tmp.join(format!("limen-{tag}-{target}")).join(format!("limen{}", std::env::consts::EXE_SUFFIX));
     if !new_bin.is_file() {
-        bail!("{archive} has no parvez binary");
+        bail!("{archive} has no limen binary");
     }
     // stage next to the running binary, then rename over it (atomic on one filesystem)
-    let staged = exe.with_file_name(".parvez.upgrade");
+    let staged = exe.with_file_name(".limen.upgrade");
     std::fs::copy(&new_bin, &staged).with_context(|| format!("writing {}", staged.display()))?;
     #[cfg(unix)]
     {
@@ -179,7 +179,7 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
     }
     // Windows won't overwrite a running .exe, but it will rename one: move it aside
     // under a unique name (an older leftover may still be in use)
-    let old = exe.with_file_name(format!(".parvez.old-{}", std::process::id()));
+    let old = exe.with_file_name(format!(".limen.old-{}", std::process::id()));
     if cfg!(windows) {
         std::fs::rename(&exe, &old).with_context(|| format!("moving {} aside", exe.display()))?;
     }
@@ -190,7 +190,7 @@ pub fn upgrade(version: Option<String>, check: bool, force: bool) -> Result<()> 
         return Err(e).with_context(|| format!("replacing {}", exe.display()));
     }
     let _ = std::fs::remove_dir_all(&tmp);
-    eprintln!("parvez: upgraded {current} -> {tag} ({})", shown(&exe));
+    eprintln!("limen: upgraded {current} -> {tag} ({})", shown(&exe));
     Ok(())
 }
 
@@ -235,7 +235,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn tempdir() -> Result<PathBuf> {
-    let base = std::env::temp_dir().join(format!("parvez-upgrade-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("limen-upgrade-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base)?;
     Ok(base)
@@ -267,19 +267,19 @@ pub fn doctor() -> Result<()> {
         problems += 1;
         println!("  FAIL  {m}");
     };
-    println!("parvez doctor");
+    println!("limen doctor");
     let exe = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok());
     ok(&format!(
-        "parvez {} ({})",
+        "limen {} ({})",
         env!("CARGO_PKG_VERSION"),
         exe.as_deref().map(shown).unwrap_or_else(|| "?".into())
     ));
     match run("rustc", &["--version"]) {
         Some(v) => match rust_version(&v) {
             Some(rv) if rv >= MIN_RUST => ok(&v),
-            _ => fail(&format!("{v}: Parvez needs Rust {}.{} or newer; run `rustup update`", MIN_RUST.0, MIN_RUST.1)),
+            _ => fail(&format!("{v}: Limen needs Rust {}.{} or newer; run `rustup update`", MIN_RUST.0, MIN_RUST.1)),
         },
-        None => fail("Rust isn't installed (Parvez builds programs with it): curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"),
+        None => fail("Rust isn't installed (Limen builds programs with it): curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"),
     }
     match run("cargo", &["--version"]) {
         Some(v) => ok(&v),
@@ -307,7 +307,7 @@ pub fn doctor() -> Result<()> {
     }
     match run("git", &["--version"]) {
         Some(v) => ok(&format!("{v} (dependency security audit)")),
-        None => fail("git isn't installed; `parvez build` uses it to fetch the RustSec advisory database"),
+        None => fail("git isn't installed; `limen build` uses it to fetch the RustSec advisory database"),
     }
     let db = crate::audit::cache_dir().join("advisory-db");
     match std::fs::metadata(&db).and_then(|m| m.modified()) {
@@ -315,7 +315,7 @@ pub fn doctor() -> Result<()> {
             let days = t.elapsed().map(|d| d.as_secs() / 86_400).unwrap_or(0);
             ok(&format!("RustSec advisory database cached ({days} day(s) old; refreshed by builds)"))
         }
-        Err(_) => warn("RustSec advisory database not cached yet; the first `parvez build` downloads it"),
+        Err(_) => warn("RustSec advisory database not cached yet; the first `limen build` downloads it"),
     }
     match run("rustup", &["target", "list", "--installed"]) {
         Some(list) => {
@@ -339,7 +339,7 @@ pub fn doctor() -> Result<()> {
         }
     }
     if target().is_none() {
-        warn("no prebuilt releases for this platform; `parvez upgrade` won't work here (use cargo install)");
+        warn("no prebuilt releases for this platform; `limen upgrade` won't work here (use cargo install)");
     }
     if problems > 0 {
         println!("\n{problems} problem(s) to fix before building");
@@ -359,9 +359,9 @@ mod tests {
         for bad in ["0.17.0", "v0.17", "v0.17.0-rc1", "v0.17.0/../x", "latest", "v.1.2"] {
             assert!(!valid_tag(bad), "{bad}");
         }
-        let sums = "aa  other.tar.gz\n4b61c214e761454fb9416bda22b09d079b7b688c4ddcb50e233f266a04b7977b  parvez-v0.16.0-x86_64-unknown-linux-musl.tar.gz\n";
+        let sums = "aa  other.tar.gz\n4b61c214e761454fb9416bda22b09d079b7b688c4ddcb50e233f266a04b7977b  limen-v0.16.0-x86_64-unknown-linux-musl.tar.gz\n";
         assert_eq!(
-            expected_sum(sums, "parvez-v0.16.0-x86_64-unknown-linux-musl.tar.gz").as_deref(),
+            expected_sum(sums, "limen-v0.16.0-x86_64-unknown-linux-musl.tar.gz").as_deref(),
             Some("4b61c214e761454fb9416bda22b09d079b7b688c4ddcb50e233f266a04b7977b")
         );
         assert_eq!(expected_sum(sums, "other.tar.gz"), None, "short sums are rejected");

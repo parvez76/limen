@@ -1,19 +1,19 @@
-# Parvez installer for Windows (PowerShell 5.1 and 7+).
+# Limen installer for Windows (PowerShell 5.1 and 7+).
 #
-#   irm https://parvez76.github.io/parvez/install.ps1 | iex
+#   irm https://parvez76.github.io/limen/install.ps1 | iex
 #
 # Downloads the release for Windows, checks it against the release's SHA256SUMS
 # (and its GitHub build attestation when the `gh` CLI is installed), installs
-# parvez.exe to %USERPROFILE%\.parvez\bin and adds that to your user PATH (no
-# admin rights needed). Parvez builds your programs with the Rust toolchain; if
+# limen.exe to %USERPROFILE%\.limen\bin and adds that to your user PATH (no
+# admin rights needed). Limen builds your programs with the Rust toolchain; if
 # it's missing, the installer offers to set it up with the official rustup-init.exe.
 #
 # `iex` can't take parameters, so options are environment variables:
-#   $env:PARVEZ_VERSION = "v0.18.0"    a release tag (default: the latest)
-#   $env:PARVEZ_HOME = "D:\tools\pz"   install location (default: %USERPROFILE%\.parvez)
-#   $env:PARVEZ_YES = "1"              don't ask; install Rust if it's missing
-#   $env:PARVEZ_NO_RUST = "1"          never install Rust
-#   $env:PARVEZ_NO_MODIFY_PATH = "1"   don't change the user PATH
+#   $env:LIMEN_VERSION = "v0.18.0"    a release tag (default: the latest)
+#   $env:LIMEN_HOME = "D:\tools\pz"   install location (default: %USERPROFILE%\.limen)
+#   $env:LIMEN_YES = "1"              don't ask; install Rust if it's missing
+#   $env:LIMEN_NO_RUST = "1"          never install Rust
+#   $env:LIMEN_NO_MODIFY_PATH = "1"   don't change the user PATH
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -21,40 +21,40 @@
     # PowerShell 5.1 may not offer TLS 1.2 by default; GitHub requires it
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    $Repo = 'parvez76/parvez'
+    $Repo = 'parvez76/limen'
     $LegacyRepo = 'parvez76/project-parvez'   # releases before the rename were attested under this name
-    $DownloadBase = if ($env:PARVEZ_DOWNLOAD_BASE) { $env:PARVEZ_DOWNLOAD_BASE } else { "https://github.com/$Repo/releases/download" }
-    $LatestApi = if ($env:PARVEZ_LATEST_API) { $env:PARVEZ_LATEST_API } else { "https://api.github.com/repos/$Repo/releases/latest" }
-    $InstallHome = if ($env:PARVEZ_HOME) { $env:PARVEZ_HOME } else { Join-Path $env:USERPROFILE '.parvez' }
+    $DownloadBase = if ($env:LIMEN_DOWNLOAD_BASE) { $env:LIMEN_DOWNLOAD_BASE } else { "https://github.com/$Repo/releases/download" }
+    $LatestApi = if ($env:LIMEN_LATEST_API) { $env:LIMEN_LATEST_API } else { "https://api.github.com/repos/$Repo/releases/latest" }
+    $InstallHome = if ($env:LIMEN_HOME) { $env:LIMEN_HOME } else { Join-Path $env:USERPROFILE '.limen' }
 
-    function Say([string]$m) { Write-Host "parvez-install: $m" }
+    function Say([string]$m) { Write-Host "limen-install: $m" }
     # never `exit`: under `iex` that would close the user's PowerShell window
-    function Fail([string]$m) { Write-Host "parvez-install: error: $m" -ForegroundColor Red; throw "parvez-install: $m" }
+    function Fail([string]$m) { Write-Host "limen-install: error: $m" -ForegroundColor Red; throw "limen-install: $m" }
 
     # ---- platform ------------------------------------------------------------
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch ($arch) {
         'AMD64' { $target = 'x86_64-pc-windows-msvc' }
         'ARM64' { $target = 'x86_64-pc-windows-msvc'; Say 'Windows on ARM: using the x64 build (it runs under the built-in emulation)' }
-        default { Fail "no prebuilt Parvez for $arch Windows. Build it from source: cargo install --git https://github.com/$Repo --locked" }
+        default { Fail "no prebuilt Limen for $arch Windows. Build it from source: cargo install --git https://github.com/$Repo --locked" }
     }
     if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) { Fail 'this installer needs tar.exe (included in Windows 10 version 1803 and later)' }
 
     # ---- version -------------------------------------------------------------
-    $version = $env:PARVEZ_VERSION
+    $version = $env:LIMEN_VERSION
     if (-not $version) {
         try { $version = (Invoke-RestMethod -Uri $LatestApi -UseBasicParsing).tag_name } catch { Fail "could not reach GitHub to find the latest release: $_" }
     }
     if ($version -notmatch '^v\d+\.\d+\.\d+$') { Fail "unexpected release tag `"$version`"" }
 
     # ---- download and verify ---------------------------------------------------
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("parvez-install-" + [Guid]::NewGuid().ToString('N'))
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("limen-install-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        $archive = "parvez-$version-$target.tar.gz"
+        $archive = "limen-$version-$target.tar.gz"
         $archivePath = Join-Path $tmp $archive
         $sumsPath = Join-Path $tmp 'SHA256SUMS'
-        Say "downloading Parvez $version for $target"
+        Say "downloading Limen $version for $target"
         try {
             Invoke-WebRequest -Uri "$DownloadBase/$version/$archive" -OutFile $archivePath -UseBasicParsing
             Invoke-WebRequest -Uri "$DownloadBase/$version/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
@@ -82,15 +82,15 @@
         # ---- install --------------------------------------------------------------
         & tar.exe -xzf $archivePath -C $tmp
         if ($LASTEXITCODE -ne 0) { Fail "could not unpack $archive" }
-        $src = Join-Path $tmp "parvez-$version-$target\parvez.exe"
-        if (-not (Test-Path $src)) { Fail 'the archive has no parvez.exe' }
+        $src = Join-Path $tmp "limen-$version-$target\limen.exe"
+        if (-not (Test-Path $src)) { Fail 'the archive has no limen.exe' }
         $bin = Join-Path $InstallHome 'bin'
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
-        $dest = Join-Path $bin 'parvez.exe'
-        # a running parvez.exe can't be overwritten, but it can be renamed (uniquely:
+        $dest = Join-Path $bin 'limen.exe'
+        # a running limen.exe can't be overwritten, but it can be renamed (uniquely:
         # an older leftover may still be running); leftovers are removed when free
-        Get-ChildItem -Path $bin -Filter '.parvez.old*' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        if (Test-Path $dest) { Move-Item -Force $dest (Join-Path $bin (".parvez.old-" + [Guid]::NewGuid().ToString('N'))) }
+        Get-ChildItem -Path $bin -Filter '.limen.old*' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        if (Test-Path $dest) { Move-Item -Force $dest (Join-Path $bin (".limen.old-" + [Guid]::NewGuid().ToString('N'))) }
         Copy-Item $src $dest
         Say "installed $(& $dest --version) to $bin"
     } finally {
@@ -98,7 +98,7 @@
     }
 
     # ---- PATH -----------------------------------------------------------------
-    if ($env:PARVEZ_NO_MODIFY_PATH -ne '1') {
+    if ($env:LIMEN_NO_MODIFY_PATH -ne '1') {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $entries = if ($userPath) { $userPath -split ';' } else { @() }
         if ($entries -notcontains $bin) {
@@ -113,14 +113,14 @@
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
     $haveCargo = (Get-Command cargo -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $cargoHome 'bin\cargo.exe'))
     if (-not $haveCargo) {
-        Say "Parvez builds your programs with the Rust toolchain, which isn't installed."
+        Say "Limen builds your programs with the Rust toolchain, which isn't installed."
         $install = $false
-        if ($env:PARVEZ_NO_RUST -eq '1') {
+        if ($env:LIMEN_NO_RUST -eq '1') {
             $install = $false
-        } elseif ($env:PARVEZ_YES -eq '1') {
+        } elseif ($env:LIMEN_YES -eq '1') {
             $install = $true
         } elseif ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
-            $answer = Read-Host 'parvez-install: install Rust now with the official installer (rustup.rs)? [Y/n]'
+            $answer = Read-Host 'limen-install: install Rust now with the official installer (rustup.rs)? [Y/n]'
             $install = -not ($answer -match '^[nN]')
         }
         if ($install) {
@@ -149,7 +149,7 @@
 
     Write-Host ''
     Say 'done. Open a new terminal, then:'
-    Write-Host '    parvez doctor          # check the setup'
-    Write-Host '    parvez new hello       # start a project'
-    Write-Host '    parvez upgrade         # later: update to the newest release'
+    Write-Host '    limen doctor          # check the setup'
+    Write-Host '    limen new hello       # start a project'
+    Write-Host '    limen upgrade         # later: update to the newest release'
 }

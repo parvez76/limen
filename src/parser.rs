@@ -188,7 +188,7 @@ pub fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>> {
     Ok(items)
 }
 
-/// Names a user type can't take: Rust prelude items and the Parvez runtime's own types.
+/// Names a user type can't take: Rust prelude items and the Limen runtime's own types.
 fn reserved_type_name(name: &str) -> Option<&'static str> {
     const RUST: &[&str] = &[
         "Result", "Option", "Ok", "Err", "Some", "None", "String", "Vec", "Box", "Self", "Send", "Sync", "Sized",
@@ -204,7 +204,7 @@ fn reserved_type_name(name: &str) -> Option<&'static str> {
     if RUST.contains(&name) {
         Some("Rust's built-in type of that name is used by the generated code")
     } else if RUNTIME.contains(&name) {
-        Some("the Parvez runtime defines a type of that name")
+        Some("the Limen runtime defines a type of that name")
     } else {
         None
     }
@@ -309,7 +309,7 @@ pub fn validate(prog: &Program) -> Result<()> {
         bail!("line {}: `fn main` belongs in the main file, not in an imported module", f.line);
     }
     // Type names the generated Rust relies on: a user `type Result` would shadow
-    // std's Result in every signature Parvez emits (rustc then reports E0107 deep
+    // std's Result in every signature Limen emits (rustc then reports E0107 deep
     // inside runtime code). Reject them here with a rename hint.
     for (_, item) in &all {
         let (kind, name, line) = match item {
@@ -353,7 +353,7 @@ pub fn validate(prog: &Program) -> Result<()> {
         match (r.guards.is_empty(), &r.public) {
             (true, None) => bail!(
                 "line {}: {kind} {} {} has no access policy. Add @guard(fn) to require sign-in or another check, \
-                 or @public(\"why anyone may call it\") to serve it to everyone (Parvez denies by default)",
+                 or @public(\"why anyone may call it\") to serve it to everyone (Limen denies by default)",
                 r.line,
                 r.method,
                 r.path
@@ -406,7 +406,7 @@ pub fn validate(prog: &Program) -> Result<()> {
                 }
             }
             Item::Route(r) if in_test_mod => {
-                bail!("line {}: a @test_only module can't define routes (they would vanish from `parvez build`)", r.line);
+                bail!("line {}: a @test_only module can't define routes (they would vanish from `limen build`)", r.line);
             }
             _ => {}
         }
@@ -423,7 +423,7 @@ pub fn validate(prog: &Program) -> Result<()> {
     if let Some((_, r)) = routes.first() {
         if let Some((_, f)) = fns.iter().find(|(n, _)| n == "main") {
             bail!(
-                "line {}: this file has `route`s (first at line {}), so Parvez generates `main` (the HTTP server); rename or remove `fn main`",
+                "line {}: this file has `route`s (first at line {}), so Limen generates `main` (the HTTP server); rename or remove `fn main`",
                 f.line,
                 r.line
             );
@@ -481,7 +481,7 @@ struct Parser {
 }
 
 /// Deeper input is rejected with an error instead of overflowing the stack
-/// (the compiler runs untrusted code, e.g. snippets sent to `parvez mcp`).
+/// (the compiler runs untrusted code, e.g. snippets sent to `limen mcp`).
 const MAX_DEPTH: usize = 256;
 /// Longest `a + b + c ...` chain: it becomes an equally deep expression tree.
 const MAX_CHAIN: usize = 2_000;
@@ -2162,7 +2162,7 @@ mod tests {
         assert!(err("@public\nroute GET \"/a/{id}\" -> str:\n    ret \"\"\n").contains("needs a typed parameter"));
         assert!(err("@public\nroute GET \"/a\" (x: i32):\n    ret\n").contains("must be a path param"));
         assert!(err("@public\nroute GET \"/a\":\n    ret\n@public\nroute GET \"/a\":\n    ret\n").contains("duplicate route"));
-        assert!(err("@public\nroute GET \"/a\":\n    ret\nfn main():\n    ret\n").contains("Parvez generates `main`"));
+        assert!(err("@public\nroute GET \"/a\":\n    ret\nfn main():\n    ret\n").contains("Limen generates `main`"));
         assert!(err("@public\nroute FETCH \"/a\":\n    ret\n").contains("unknown HTTP method"));
     }
 
@@ -2287,8 +2287,8 @@ mod tests {
         assert!(e.contains("line 1: type `Result` is reserved") && e.contains("Rust's built-in"), "{e}");
         assert!(err("enum Option:\n    A\n").contains("enum `Option` is reserved"));
         assert!(err("trait Clone:\n    fn f(&self)\n").contains("trait `Clone` is reserved"));
-        assert!(err("type AppError: m: str\n").contains("the Parvez runtime defines"));
-        assert!(err("type Secret: v: str\n").contains("the Parvez runtime defines"));
+        assert!(err("type AppError: m: str\n").contains("the Limen runtime defines"));
+        assert!(err("type Secret: v: str\n").contains("the Limen runtime defines"));
         prog("type LoginResult: ok: bool\ntype State: n: int\n");
     }
 

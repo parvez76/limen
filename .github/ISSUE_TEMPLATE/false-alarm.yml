@@ -1,12 +1,12 @@
 name: False alarm
-description: Safe code that Parvez refuses
+description: Safe code that Limen refuses
 labels: [security-check, false-alarm]
 body:
   - type: input
     id: link
     attributes:
       label: Playground link
-      description: Reproduce it at https://parvez76.github.io/parvez/play/ and press Share. Or paste the code below.
+      description: Reproduce it at https://parvez76.github.io/limen/play/ and press Share. Or paste the code below.
   - type: textarea
     id: code
     attributes:
@@ -21,5 +21,5 @@ body:
   - type: input
     id: version
     attributes:
-      label: Parvez version
-      placeholder: parvez --version
+      label: Limen version
+      placeholder: limen --version

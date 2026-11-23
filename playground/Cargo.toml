@@ -1,8 +1,8 @@
-# The browser playground: Parvez's parser, security checks and Rust generator
+# The browser playground: Limen's parser, security checks and Rust generator
 # compiled to WebAssembly. It compiles the compiler's own source files (see
-# src/lib.rs), so the playground can't drift from `parvez`.
+# src/lib.rs), so the playground can't drift from `limen`.
 [package]
-name = "parvez-playground"
+name = "limen-playground"
 version = "0.0.0"
 edition = "2024"
 publish = false

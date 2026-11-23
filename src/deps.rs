@@ -1,7 +1,7 @@
 //! Crate dependency resolution: detected crates -> generated Cargo.toml.
 //!
 //! Known crates get a tested version + features. Anything else falls back to
-//! `*` (latest). `parvez.toml` next to the `.prvz` file overrides both:
+//! `*` (latest). `limen.toml` next to the `.lmn` file overrides both:
 //!
 //! ```toml
 //! [dependencies]
@@ -70,7 +70,7 @@ pub fn crate_of(path: &str, strict: bool) -> Option<String> {
     Some(first.to_string())
 }
 
-/// Crates Parvez knows and pins (plus codegen markers). Anything else is an
+/// Crates Limen knows and pins (plus codegen markers). Anything else is an
 /// arbitrary crates.io package whose build script would run at check time.
 pub fn is_known(name: &str) -> bool {
     name == "axum_ws" || KNOWN.iter().any(|k| k.0 == name)
@@ -119,9 +119,9 @@ pub fn dependencies(crates: &BTreeSet<String>, overrides: Option<&Table>) -> Tab
     deps
 }
 
-/// Reads `[dependencies]` from `parvez.toml` beside the source file, if any.
-pub fn load_overrides(prvz: &Path) -> Result<Option<Table>> {
-    let cfg = prvz.parent().unwrap_or(Path::new(".")).join("parvez.toml");
+/// Reads `[dependencies]` from `limen.toml` beside the source file, if any.
+pub fn load_overrides(lmn: &Path) -> Result<Option<Table>> {
+    let cfg = lmn.parent().unwrap_or(Path::new(".")).join("limen.toml");
     if !cfg.exists() {
         return Ok(None);
     }
@@ -133,8 +133,8 @@ pub fn load_overrides(prvz: &Path) -> Result<Option<Table>> {
     })
 }
 
-fn load_table(prvz: &Path) -> Result<Option<Table>> {
-    let cfg = prvz.parent().unwrap_or(Path::new(".")).join("parvez.toml");
+fn load_table(lmn: &Path) -> Result<Option<Table>> {
+    let cfg = lmn.parent().unwrap_or(Path::new(".")).join("limen.toml");
     if !cfg.exists() {
         return Ok(None);
     }
@@ -142,10 +142,10 @@ fn load_table(prvz: &Path) -> Result<Option<Table>> {
     Ok(Some(text.parse().with_context(|| format!("parsing {}", cfg.display()))?))
 }
 
-/// `[service]` in parvez.toml: body_limit_bytes, timeout_secs, max_concurrency.
-pub fn service_config(prvz: &Path) -> Result<crate::codegen::ServiceConfig> {
+/// `[service]` in limen.toml: body_limit_bytes, timeout_secs, max_concurrency.
+pub fn service_config(lmn: &Path) -> Result<crate::codegen::ServiceConfig> {
     let mut cfg = crate::codegen::ServiceConfig::default();
-    if let Some(t) = load_table(prvz)?
+    if let Some(t) = load_table(lmn)?
         && let Some(Value::Table(s)) = t.get("service")
     {
         let get = |k: &str, d: u64| s.get(k).and_then(|v| v.as_integer()).map(|v| v.max(1) as u64).unwrap_or(d);
@@ -156,7 +156,7 @@ pub fn service_config(prvz: &Path) -> Result<crate::codegen::ServiceConfig> {
     Ok(cfg)
 }
 
-/// `[security]` rules in parvez.toml: banned calls, extra sinks, and the
+/// `[security]` rules in limen.toml: banned calls, extra sinks, and the
 /// dependency policy (allowed licenses, banned crates).
 #[derive(Debug, Default)]
 pub struct Policy {
@@ -167,18 +167,18 @@ pub struct Policy {
     pub ban: Vec<String>,
 }
 
-pub fn policy(prvz: &Path) -> Result<Policy> {
+pub fn policy(lmn: &Path) -> Result<Policy> {
     let mut p = Policy::default();
-    let Some(t) = load_table(prvz)? else { return Ok(p) };
+    let Some(t) = load_table(lmn)? else { return Ok(p) };
     let Some(Value::Table(sec)) = t.get("security") else { return Ok(p) };
     let strings = |v: Option<&Value>, what: &str| -> Result<Vec<String>> {
         match v {
             None => Ok(vec![]),
             Some(Value::Array(a)) => a
                 .iter()
-                .map(|x| x.as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("parvez.toml: {what} must be a list of strings")))
+                .map(|x| x.as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("limen.toml: {what} must be a list of strings")))
                 .collect(),
-            Some(_) => anyhow::bail!("parvez.toml: {what} must be a list of strings"),
+            Some(_) => anyhow::bail!("limen.toml: {what} must be a list of strings"),
         }
     };
     if let Some(Value::Array(rules)) = sec.get("disallow") {
@@ -186,11 +186,11 @@ pub fn policy(prvz: &Path) -> Result<Policy> {
             match r {
                 Value::String(c) => p.custom.disallow.push((c.clone(), "listed in [security] disallow".into())),
                 Value::Table(t) => {
-                    let call = t.get("call").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("parvez.toml: each [security] disallow entry needs `call`"))?;
+                    let call = t.get("call").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("limen.toml: each [security] disallow entry needs `call`"))?;
                     let why = t.get("reason").and_then(|v| v.as_str()).unwrap_or("listed in [security] disallow");
                     p.custom.disallow.push((call.to_string(), why.to_string()));
                 }
-                _ => anyhow::bail!("parvez.toml: [security] disallow entries are strings or {{ call, reason }}"),
+                _ => anyhow::bail!("limen.toml: [security] disallow entries are strings or {{ call, reason }}"),
             }
         }
     }
@@ -206,13 +206,13 @@ pub fn policy(prvz: &Path) -> Result<Policy> {
     Ok(p)
 }
 
-/// Advisory policy: `PARVEZ_AUDIT` env, else `[security] audit` in
-/// parvez.toml, else "deny". One of "deny" | "warn" | "off".
-pub fn audit_policy(prvz: &Path) -> Result<String> {
-    if let Ok(v) = std::env::var("PARVEZ_AUDIT") {
+/// Advisory policy: `LIMEN_AUDIT` env, else `[security] audit` in
+/// limen.toml, else "deny". One of "deny" | "warn" | "off".
+pub fn audit_policy(lmn: &Path) -> Result<String> {
+    if let Ok(v) = std::env::var("LIMEN_AUDIT") {
         return Ok(v);
     }
-    let from_file = load_table(prvz)?
+    let from_file = load_table(lmn)?
         .and_then(|t| t.get("security").and_then(|s| s.get("audit")).and_then(|a| a.as_str().map(String::from)));
     Ok(from_file.unwrap_or_else(|| "deny".into()))
 }
@@ -225,7 +225,7 @@ pub fn unpinned(deps: &Table) -> Vec<String> {
 pub fn manifest(name: &str, deps: Table, dev_deps: Table) -> String {
     let mut doc = Table::new();
     let mut pkg = Table::new();
-    pkg.insert("name".into(), Value::String(format!("prvz-{name}")));
+    pkg.insert("name".into(), Value::String(format!("lmn-{name}")));
     pkg.insert("version".into(), Value::String("0.1.0".into()));
     pkg.insert("edition".into(), Value::String("2024".into()));
     doc.insert("package".into(), Value::Table(pkg));
@@ -235,7 +235,7 @@ pub fn manifest(name: &str, deps: Table, dev_deps: Table) -> String {
     doc.insert("bin".into(), Value::Array(vec![Value::Table(bin)]));
     doc.insert("dependencies".into(), Value::Table(deps));
     if !dev_deps.is_empty() {
-        // only `parvez test` / `check` builds compile these
+        // only `limen test` / `check` builds compile these
         doc.insert("dev-dependencies".into(), Value::Table(dev_deps));
     }
     let mut release = Table::new();

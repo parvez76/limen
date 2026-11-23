@@ -1,13 +1,17 @@
 [package]
-name = "parvez"
-version = "0.21.0"
+name = "limen-lang"
+version = "0.22.0"
 edition = "2024"
 description = "A small language for HTTP services and CLI tools that compiles to Rust, with built-in security checks"
 license = "MIT"
-repository = "https://github.com/parvez76/parvez"
+repository = "https://github.com/parvez76/limen"
 keywords = ["language", "transpiler", "security", "rust", "backend"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
+
+[[bin]]
+name = "limen"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"

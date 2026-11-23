@@ -34,7 +34,7 @@ fn content(text: &str, line: usize, raw: bool, dynamic: bool) -> Result<Vec<Html
                 check_expression(&e, line)?;
                 out.push(HtmlPart::Value(e, raw));
             }
-            // `{cpu:.1}` / `{n:>5}` / `{x:?}`: formatted like a Parvez string, then escaped
+            // `{cpu:.1}` / `{n:>5}` / `{x:?}`: formatted like a Limen string, then escaped
             StrPart::Interp(e, Some(spec)) if dynamic && !raw => {
                 check_expression(&e, line)?;
                 if !valid_spec(&spec) {

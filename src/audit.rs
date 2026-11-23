@@ -2,7 +2,7 @@
 //! - SBOM: CycloneDX 1.5 JSON of every resolved crate (version, license, purl)
 //! - Advisory gate: Cargo.lock vs the RustSec advisory database
 //!   (cached clone of github.com/rustsec/advisory-db, refreshed daily;
-//!   `PARVEZ_ADVISORY_DB=<dir>` uses a local copy as-is)
+//!   `LIMEN_ADVISORY_DB=<dir>` uses a local copy as-is)
 
 use anyhow::{Context, Result};
 use semver::{Version, VersionReq};
@@ -14,14 +14,14 @@ use std::time::{Duration, SystemTime};
 const ADVISORY_REPO: &str = "https://github.com/rustsec/advisory-db";
 
 pub fn cache_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("PARVEZ_CACHE_DIR") {
+    if let Some(d) = std::env::var_os("LIMEN_CACHE_DIR") {
         return PathBuf::from(d);
     }
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("parvez")
+    base.join("limen")
 }
 
 /// (name, version) of every crate actually compiled into the binary for the
@@ -141,7 +141,7 @@ pub fn write_sbom(proj: &Path, app: &str, out: &Path) -> Result<usize> {
         "specVersion": "1.5",
         "version": 1,
         "metadata": {
-            "tools": { "components": [{ "type": "application", "name": "parvez", "version": env!("CARGO_PKG_VERSION") }] },
+            "tools": { "components": [{ "type": "application", "name": "limen", "version": env!("CARGO_PKG_VERSION") }] },
             "component": { "type": "application", "name": app, "bom-ref": format!("app:{app}") }
         },
         "components": comps
@@ -188,11 +188,11 @@ pub enum Db {
 
 /// Locates (and refreshes, at most daily) the advisory database.
 pub fn advisory_db() -> Db {
-    if let Some(d) = std::env::var_os("PARVEZ_ADVISORY_DB") {
+    if let Some(d) = std::env::var_os("LIMEN_ADVISORY_DB") {
         return Db::Ready(PathBuf::from(d), None);
     }
     let dir = cache_dir().join("advisory-db");
-    let stamp = dir.join(".parvez-fetched");
+    let stamp = dir.join(".limen-fetched");
     let fresh = std::fs::metadata(&stamp)
         .and_then(|m| m.modified())
         .ok()
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn scan_lockfile_against_db() {
-        let dir = std::env::temp_dir().join("parvez-audit-unit");
+        let dir = std::env::temp_dir().join("limen-audit-unit");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("db/crates/demo")).unwrap();
         std::fs::create_dir_all(dir.join("db/crates/old")).unwrap();

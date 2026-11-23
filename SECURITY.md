@@ -1,13 +1,13 @@
 # Security policy
 
-Parvez generates every line of the services it builds, so a flaw in Parvez becomes a flaw in each of them. Security reports get priority over feature work.
+Limen generates every line of the services it builds, so a flaw in Limen becomes a flaw in each of them. Security reports get priority over feature work.
 
 ## Reporting a vulnerability
 
 **Don't open a public issue.** Report privately through GitHub: open the repository's **Security** tab, choose **Report a vulnerability**, and describe:
 
-- the Parvez version (`parvez --version`) and target platform;
-- a minimal `.prvz` / `.msd` program, or the request sequence, that shows the problem;
+- the Limen version (`limen --version`) and target platform;
+- a minimal `.lmn` / `.msd` program, or the request sequence, that shows the problem;
 - what an attacker gains: for example, reading another user's data, running code, or bypassing a guard;
 - whether it's already public or being exploited.
 
@@ -24,7 +24,7 @@ Please give us a chance to ship the fix before disclosing. If a deadline matters
 
 ## Supported versions
 
-Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrade with `parvez upgrade`, which verifies the release before replacing the binary, or with `cargo install` if you built from source, then rebuild your services, because fixes to generated code and runtime only reach a service when it's rebuilt.
+Limen is pre-1.0: only the latest minor release receives security fixes. Upgrade with `limen upgrade`, which verifies the release before replacing the binary, or with `cargo install` if you built from source, then rebuild your services, because fixes to generated code and runtime only reach a service when it's rebuilt.
 
 | Version | Security fixes |
 |---|---|
@@ -33,7 +33,7 @@ Parvez is pre-1.0: only the latest minor release receives security fixes. Upgrad
 
 ## Verifying a release
 
-The installers (`install.sh` and, on Windows, `install.ps1`, served at https://parvez76.github.io/parvez/) and `parvez upgrade` do the checks below automatically: the archive must match `SHA256SUMS`, and when the GitHub CLI is installed its build attestation must verify, or nothing is installed. To check a download by hand:
+The installers (`install.sh` and, on Windows, `install.ps1`, served at https://parvez76.github.io/limen/) and `limen upgrade` do the checks below automatically: the archive must match `SHA256SUMS`, and when the GitHub CLI is installed its build attestation must verify, or nothing is installed. To check a download by hand:
 
 Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a `v*` tag is pushed. The tests must pass first. Each archive then gets a GitHub build attestation: a keyless Sigstore signature tying the file to the exact commit and workflow run that produced it. The release also lists `SHA256SUMS`.
 
@@ -41,13 +41,13 @@ Every release from v0.16.0 on is built by [`.github/workflows/release.yml`](.git
 # 1. checksum
 sha256sum -c SHA256SUMS --ignore-missing
 # 2. provenance: built from this repository by the release workflow
-gh attestation verify parvez-v0.21.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/parvez
+gh attestation verify limen-v0.22.0-x86_64-unknown-linux-musl.tar.gz --repo parvez76/limen
 ```
 
 Builds are reproducible: the workflow rebuilds the Linux binary from scratch in a different directory and refuses to publish if a single byte differs. You can check a release yourself with the same Rust version:
 
 ```bash
-git clone https://github.com/parvez76/parvez && cd parvez && git checkout v0.21.0
+git clone https://github.com/parvez76/limen && cd limen && git checkout v0.22.0
 .github/release-build.sh x86_64-unknown-linux-musl /tmp/rebuild   # prints the archive's SHA-256
 grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 ```
@@ -55,35 +55,35 @@ grep x86_64-unknown-linux-musl SHA256SUMS                         # must match
 Release tags from v0.16.0 on are signed with the project's SSH signing key, listed in [`.github/allowed_signers`](.github/allowed_signers) (fingerprint `SHA256:FRGXW2DjW+ITeT31kbI1ZZTrpXsglQBuWgcIS4/q4JA`). GitHub shows them as Verified; to check locally:
 
 ```bash
-git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.21.0
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers tag -v v0.22.0
 ```
 
-Installing from source (`cargo install --git https://github.com/parvez76/parvez --tag v0.21.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
+Installing from source (`cargo install --git https://github.com/parvez76/limen --tag v0.22.0 --locked`) uses the exact dependency versions in `Cargo.lock`.
 
 ## Scope
 
 In scope:
 
-- the compiler (`parvez`), including its parser, which reads untrusted source;
+- the compiler (`limen`), including its parser, which reads untrusted source;
 - generated code and the runtime it embeds: HTTP handling, OIDC tokens and browser sessions, CSRF checks, Masud HTML escaping, `Secret`, `safe_join`, error handling, limits, WebSockets;
 - the security lint giving a false negative for a pattern its rules claim to catch;
-- the MCP server (`parvez mcp`);
-- `parvez build` supply-chain checks (RustSec audit, SBOM).
+- the MCP server (`limen mcp`);
+- `limen build` supply-chain checks (RustSec audit, SBOM).
 
 Out of scope:
 
 - code inside an item marked `@allow_insecure("reason")`, which deliberately opts out;
-- vulnerabilities in a dependency crate that Parvez's audit already reports; report those to RustSec or the crate;
+- vulnerabilities in a dependency crate that Limen's audit already reports; report those to RustSec or the crate;
 - logic flaws in your own program, such as a guard function that returns the wrong answer;
 - denial of service that needs more traffic than the configured limits allow.
 
-## What Parvez enforces
+## What Limen enforces
 
 These protections are on by default. Where a check is a compile error, the program doesn't build until it is fixed or explicitly waived. References: [CWE](https://cwe.mitre.org), [OWASP Top 10 2021](https://owasp.org/Top10/), [OWASP ASVS 4.0.3](https://owasp.org/www-project-application-security-verification-standard/).
 
 | Protection | How | CWE | OWASP | ASVS |
 |---|---|---|---|---|
-| Deny-by-default access | every route, socket and page needs `@guard(fn)` or `@public("reason")`, else compile error; `parvez routes` prints the access map | 862, 284 | A01 | 1.4.1, 4.1.3, 4.1.5 |
+| Deny-by-default access | every route, socket and page needs `@guard(fn)` or `@public("reason")`, else compile error; `limen routes` prints the access map | 862, 284 | A01 | 1.4.1, 4.1.3, 4.1.5 |
 | SQL injection | lint rule `sql-injection` | 89 | A03 | 5.3.4, 5.3.5 |
 | OS command injection | lint rule `command-injection` | 78, 77 | A03 | 5.3.8 |
 | Path traversal | lint rule `path-traversal`; `safe_join` | 22 | A01 | 12.3.1, 12.3.2 |
@@ -100,7 +100,7 @@ These protections are on by default. Where a check is a compile error, the progr
 | Downgrade to HTTP | `Strict-Transport-Security: max-age=31536000` (browsers ignore it over plain HTTP, so local development is unaffected) | 319 | A02 | 14.4.5 |
 | Clickjacking and sniffing | `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` | 1021, 693 | A05 | 14.4.4, 14.4.6, 14.4.7, 8.2.1 |
 | Vulnerable dependencies | build fails on RustSec advisories (`[security] audit = "deny"`); CycloneDX SBOM per build | 1395 | A06 | 14.2.1, 14.2.5 |
-| Memory safety | Parvez code compiles to Rust without `unsafe` blocks (the language has no `unsafe`) | 119, 787, 416 | - | - |
+| Memory safety | Limen code compiles to Rust without `unsafe` blocks (the language has no `unsafe`) | 119, 787, 416 | - | - |
 
 ### What `Secret` does and doesn't guarantee
 
@@ -111,7 +111,7 @@ These protections are on by default. Where a check is a compile error, the progr
 
 ## Rules
 
-The compile-time lint rules, as shown by `parvez lint --rules` and in every finding's `= see:` line:
+The compile-time lint rules, as shown by `limen lint --rules` and in every finding's `= see:` line:
 
 | Rule | Catches | CWE | OWASP 2021 | ASVS 4.0.3 | Severity |
 |---|---|---|---|---|---|
@@ -121,7 +121,7 @@ The compile-time lint rules, as shown by `parvez lint --rules` and in every find
 | `hardcoded-secret` | literals in secret-named bindings, key-shaped literals, `secret("...")` | 798, 259 | A07 Identification and Authentication Failures | 2.10.4, 6.4.1 | 7.5 |
 | `secret-exposure` | `.expose()` reaching logs, output, errors, JSON or pages | 532, 200 | A09 Security Logging and Monitoring Failures | 7.1.1, 7.1.2 | 6.5 |
 | `secret-type` | a secret-named `state:` field typed `str` | 312, 316 | A04 Insecure Design | 8.3.6, 6.4.1 | 4.0 |
-| `disallowed-call` | a call listed in `[security] disallow` in parvez.toml | 676 | A04 Insecure Design | - | 5.0 |
+| `disallowed-call` | a call listed in `[security] disallow` in limen.toml | 676 | A04 Insecure Design | - | 5.0 |
 
 Untrusted input comes from text-carrying route parameters (numbers, `bool` and `char` can't hold a path or script), `body`, `query`, `req`, a socket's `conn` and the inputs of guard functions. It is followed through derived values and into the functions and methods it's passed to, across modules, helper chains and recursion (per-parameter summaries computed to a fixed point). Method calls are resolved by the receiver's type, inferred from struct literals, annotations, parameter and `state:` field types, list elements (`[Disk(..)]`, `Vec<Box<dyn Store>>`) and the declared return types of your functions; calls through a `dyn Trait`, `Arc<dyn Trait>` or a generic bounded by a trait follow every implementation. Request data stored in a `state:` field taints every later read of it, in any route, worker or function, and the finding says where it was stored. A method that stores its argument in its object (`job.set_path(name)`) makes the object hold request data. Values read from the database (`fetch_one`, `fetch_all`, `query_as`, ...) are untrusted for file paths and commands, because an earlier request may have written them (second-order injection); a value declared as a number, `bool` or `char` is never treated as text. Request data sent on a channel is followed to its receiving end: a `state:` sender connects to the receivers of the same element type, and `tx, rx = channel()` links locally. Known limits: contents of files, environment variables and outgoing HTTP responses aren't treated as untrusted; and a method call on a value whose type can't be inferred is followed only when exactly one `impl` defines that name.
 
@@ -129,11 +129,11 @@ The checks are tested against an adversarial corpus ([tests/security_corpus](tes
 
 ## Code scanning (SARIF)
 
-`parvez lint --sarif` writes SARIF 2.1.0, which GitHub code scanning, Azure DevOps, GitLab and DefectDojo import. Each rule carries its CWE tags and a severity score. Findings waived with `@allow_insecure("reason")` are included as suppressed results with that reason, so reviewers can see what was waived and why. File paths are relative to the repository root.
+`limen lint --sarif` writes SARIF 2.1.0, which GitHub code scanning, Azure DevOps, GitLab and DefectDojo import. Each rule carries its CWE tags and a severity score. Findings waived with `@allow_insecure("reason")` are included as suppressed results with that reason, so reviewers can see what was waived and why. File paths are relative to the repository root.
 
 ```yaml
-# .github/workflows/parvez-security.yml
-name: parvez security
+# .github/workflows/limen-security.yml
+name: limen security
 on: [push, pull_request]
 permissions:
   contents: read
@@ -144,12 +144,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/parvez76/parvez --tag v0.21.0 --locked
-      - run: parvez lint main.prvz --sarif -o parvez.sarif
+      - run: cargo install --git https://github.com/parvez76/limen --tag v0.22.0 --locked
+      - run: limen lint main.lmn --sarif -o limen.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: parvez.sarif
+          sarif_file: limen.sarif
 ```
 
-`parvez lint` exits 1 when there are unwaived findings, so the job fails; `if: always()` still uploads the report.
+`limen lint` exits 1 when there are unwaived findings, so the job fails; `if: always()` still uploads the report.

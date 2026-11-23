@@ -1,22 +1,22 @@
 name: Security check bypass
-description: Code that gets request data, injectable SQL or a secret past Parvez's checks
+description: Code that gets request data, injectable SQL or a secret past Limen's checks
 labels: [security-check, bypass]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you: this is the most useful report there is. If you've found a vulnerability in Parvez itself (the compiler, generated services, installers or releases), please don't file it here; report it privately as described in SECURITY.md.
+        Thank you: this is the most useful report there is. If you've found a vulnerability in Limen itself (the compiler, generated services, installers or releases), please don't file it here; report it privately as described in SECURITY.md.
   - type: input
     id: link
     attributes:
       label: Playground link
-      description: Reproduce it at https://parvez76.github.io/parvez/play/ and press Share. Or paste the code below.
+      description: Reproduce it at https://parvez76.github.io/limen/play/ and press Share. Or paste the code below.
   - type: textarea
     id: code
     attributes:
       label: Code
       render: python
-      placeholder: the smallest .prvz program that shows it
+      placeholder: the smallest .lmn program that shows it
   - type: textarea
     id: why
     attributes:
@@ -27,5 +27,5 @@ body:
   - type: input
     id: version
     attributes:
-      label: Parvez version
-      placeholder: parvez --version
+      label: Limen version
+      placeholder: limen --version

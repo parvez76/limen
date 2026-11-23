@@ -1,10 +1,10 @@
-// Built-in examples. The adversarial corpus is added at build time (presets/corpus/*.prvz).
+// Built-in examples. The adversarial corpus is added at build time (presets/corpus/*.lmn).
 export const PRESETS = [
   {
     id: "unguarded",
     title: "1. An admin route nobody guarded",
     src: `# An agent added an admin endpoint and forgot the permission check.
-# Parvez denies by default: every route says who may call it.
+# Limen denies by default: every route says who may call it.
 route GET "/admin/users" -> str:
     ret "everyone"
 `,
@@ -38,7 +38,7 @@ type User: id: i64, name: str
 
 @public("search")
 route GET "/users/{name}" (state, name: str) -> [User]!:
-    # injectable: Parvez refuses this line
+    # injectable: Limen refuses this line
     q = "SELECT id, name FROM users WHERE name = '{name}'"
     ret sqlx::query_as(&q).fetch_all(&state.db).await?
     # the safe form: a parameter, bound separately

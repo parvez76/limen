@@ -1,19 +1,19 @@
-//! End-to-end tests: drive the real `parvez` binary, which runs cargo/rustc.
+//! End-to-end tests: drive the real `limen` binary, which runs cargo/rustc.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-/// `parvez` with a hermetic (empty) advisory DB so tests never hit the
+/// `limen` with a hermetic (empty) advisory DB so tests never hit the
 /// network for RustSec data; tests that exercise the gate override it.
-fn parvez() -> Command {
-    let empty_db = std::env::temp_dir().join("parvez-it-empty-advisory-db");
+fn limen() -> Command {
+    let empty_db = std::env::temp_dir().join("limen-it-empty-advisory-db");
     std::fs::create_dir_all(empty_db.join("crates")).unwrap();
-    let mut c = Command::new(env!("CARGO_BIN_EXE_parvez"));
-    c.env("PARVEZ_ADVISORY_DB", empty_db);
+    let mut c = Command::new(env!("CARGO_BIN_EXE_limen"));
+    c.env("LIMEN_ADVISORY_DB", empty_db);
     c
 }
 
-/// Scratch dir per test. Everything except `.parvez_build` (cargo's cache)
+/// Scratch dir per test. Everything except `.limen_build` (cargo's cache)
 /// is wiped so each run starts clean but rebuilds stay fast.
 /// A built program's file: `name`, or `name.exe` on Windows.
 fn exe(dir: &std::path::Path, name: &str) -> PathBuf {
@@ -21,10 +21,10 @@ fn exe(dir: &std::path::Path, name: &str) -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("parvez-it-{name}"));
+    let d = std::env::temp_dir().join(format!("limen-it-{name}"));
     std::fs::create_dir_all(&d).unwrap();
     for entry in std::fs::read_dir(&d).unwrap().flatten() {
-        if entry.file_name() != ".parvez_build" {
+        if entry.file_name() != ".limen_build" {
             let p = entry.path();
             let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
         }
@@ -33,7 +33,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn run_in(dir: &PathBuf, args: &[&str]) -> Output {
-    parvez().args(args).current_dir(dir).output().expect("spawn parvez")
+    limen().args(args).current_dir(dir).output().expect("spawn limen")
 }
 
 fn text(b: &[u8]) -> String {
@@ -42,7 +42,7 @@ fn text(b: &[u8]) -> String {
 
 #[test]
 fn hello_example_runs() {
-    let example = std::fs::canonicalize("examples/hello.prvz").unwrap();
+    let example = std::fs::canonicalize("examples/hello.lmn").unwrap();
     let dir = scratch("hello");
     let out = run_in(&dir, &["run", example.to_str().unwrap()]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
@@ -64,7 +64,7 @@ fn hello_example_runs() {
 fn enum_match_impl_compile_and_run() {
     let dir = scratch("enums");
     std::fs::write(
-        dir.join("svc.prvz"),
+        dir.join("svc.lmn"),
         r#"enum Cmd:
     Ping
     Echo(str)
@@ -98,28 +98,28 @@ fn main():
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["run", "svc.prvz"]);
+    let out = run_in(&dir, &["run", "svc.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "verbs 1 1 0\npong\necho hi\nsum 5\nhits=3\n");
 }
 
 #[test]
-fn rustc_errors_point_at_prvz_lines() {
+fn rustc_errors_point_at_lmn_lines() {
     let dir = scratch("errors");
     std::fs::write(
-        dir.join("bad.prvz"),
+        dir.join("bad.lmn"),
         "enum S:\n    A\n    B(str)\n\nfn size(raw: &str) -> i32:\n    ret raw.len()\n\nfn main():\n    s = A\n    match s:\n        A -> print(size(\"x\"))\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "bad.prvz"]);
+    let out = run_in(&dir, &["build", "bad.lmn"]);
     let err = text(&out.stderr);
     assert!(!out.status.success());
     // type error inside a fn body -> line 6
-    assert!(err.contains("bad.prvz:6: error[E0308]: mismatched types"), "{err}");
+    assert!(err.contains("bad.lmn:6: error[E0308]: mismatched types"), "{err}");
     assert!(err.contains("   6 |     ret raw.len()"), "{err}");
     assert!(err.contains("expected `i32`, found `usize`"), "{err}");
     // non-exhaustive match -> line 10
-    assert!(err.contains("bad.prvz:10: error[E0004]"), "{err}");
+    assert!(err.contains("bad.lmn:10: error[E0004]"), "{err}");
     // no raw rustc paths leak through
     assert!(!err.contains("src/main.rs"), "{err}");
     assert!(err.contains("2 error(s)"), "{err}");
@@ -128,21 +128,21 @@ fn rustc_errors_point_at_prvz_lines() {
 #[test]
 fn parse_errors_use_file_line_format() {
     let dir = scratch("parse");
-    std::fs::write(dir.join("p.prvz"), "fn main():\n    match x:\n        1 => 2\n").unwrap();
-    let out = run_in(&dir, &["build", "p.prvz"]);
-    assert!(text(&out.stderr).contains("p.prvz:3: expected `->` after match pattern"));
+    std::fs::write(dir.join("p.lmn"), "fn main():\n    match x:\n        1 => 2\n").unwrap();
+    let out = run_in(&dir, &["build", "p.lmn"]);
+    assert!(text(&out.stderr).contains("p.lmn:3: expected `->` after match pattern"));
 }
 
 #[test]
 fn show_with_map() {
     let dir = scratch("show");
-    std::fs::write(dir.join("m.prvz"), "fn main():\n    x = 1\n    print(x)\n").unwrap();
-    let out = run_in(&dir, &["show", "--map", "m.prvz"]);
+    std::fs::write(dir.join("m.lmn"), "fn main():\n    x = 1\n    print(x)\n").unwrap();
+    let out = run_in(&dir, &["show", "--map", "m.lmn"]);
     let s = text(&out.stdout);
-    assert!(s.contains("fn main() {  // @prvz:1"), "{s}");
-    assert!(s.contains("let x = 1;  // @prvz:2"), "{s}");
-    let plain = text(&run_in(&dir, &["show", "m.prvz"]).stdout);
-    assert!(!plain.contains("@prvz"));
+    assert!(s.contains("fn main() {  // @lmn:1"), "{s}");
+    assert!(s.contains("let x = 1;  // @lmn:2"), "{s}");
+    let plain = text(&run_in(&dir, &["show", "m.lmn"]).stdout);
+    assert!(!plain.contains("@lmn"));
 }
 
 // ---------- v0.3 ----------
@@ -150,24 +150,24 @@ fn show_with_map() {
 #[test]
 fn check_mode_maps_errors_and_passes_good_code() {
     let dir = scratch("check");
-    std::fs::write(dir.join("ok.prvz"), "fn main():\n    print(\"hi\")\n").unwrap();
-    let out = run_in(&dir, &["check", "ok.prvz"]);
+    std::fs::write(dir.join("ok.lmn"), "fn main():\n    print(\"hi\")\n").unwrap();
+    let out = run_in(&dir, &["check", "ok.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("parvez: ok ok.prvz"));
+    assert!(text(&out.stderr).contains("limen: ok ok.lmn"));
     assert!(!dir.join("ok").exists(), "check produces no binary");
 
-    std::fs::write(dir.join("bad.prvz"), "fn main():\n    x: i32 = \"nope\"\n").unwrap();
-    let out = run_in(&dir, &["check", "bad.prvz"]);
+    std::fs::write(dir.join("bad.lmn"), "fn main():\n    x: i32 = \"nope\"\n").unwrap();
+    let out = run_in(&dir, &["check", "bad.lmn"]);
     let err = text(&out.stderr);
     assert!(!out.status.success());
-    assert!(err.contains("bad.prvz:2: error[E0308]: mismatched types"), "{err}");
+    assert!(err.contains("bad.lmn:2: error[E0308]: mismatched types"), "{err}");
 }
 
 #[test]
-fn json_async_use_and_parvez_toml() {
+fn json_async_use_and_limen_toml() {
     let dir = scratch("jsonasync");
     std::fs::write(
-        dir.join("cfg.prvz"),
+        dir.join("cfg.lmn"),
         r#"use std::collections::HashMap
 
 @json
@@ -192,12 +192,12 @@ async fn main()!:
 "#,
     )
     .unwrap();
-    // parvez.toml overrides are merged into the generated manifest
-    std::fs::write(dir.join("parvez.toml"), "[dependencies]\nanyhow = { version = \"1\", features = [\"backtrace\"] }\n").unwrap();
-    let out = run_in(&dir, &["run", "cfg.prvz"]);
+    // limen.toml overrides are merged into the generated manifest
+    std::fs::write(dir.join("limen.toml"), "[dependencies]\nanyhow = { version = \"1\", features = [\"backtrace\"] }\n").unwrap();
+    let out = run_in(&dir, &["run", "cfg.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "{\"name\":\"api\",\"ports\":[80,443]}\nHigh {\"api\": 1}\ntrue\n");
-    let manifest = std::fs::read_to_string(dir.join(".parvez_build/cfg/Cargo.toml")).unwrap();
+    let manifest = std::fs::read_to_string(dir.join(".limen_build/cfg/Cargo.toml")).unwrap();
     for dep in ["tokio", "serde", "serde_json", "backtrace"] {
         assert!(manifest.contains(dep), "{dep} missing from:\n{manifest}");
     }
@@ -231,7 +231,7 @@ impl Drop for KillOnDrop {
 
 #[test]
 fn service_example_serves_json() {
-    let example = std::fs::canonicalize("examples/service.prvz").unwrap();
+    let example = std::fs::canonicalize("examples/service.lmn").unwrap();
     let dir = scratch("service");
     let out = run_in(&dir, &["build", example.to_str().unwrap()]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
@@ -292,7 +292,7 @@ fn service_example_serves_json() {
 fn stateful_counter_and_store_across_requests() {
     let dir = scratch("state");
     std::fs::write(
-        dir.join("counter.prvz"),
+        dir.join("counter.lmn"),
         r#"use std::sync::Mutex
 use std::sync::atomic::{AtomicU64, Ordering}
 
@@ -320,7 +320,7 @@ route GET "/notes" (state) -> [str]:
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "counter.prvz"]);
+    let out = run_in(&dir, &["build", "counter.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let _server = KillOnDrop(
@@ -350,7 +350,7 @@ route GET "/notes" (state) -> [str]:
 fn rust_keywords_are_escaped() {
     let dir = scratch("keywords");
     std::fs::write(
-        dir.join("kw.prvz"),
+        dir.join("kw.lmn"),
         r#"@json
 type Item: type: str, gen: i32, move: bool
 
@@ -376,7 +376,7 @@ fn main()!:
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["run", "kw.prvz"]);
+    let out = run_in(&dir, &["run", "kw.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     assert_eq!(
         text(&out.stdout),
@@ -384,7 +384,7 @@ fn main()!:
     );
 }
 
-/// Talks newline-delimited JSON-RPC to `parvez mcp`.
+/// Talks newline-delimited JSON-RPC to `limen mcp`.
 struct Mcp {
     child: std::process::Child,
     out: std::io::BufReader<std::process::ChildStdout>,
@@ -392,9 +392,9 @@ struct Mcp {
 
 impl Mcp {
     fn start(cache: &PathBuf) -> Self {
-        let mut child = parvez()
+        let mut child = limen()
             .arg("mcp")
-            .env("PARVEZ_CACHE_DIR", cache)
+            .env("LIMEN_CACHE_DIR", cache)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -436,32 +436,32 @@ fn mcp_server_tools() {
     let cache = scratch("mcp");
     let mut m = Mcp::start(&cache);
     let r = m.call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}));
-    assert_eq!(r["result"]["serverInfo"]["name"], "parvez");
+    assert_eq!(r["result"]["serverInfo"]["name"], "limen");
     m.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     let r = m.call(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
     assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 3);
 
-    let (err, spec) = m.tool(3, "parvez_spec", json!({}));
+    let (err, spec) = m.tool(3, "limen_spec", json!({}));
     assert!(!err && spec.contains("## Statements") && !spec.contains("## HTTP services") && spec.contains("- `http`:"), "{spec}");
-    let (err, http) = m.tool(30, "parvez_spec", json!({"topic": "http"}));
+    let (err, http) = m.tool(30, "limen_spec", json!({"topic": "http"}));
     assert!(!err && http.starts_with("## HTTP services"), "{http}");
 
-    let (err, out) = m.tool(4, "parvez_check", json!({"code": "fn size(s: &str) -> i32:\n    ret s.len()\n\nfn main():\n    print(size(\"x\"))\n"}));
+    let (err, out) = m.tool(4, "limen_check", json!({"code": "fn size(s: &str) -> i32:\n    ret s.len()\n\nfn main():\n    print(size(\"x\"))\n"}));
     assert!(err, "{out}");
-    assert!(out.starts_with("snippet.prvz:2: error[E0308]: mismatched types"), "{out}");
+    assert!(out.starts_with("snippet.lmn:2: error[E0308]: mismatched types"), "{out}");
     assert!(out.contains("expected `i32`, found `usize`"), "{out}");
     assert!(!out.contains(&cache.display().to_string()), "no cache paths leak: {out}");
 
-    let (err, out) = m.tool(5, "parvez_check", json!({"code": "fn main():\n    print(\"hi\")\n"}));
+    let (err, out) = m.tool(5, "limen_check", json!({"code": "fn main():\n    print(\"hi\")\n"}));
     assert!(!err, "{out}");
-    assert_eq!(out, "ok: snippet.prvz has no errors");
+    assert_eq!(out, "ok: snippet.lmn has no errors");
 
-    let (err, out) = m.tool(6, "parvez_check", json!({"code": "fn main(:\n"}));
-    assert!(err && out.starts_with("snippet.prvz:1:"), "{out}");
+    let (err, out) = m.tool(6, "limen_check", json!({"code": "fn main(:\n"}));
+    assert!(err && out.starts_with("snippet.lmn:1:"), "{out}");
 
-    let example = std::fs::canonicalize("examples/hello.prvz").unwrap();
-    let (err, out) = m.tool(7, "parvez_eject", json!({"path": example, "map": true}));
-    assert!(!err && out.contains("struct User {") && out.contains("// @prvz:"), "{out}");
+    let example = std::fs::canonicalize("examples/hello.lmn").unwrap();
+    let (err, out) = m.tool(7, "limen_eject", json!({"path": example, "map": true}));
+    assert!(!err && out.contains("struct User {") && out.contains("// @lmn:"), "{out}");
 }
 
 // ---------- v0.5 ----------
@@ -470,7 +470,7 @@ fn mcp_server_tools() {
 fn security_lint_blocks_insecure_code() {
     let dir = scratch("seclint");
     std::fs::write(
-        dir.join("bad.prvz"),
+        dir.join("bad.lmn"),
         r#"state:
     api_key: str = "abc123-not-from-env"
 @public
@@ -481,25 +481,25 @@ route GET "/u/{id}" (state, id: str) -> str!:
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["check", "bad.prvz"]);
+    let out = run_in(&dir, &["check", "bad.lmn"]);
     let err = text(&out.stderr);
     assert!(!out.status.success());
-    assert!(err.contains("bad.prvz:2: security[hardcoded-secret]: `api_key` is assigned a string literal"), "{err}");
-    assert!(err.contains("bad.prvz:6: security[sql-injection]"), "{err}");
-    assert!(err.contains("bad.prvz:7: security[path-traversal]"), "{err}");
+    assert!(err.contains("bad.lmn:2: security[hardcoded-secret]: `api_key` is assigned a string literal"), "{err}");
+    assert!(err.contains("bad.lmn:6: security[sql-injection]"), "{err}");
+    assert!(err.contains("bad.lmn:7: security[path-traversal]"), "{err}");
     assert!(err.contains("= fix: never build SQL with interpolation"), "{err}");
-    assert!(err.contains("bad.prvz:2: security[secret-type]: state field `api_key` holds a secret as plain `str`"), "{err}");
+    assert!(err.contains("bad.lmn:2: security[secret-type]: state field `api_key` holds a secret as plain `str`"), "{err}");
     assert!(err.contains("4 security error(s)"), "{err}");
 
     // explicit, reasoned opt-out: allowed, but reported on every build
     std::fs::write(
-        dir.join("ok.prvz"),
+        dir.join("ok.lmn"),
         "@allow_insecure(\"one-off migration script, input is a constant\")\nfn migrate(t: &str):\n    db.execute(\"DROP TABLE {t}\")\nfn main():\n    ret\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["show", "ok.prvz"]);
+    let out = run_in(&dir, &["show", "ok.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("ok.prvz:2: security checks disabled by @allow_insecure: one-off migration script"));
+    assert!(text(&out.stderr).contains("ok.lmn:2: security checks disabled by @allow_insecure: one-off migration script"));
 }
 
 fn http_raw(port: u16, req: &[u8]) -> String {
@@ -515,7 +515,7 @@ fn http_raw(port: u16, req: &[u8]) -> String {
 fn hardened_service_no_leaks_limits_shutdown_and_fuzz() {
     let dir = scratch("hardened");
     std::fs::write(
-        dir.join("hard.prvz"),
+        dir.join("hard.lmn"),
         r#"@json
 type Msg: text: str
 
@@ -544,7 +544,7 @@ route GET "/leak/{name}" (name: str) -> str!:
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "hard.prvz"]);
+    let out = run_in(&dir, &["build", "hard.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
 
     // SBOM next to the binary
@@ -560,7 +560,7 @@ route GET "/leak/{name}" (name: str) -> str!:
     let mut server = KillOnDrop(
         Command::new(dir.join("hard"))
             .env("PORT", port.to_string())
-            .env("PARVEZ_TIMEOUT_SECS", "1")
+            .env("LIMEN_TIMEOUT_SECS", "1")
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
@@ -578,7 +578,7 @@ route GET "/leak/{name}" (name: str) -> str!:
     assert_eq!(http(port, "GET", "/panic/0", ""), (200, "10".into()));
     assert_eq!(http(port, "GET", "/panic/1", ""), (500, generic.clone()));
     assert_eq!(http(port, "GET", "/panic/0", ""), (200, "10".into()));
-    // request timeout (PARVEZ_TIMEOUT_SECS=1)
+    // request timeout (LIMEN_TIMEOUT_SECS=1)
     assert_eq!(http(port, "GET", "/slow", ""), (503, r#"{"error":"request timed out"}"#.into()));
     // body limit (2 MB default) -> JSON 413
     let big = format!("{{\"text\":\"{}\"}}", "a".repeat(3 * 1024 * 1024));
@@ -611,13 +611,13 @@ route GET "/leak/{name}" (name: str) -> str!:
         let _ = server.0.wait();
     }
     let log = std::fs::read_to_string(&log).unwrap();
-    assert!(log.contains("parvez: internal error: invalid digit found in string"), "{log}");
+    assert!(log.contains("limen: internal error: invalid digit found in string"), "{log}");
     assert!(log.contains("handler panicked"), "{log}");
     #[cfg(unix)]
     assert!(log.contains("shutting down gracefully"), "{log}");
 
     // fuzz: panics and errors are contained (warnings), the deliberate leak fails the run
-    let out = run_in(&dir, &["fuzz", "hard.prvz"]);
+    let out = run_in(&dir, &["fuzz", "hard.lmn"]);
     let err = text(&out.stderr);
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("FAIL LEAK   GET /leak/{name} [baseline] -> 500: response contains `"), "{err}");
@@ -636,33 +636,33 @@ fn advisory_gate_blocks_vulnerable_deps_and_heal_reports() {
         "```toml\n[advisory]\nid = \"RUSTSEC-2099-0042\"\npackage = \"anyhow\"\ntitle = \"Test advisory: remote code execution\"\n\n[versions]\npatched = [\">= 99.0.0\"]\n```\n",
     )
     .unwrap();
-    std::fs::write(dir.join("app.prvz"), "fn main():\n    print(\"hi\")\n").unwrap();
+    std::fs::write(dir.join("app.lmn"), "fn main():\n    print(\"hi\")\n").unwrap();
     let with_db = |args: &[&str], audit: Option<&str>| {
-        let mut c = parvez();
-        c.args(args).current_dir(&dir).env("PARVEZ_ADVISORY_DB", &db);
+        let mut c = limen();
+        c.args(args).current_dir(&dir).env("LIMEN_ADVISORY_DB", &db);
         if let Some(a) = audit {
-            c.env("PARVEZ_AUDIT", a);
+            c.env("LIMEN_AUDIT", a);
         }
         c.output().unwrap()
     };
 
-    let out = with_db(&["build", "app.prvz"], None);
+    let out = with_db(&["build", "app.lmn"], None);
     let err = text(&out.stderr);
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("1 known-vulnerable dependency:"), "{err}");
     assert!(err.contains("RUSTSEC-2099-0042 anyhow@1."), "{err}");
-    assert!(err.contains("run `parvez heal app.prvz`"), "{err}");
+    assert!(err.contains("run `limen heal app.lmn`"), "{err}");
     assert!(!exe(&dir, "app").exists(), "no binary is shipped when the gate fails");
 
-    let out = with_db(&["heal", "app.prvz"], None);
+    let out = with_db(&["heal", "app.lmn"], None);
     let err = text(&out.stderr);
     assert!(!out.status.success(), "{err}");
-    assert!(err.contains("parvez: heal: needs a breaking upgrade: RUSTSEC-2099-0042"), "{err}");
+    assert!(err.contains("limen: heal: needs a breaking upgrade: RUSTSEC-2099-0042"), "{err}");
     assert!(err.contains("[dependencies] anyhow = "), "{err}");
 
-    let out = with_db(&["build", "app.prvz"], Some("warn"));
+    let out = with_db(&["build", "app.lmn"], Some("warn"));
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("parvez: warning: 1 known-vulnerable dependency"));
+    assert!(text(&out.stderr).contains("limen: warning: 1 known-vulnerable dependency"));
     assert!(exe(&dir, "app").exists() && dir.join("app.sbom.json").exists());
 }
 
@@ -672,7 +672,7 @@ fn advisory_gate_blocks_vulnerable_deps_and_heal_reports() {
 fn general_purpose_language_features_run() {
     let dir = scratch("lang6");
     std::fs::write(
-        dir.join("lang.prvz"),
+        dir.join("lang.lmn"),
         r#"use std::collections::HashMap
 
 @json
@@ -735,7 +735,7 @@ async fn main()!:
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["run", "lang.prvz"]);
+    let out = run_in(&dir, &["run", "lang.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     assert_eq!(
         text(&out.stdout),
@@ -747,7 +747,7 @@ async fn main()!:
 fn req_guards_status_codes_and_signed_fuzz() {
     let dir = scratch("auth6");
     std::fs::write(
-        dir.join("api.prvz"),
+        dir.join("api.lmn"),
         r#"@json
 type Who: user: str, ip: str
 
@@ -772,7 +772,7 @@ route POST "/echo" (req, body: Who) -> Who!:
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "api.prvz"]);
+    let out = run_in(&dir, &["build", "api.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let _server = KillOnDrop(
@@ -799,12 +799,12 @@ route POST "/echo" (req, body: Who) -> Who!:
     assert!(body.starts_with(r#"{"error":"invalid JSON body"#), "{body}");
 
     // fuzz with fuzz.toml credentials gets past the guard; without them it can't
-    let out = run_in(&dir, &["fuzz", "api.prvz"]);
+    let out = run_in(&dir, &["fuzz", "api.lmn"]);
     let err = text(&out.stderr);
     assert!(err.contains("GET /whoami/{n}: 0/"), "guard rejections are not coverage: {err}");
     assert!(err.contains("was never reached"), "{err}");
     std::fs::write(dir.join("fuzz.toml"), "[headers]\nx-api-key = \"test-key\"\n").unwrap();
-    let out = run_in(&dir, &["fuzz", "api.prvz"]);
+    let out = run_in(&dir, &["fuzz", "api.lmn"]);
     let err = text(&out.stderr);
     assert!(out.status.success(), "{err}");
     assert!(!err.contains("was never reached"), "{err}");
@@ -818,21 +818,21 @@ fn multi_file_modules_build_serve_and_map_errors() {
     let dir = scratch("modules7");
     std::fs::create_dir_all(dir.join("auth")).unwrap();
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "import store\nimport auth.tokens\n\nstate:\n    hits: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)\n\n@public\nroute GET \"/items/{id}\" (id: u32) -> store::Item!:\n    ret store::find(id)?\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("store.prvz"),
+        dir.join("store.lmn"),
         "@json\ntype Item: id: u32, name: str, kind: Kind\n\n@json\nenum Kind: Tool, Book\n\nfn find(id: u32) -> Item!:\n    if id == 0: fail(404, code: \"not_found\", \"no item {id}\")\n    ret Item(id: id, name: \"item-{id}\", kind: if_book(id))\n\nfn if_book(id: u32) -> Kind:\n    if id % 2 == 0: ret Book\n    ret Tool\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("auth/tokens.prvz"),
+        dir.join("auth/tokens.lmn"),
         "fn bearer(req) -> str!:\n    match req.header(\"authorization\"):\n        Some(h) if h == \"Bearer t0k\" -> ret \"admin\"\n        _ -> fail(401, code: \"unauthenticated\", \"bad token\")\n\n@guard(bearer)\nroute GET \"/admin/count\" (state, auth) -> str:\n    n = state.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1\n    ret \"{auth} {n}\"\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "app.prvz"]);
+    let out = run_in(&dir, &["build", "app.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let _server = KillOnDrop(
@@ -853,10 +853,10 @@ fn multi_file_modules_build_serve_and_map_errors() {
     assert_eq!(admin("t0k"), ("200".into(), "admin 1".into()));
 
     // a type error inside a module is reported against that module's file and line
-    std::fs::write(dir.join("store.prvz"), "fn find(id: u32) -> i32:\n    ret \"x\"\n").unwrap();
-    let out = run_in(&dir, &["check", "app.prvz"]);
+    std::fs::write(dir.join("store.lmn"), "fn find(id: u32) -> i32:\n    ret \"x\"\n").unwrap();
+    let out = run_in(&dir, &["check", "app.lmn"]);
     let err = text(&out.stderr);
-    assert!(err.contains("store.prvz:2: error[E0308]"), "{err}");
+    assert!(err.contains("store.lmn:2: error[E0308]"), "{err}");
 }
 
 /// Minimal WebSocket client (RFC 6455) over std, for tests.
@@ -934,7 +934,7 @@ impl Ws {
 fn websocket_guard_subprotocol_and_relay() {
     let dir = scratch("ws7");
     std::fs::write(
-        dir.join("chat.prvz"),
+        dir.join("chat.lmn"),
         r#"use std::collections::HashMap
 use std::sync::Mutex
 
@@ -965,7 +965,7 @@ socket "/ws/{room}" (state, auth, room: str, conn):
 "#,
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "chat.prvz"]);
+    let out = run_in(&dir, &["build", "chat.lmn"]);
     assert!(out.status.success(), "stderr:\n{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let _server = KillOnDrop(
@@ -1005,7 +1005,7 @@ fn frontend_bridge_and_typed_pages() {
     let dir = scratch("frontend8");
     std::fs::create_dir_all(dir.join("ui")).unwrap();
     std::fs::write(
-        dir.join("main.prvz"),
+        dir.join("main.lmn"),
         r#"@embed_dir("dist")
 import ui.dashboard
 @public
@@ -1015,7 +1015,7 @@ route GET "/api" -> models::Card:
     )
     .unwrap();
     let model = r#"const LEVEL: i32 = if true: 8 else: 7
-const TITLE: str = "Parvez"
+const TITLE: str = "Limen"
 @json
 type Card: title: str, level: i32, kind: Kind
 @json
@@ -1029,7 +1029,7 @@ fn result(x: Result<i32, str>) -> i32:
 fn card() -> Card:
     ret Card(title: TITLE, level: result(Ok(unwrap(Some(LEVEL)))), kind: New)
 "#;
-    std::fs::write(dir.join("models.prvz"), model).unwrap();
+    std::fs::write(dir.join("models.lmn"), model).unwrap();
     let page = r#"import models
 @public
 page GET "/card/{name}" (name: str) -> html:
@@ -1062,7 +1062,7 @@ page GET "/trusted" -> html:
     std::fs::write(dir.join("dist/static/app.js"), "let app = 8;").unwrap();
     std::fs::create_dir_all(dir.join("dist/about")).unwrap();
     std::fs::write(dir.join("dist/about/index.html"), "<main>about</main>").unwrap();
-    let out = run_in(&dir, &["build", "main.prvz"]);
+    let out = run_in(&dir, &["build", "main.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     std::fs::rename(dir.join("dist"), dir.join("offline-dist")).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -1092,12 +1092,12 @@ page GET "/trusted" -> html:
     assert!(
         html.contains("text/html")
             && html.ends_with(&format!(
-                "<main><h1>Parvez 8</h1><p title=\"{safe}\">{safe}</p><button hx-get=\"/api\">New</button></main>"
+                "<main><h1>Limen 8</h1><p title=\"{safe}\">{safe}</p><button hx-get=\"/api\">New</button></main>"
             )),
         "{html}"
     );
     assert!(request("/trusted").ends_with("<b>ok</b>"));
-    assert!(request("/api").ends_with(r#"{"title":"Parvez","level":8,"kind":"New"}"#));
+    assert!(request("/api").ends_with(r#"{"title":"Limen","level":8,"kind":"New"}"#));
     let asset = request("/static/app.js?v=8");
     assert!(asset.contains("text/javascript") && asset.ends_with("let app = 8;"));
     assert!(request("/about/").ends_with("<main>about</main>"));
@@ -1117,8 +1117,8 @@ page GET "/trusted" -> html:
     assert_eq!(http(port, "DELETE", "/static/app.js", "").0, 404);
 
     std::fs::rename(dir.join("offline-dist"), dir.join("dist")).unwrap();
-    std::fs::write(dir.join("models.prvz"), model.replace("title:", "label:")).unwrap();
-    let check = run_in(&dir, &["check", "main.prvz"]);
+    std::fs::write(dir.join("models.lmn"), model.replace("title:", "label:")).unwrap();
+    let check = run_in(&dir, &["check", "main.lmn"]);
     assert!(
         !check.status.success() && text(&check.stderr).contains("dashboard.msd:6: error[E0609]"),
         "{}",
@@ -1134,11 +1134,11 @@ fn generated_typescript_passes_tsc_strict() {
     }
     let dir = scratch("tsc8");
     std::fs::write(
-        dir.join("main.prvz"),
+        dir.join("main.lmn"),
         "@json\ntype User:\n    id: u32\n    name: str\n    @default\n    tags: [str]\n    note: str?\n\n@json\nenum Kind: Admin, Member(str)\n\n@json\ntype Q: page: u32\n\n@public\nroute GET \"/users/{id}\" (id: u32, query: Q) -> User:\n    ret User(id: id, name: \"a\", tags: [], note: None)\n\n@public\nroute POST \"/users\" (body: User) -> Kind:\n    ret Kind::Admin\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["types", "--ts", "main.prvz", "--out", "types.ts"]);
+    let out = run_in(&dir, &["types", "--ts", "main.lmn", "--out", "types.ts"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     std::fs::write(
         dir.join("use.ts"),
@@ -1167,23 +1167,23 @@ export { u, p, q, b, r, bad };
 // ---------- v0.9 ----------
 
 #[test]
-fn parvez_test_runs_blocks_and_maps_failures() {
+fn limen_test_runs_blocks_and_maps_failures() {
     let dir = scratch("tests9");
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "import pricing\nuse std::sync::atomic::{AtomicU64, Ordering}\n\n@json\ntype Order: item: str, qty: u32\n\nstate:\n    orders: AtomicU64 = AtomicU64::new(0)\n\nfn require_key(req) -> str!:\n    match req.header(\"x-api-key\"):\n        Some(k) if k == \"k1\" -> ret \"alice\"\n        _ -> fail(401, code: \"unauthenticated\", \"missing key\")\n\n@guard(require_key)\nroute POST \"/orders\" (state, auth, body: Order) -> u32:\n    state.orders.fetch_add(1, Ordering::SeqCst)\n    status(201)\n    ret pricing::total(body.qty)\n\ntest \"orders need an api key\":\n    app = test_app().await?\n    res = app.post(\"/orders\", &Order(item: \"pen\", qty: 2)).await?\n    assert_eq(res.status, 401)\n\ntest \"an order is priced and counted\":\n    app = test_app().await?\n    res = app.request(\"POST\", \"/orders\").header(\"x-api-key\", \"k1\").json(&Order(item: \"pen\", qty: 10)).send().await?\n    assert_eq(res.status, 201)\n    assert_eq(res.text(), \"90\")\n    assert(res.header(\"x-request-id\").is_some(), \"responses carry a request id\")\n\ntest \"this one fails on purpose\":\n    x = pricing::total(2)\n    assert(x == 21, \"expected 21 but got {x}\")\n",
     )
     .unwrap();
-    std::fs::write(dir.join("pricing.prvz"), "fn total(qty: u32) -> u32:\n    if qty >= 10: ret qty * 9\n    ret qty * 10\n\ntest \"module tests run too\":\n    assert(total(0) == 0)\n").unwrap();
-    let out = run_in(&dir, &["test", "app.prvz"]);
+    std::fs::write(dir.join("pricing.lmn"), "fn total(qty: u32) -> u32:\n    if qty >= 10: ret qty * 9\n    ret qty * 10\n\ntest \"module tests run too\":\n    assert(total(0) == 0)\n").unwrap();
+    let out = run_in(&dir, &["test", "app.lmn"]);
     let all = text(&out.stdout) + &text(&out.stderr);
     assert!(!out.status.success(), "{all}");
     assert!(all.contains("3 passed; 1 failed"), "{all}");
-    assert!(all.contains("app.prvz:35: expected 21 but got 20"), "{all}");
-    // panics point at the .prvz line, never the generated Rust; no rustc warnings
-    assert!(all.contains("panicked at app.prvz:35:"), "{all}");
+    assert!(all.contains("app.lmn:35: expected 21 but got 20"), "{all}");
+    // panics point at the .lmn line, never the generated Rust; no rustc warnings
+    assert!(all.contains("panicked at app.lmn:35:"), "{all}");
     assert!(!all.contains("src/main.rs") && !all.contains("warning:"), "{all}");
-    let out = run_in(&dir, &["test", "app.prvz", "priced and counted"]);
+    let out = run_in(&dir, &["test", "app.lmn", "priced and counted"]);
     let all = text(&out.stdout) + &text(&out.stderr);
     assert!(out.status.success() && all.contains("1 passed"), "{all}");
 }
@@ -1192,18 +1192,18 @@ fn parvez_test_runs_blocks_and_maps_failures() {
 fn services_log_json_with_request_ids_and_export_metrics() {
     let dir = scratch("obs9");
     std::fs::write(
-        dir.join("svc.prvz"),
+        dir.join("svc.lmn"),
         "@public\nroute POST \"/orders/{id}\" (id: u32) -> str:\n    log_info(\"order placed\", order: id)\n    metric_inc(\"orders_placed\")\n    ret \"ok\"\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "svc.prvz"]);
+    let out = run_in(&dir, &["build", "svc.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let log = dir.join("svc.log");
     let mut server = KillOnDrop(
         Command::new(dir.join("svc"))
             .env("PORT", port.to_string())
-            .env("PARVEZ_METRICS_TOKEN", "m3tr1cs")
+            .env("LIMEN_METRICS_TOKEN", "m3tr1cs")
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
@@ -1221,10 +1221,10 @@ fn services_log_json_with_request_ids_and_export_metrics() {
     assert_eq!(http(port, "GET", "/metrics", "").0, 401, "metrics token enforced");
     let metrics = http_raw(port, b"GET /metrics HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer m3tr1cs\r\nConnection: close\r\n\r\n");
     for want in [
-        r#"parvez_http_requests_total{method="POST",route="/orders/{id}",status="200"} 1"#,
-        r#"parvez_http_requests_total{method="GET",route="unmatched",status="404"} 1"#,
-        r#"parvez_http_request_duration_seconds_count{method="POST",route="/orders/{id}"} 1"#,
-        r#"parvez_events_total{event="orders_placed"} 1"#,
+        r#"limen_http_requests_total{method="POST",route="/orders/{id}",status="200"} 1"#,
+        r#"limen_http_requests_total{method="GET",route="unmatched",status="404"} 1"#,
+        r#"limen_http_request_duration_seconds_count{method="POST",route="/orders/{id}"} 1"#,
+        r#"limen_events_total{event="orders_placed"} 1"#,
     ] {
         assert!(metrics.contains(want), "missing {want} in:\n{metrics}");
     }
@@ -1311,18 +1311,18 @@ fn oidc_guard_validates_tokens_against_jwks() {
         signed("RS256", "key.pem", format!(r#"{{"iss":"{iss}","sub":"u-2","aud":["my-api","account"],"exp":{},"preferred_username":"bob"{top}}}"#, now + 300))
     };
     std::fs::write(
-        dir.join("svc.prvz"),
+        dir.join("svc.lmn"),
         "async fn admin(req) -> Claims!:\n    c = oidc(req).await?\n    if not c.has_role(\"App.Admin\"): fail(403, code: \"forbidden\", \"admin role required\")\n    ret c\n\n@guard(admin)\nroute GET \"/admin\" (auth) -> str:\n    ret auth.email.clone()\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["build", "svc.prvz"]);
+    let out = run_in(&dir, &["build", "svc.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let _server = KillOnDrop(
         Command::new(dir.join("svc"))
             .env("PORT", port.to_string())
-            .env("PARVEZ_OIDC_ISSUER", &iss)
-            .env("PARVEZ_OIDC_AUDIENCE", "my-api")
+            .env("LIMEN_OIDC_ISSUER", &iss)
+            .env("LIMEN_OIDC_AUDIENCE", "my-api")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1362,19 +1362,19 @@ fn oidc_guard_validates_tokens_against_jwks() {
 #[test]
 fn language_completeness_features() {
     let dir = scratch("lang091");
-    for f in ["main.prvz", "store.prvz", "testkit.prvz", "ts.prvz"] {
+    for f in ["main.lmn", "store.lmn", "testkit.lmn", "ts.lmn"] {
         std::fs::copy(format!("tests/fixtures/lang091/{f}"), dir.join(f)).unwrap();
     }
-    let ts = text(&run_in(&dir, &["types", "--ts", "ts.prvz"]).stdout);
+    let ts = text(&run_in(&dir, &["types", "--ts", "ts.lmn"]).stdout);
     assert!(ts.contains("export type Page<T> = {") && ts.contains("response: Page<Item>;"), "{ts}");
-    let out = run_in(&dir, &["test", "main.prvz"]);
+    let out = run_in(&dir, &["test", "main.lmn"]);
     let all = text(&out.stdout) + &text(&out.stderr);
     assert!(out.status.success() && all.contains("3 passed"), "{all}");
 
     // production build: test code and its crates are gone
-    let out = run_in(&dir, &["build", "main.prvz"]);
+    let out = run_in(&dir, &["build", "main.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let manifest = std::fs::read_to_string(dir.join(".parvez_build/main/Cargo.toml")).unwrap();
+    let manifest = std::fs::read_to_string(dir.join(".limen_build/main/Cargo.toml")).unwrap();
     let (prod, dev) = manifest.split_once("[dev-dependencies]").expect("dev-dependencies section");
     for c in ["sha2", "hex", "tower"] {
         assert!(!prod.contains(&format!("\n{c} ")) && dev.contains(c), "{c} must be dev-only:\n{manifest}");
@@ -1401,11 +1401,11 @@ fn language_completeness_features() {
     let stats = http_raw(port, b"GET /stats HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
     assert!(stats.contains(r#""ticks":true"#) && stats.contains(r#""sum":37"#), "{stats}");
 
-    // `priv` is enforced across modules, reported at the .prvz line
-    std::fs::write(dir.join("priv.prvz"), "import store\nfn main():\n    print(store::secret_helper())\n").unwrap();
-    let out = run_in(&dir, &["check", "priv.prvz"]);
+    // `priv` is enforced across modules, reported at the .lmn line
+    std::fs::write(dir.join("priv.lmn"), "import store\nfn main():\n    print(store::secret_helper())\n").unwrap();
+    let out = run_in(&dir, &["check", "priv.lmn"]);
     let err = text(&out.stderr);
-    assert!(!out.status.success() && err.contains("priv.prvz:3: error[E0603]"), "{err}");
+    assert!(!out.status.success() && err.contains("priv.lmn:3: error[E0603]"), "{err}");
 }
 
 /// v0.9.1 CLI: `new` scaffolds a passing project, `fmt` is canonical and
@@ -1419,25 +1419,25 @@ fn new_fmt_checksums_and_targets() {
     assert!(!run_in(&parent, &["new", "demo"]).status.success(), "refuses a non-empty directory");
     assert!(!run_in(&parent, &["new", "Bad Name"]).status.success());
     let dir = parent.join("demo");
-    for f in ["parvez.toml", "main.prvz", "ui/home.msd", ".gitignore", "README.md"] {
+    for f in ["limen.toml", "main.lmn", "ui/home.msd", ".gitignore", "README.md"] {
         assert!(dir.join(f).is_file(), "{f}");
     }
     assert!(run_in(&dir, &["fmt", "--check", "."]).status.success(), "scaffold is formatted");
-    let out = run_in(&dir, &["test", "main.prvz"]);
+    let out = run_in(&dir, &["test", "main.lmn"]);
     let all = text(&out.stdout) + &text(&out.stderr);
     assert!(out.status.success() && all.contains("2 passed"), "{all}");
 
     // fmt rewrites in place, keeps comments, and is idempotent; --check fails on unformatted files
-    std::fs::write(dir.join("extra.prvz"), "fn f(a:i64,b :i64)->i64:\n  # keep me\n  ret a+b\n").unwrap();
-    assert_eq!(run_in(&dir, &["fmt", "--check", "extra.prvz"]).status.code(), Some(1));
-    assert!(run_in(&dir, &["fmt", "extra.prvz"]).status.success());
+    std::fs::write(dir.join("extra.lmn"), "fn f(a:i64,b :i64)->i64:\n  # keep me\n  ret a+b\n").unwrap();
+    assert_eq!(run_in(&dir, &["fmt", "--check", "extra.lmn"]).status.code(), Some(1));
+    assert!(run_in(&dir, &["fmt", "extra.lmn"]).status.success());
     assert_eq!(
-        std::fs::read_to_string(dir.join("extra.prvz")).unwrap(),
+        std::fs::read_to_string(dir.join("extra.lmn")).unwrap(),
         "fn f(a: i64, b: i64) -> i64:\n    # keep me\n    ret a+b\n"
     );
     assert!(run_in(&dir, &["fmt", "--check", "."]).status.success());
 
-    let out = run_in(&dir, &["build", "main.prvz"]);
+    let out = run_in(&dir, &["build", "main.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let bin = format!("main{}", std::env::consts::EXE_SUFFIX); // main.exe on Windows
     let sum = std::fs::read_to_string(dir.join(format!("{bin}.sha256"))).unwrap();
@@ -1449,7 +1449,7 @@ fn new_fmt_checksums_and_targets() {
         assert!(check.status.success(), "{}", text(&check.stdout));
     }
 
-    let out = run_in(&dir, &["build", "main.prvz", "--target", "not-a-real-target"]);
+    let out = run_in(&dir, &["build", "main.lmn", "--target", "not-a-real-target"]);
     assert!(text(&out.stderr).contains("rustup target add not-a-real-target"), "{}", text(&out.stderr));
     let musl = "x86_64-unknown-linux-musl";
     let installed = Command::new("rustup")
@@ -1458,7 +1458,7 @@ fn new_fmt_checksums_and_targets() {
         .map(|o| text(&o.stdout).lines().any(|l| l == musl))
         .unwrap_or(false);
     if installed && cfg!(all(target_arch = "x86_64", target_os = "linux")) {
-        let out = run_in(&dir, &["build", "main.prvz", "--target", musl]);
+        let out = run_in(&dir, &["build", "main.lmn", "--target", musl]);
         assert!(out.status.success(), "{}", text(&out.stderr));
         let bin = dir.join(format!("main-{musl}"));
         assert!(bin.is_file() && dir.join(format!("main-{musl}.sha256")).is_file());
@@ -1546,25 +1546,25 @@ fn browser_sign_in_with_session_cookies() {
         }
     });
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "import dash\n\nasync fn me(req) -> Claims!:\n    ret oidc_session(req).await?\n\n@guard(me)\nroute GET \"/whoami\" (auth) -> str:\n    ret auth.email.clone()\n\n@guard(me)\nroute POST \"/act\" (auth) -> str:\n    ret \"done\"\n",
     )
     .unwrap();
     std::fs::write(dir.join("dash.msd"), "@public\npage GET \"/dash\" (req) -> html:\n    let c = me(req).await?\n    p Hello {c.email}\n    form(method=\"post\" action=\"/auth/logout\"):\n        button(type=\"submit\") Sign out\n\n@guard(me)\npage GET \"/guarded/{tab}\" (auth, tab: str) -> html:\n    h1 Welcome {auth.email}\n    p tab {tab}\n").unwrap();
-    let out = run_in(&dir, &["build", "app.prvz"]);
+    let out = run_in(&dir, &["build", "app.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let public = format!("http://127.0.0.1:{port}");
     let _server = KillOnDrop(
         Command::new(dir.join("app"))
             .env("PORT", port.to_string())
-            .env("PARVEZ_OIDC_ISSUER", &iss)
-            .env("PARVEZ_OIDC_AUDIENCE", "api")
-            .env("PARVEZ_OIDC_CLIENT_ID", "dashboard")
-            .env("PARVEZ_PUBLIC_URL", &public)
-            .env("PARVEZ_SESSION_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
-            .env("PARVEZ_OIDC_LEEWAY_SECS", "0")
-            .env("PARVEZ_SESSION_RECHECK_SECS", "4")
+            .env("LIMEN_OIDC_ISSUER", &iss)
+            .env("LIMEN_OIDC_AUDIENCE", "api")
+            .env("LIMEN_OIDC_CLIENT_ID", "dashboard")
+            .env("LIMEN_PUBLIC_URL", &public)
+            .env("LIMEN_SESSION_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+            .env("LIMEN_OIDC_LEEWAY_SECS", "0")
+            .env("LIMEN_SESSION_RECHECK_SECS", "4")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1604,7 +1604,7 @@ fn browser_sign_in_with_session_cookies() {
     assert!(loc.contains(&format!("redirect_uri=http%3A%2F%2F127.0.0.1%3A{port}%2Fauth%2Fcallback")), "{loc}");
     let state = loc.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
     let login_cookie = jar(&r);
-    assert!(login_cookie.starts_with("parvez_login=") && header(&r, "set-cookie")[0].contains("HttpOnly; SameSite=Lax"), "{r}");
+    assert!(login_cookie.starts_with("limen_login=") && header(&r, "set-cookie")[0].contains("HttpOnly; SameSite=Lax"), "{r}");
 
     // callback: a wrong state or a missing login cookie fails; the right one starts a session
     let r = get("/auth/callback?code=good&state=nope", &format!("Cookie: {login_cookie}\r\n"));
@@ -1614,7 +1614,7 @@ fn browser_sign_in_with_session_cookies() {
     let r = get(&format!("/auth/callback?code=good&state={state}"), &format!("Cookie: {login_cookie}\r\n"));
     assert!(r.starts_with("HTTP/1.1 303") && header(&r, "location") == ["/dash"], "{r}");
     let session = jar(&r);
-    assert!(session.starts_with("parvez_session.0="), "{r}");
+    assert!(session.starts_with("limen_session.0="), "{r}");
     assert!(!session.contains("eyJ"), "tokens must not be readable in the cookie");
 
     // signed in: page renders (escaped), API works, tampering is rejected
@@ -1664,7 +1664,7 @@ fn browser_sign_in_with_session_cookies() {
     let short_session = jar(&r);
     std::thread::sleep(std::time::Duration::from_secs(3));
     let r = get("/whoami", &format!("Cookie: {short_session}\r\n"));
-    assert!(r.ends_with("fresh@adn.test") && jar(&r).starts_with("parvez_session.0="), "{r}");
+    assert!(r.ends_with("fresh@adn.test") && jar(&r).starts_with("limen_session.0="), "{r}");
 
     // a disabled user: within the recheck interval the session still works, after it the
     // IdP refuses the refresh and the session ends (no back-channel call needed)
@@ -1715,21 +1715,21 @@ fn browser_sign_in_with_session_cookies() {
 }
 
 /// Deny-by-default: an endpoint without @guard or @public doesn't compile, and
-/// `parvez routes` prints the complete access map for review.
+/// `limen routes` prints the complete access map for review.
 #[test]
 fn deny_by_default_and_access_map() {
     let dir = scratch("access092");
-    std::fs::write(dir.join("open.prvz"), "route GET \"/admin/users\" -> str:\n    ret \"everyone\"\n").unwrap();
-    let out = run_in(&dir, &["check", "open.prvz"]);
+    std::fs::write(dir.join("open.lmn"), "route GET \"/admin/users\" -> str:\n    ret \"everyone\"\n").unwrap();
+    let out = run_in(&dir, &["check", "open.lmn"]);
     let err = text(&out.stderr);
-    assert!(!out.status.success() && err.contains("open.prvz:1: route GET /admin/users has no access policy"), "{err}");
+    assert!(!out.status.success() && err.contains("open.lmn:1: route GET /admin/users has no access policy"), "{err}");
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "import ui\n\nfn staff(req) -> str!:\n    ret req.header(\"x-user\").unwrap_or_default()\n\n@public(\"load balancer health probe\")\nroute GET \"/ping\" -> str:\n    ret \"pong\"\n\n@guard(staff)\nroute POST \"/users/{id}\" (auth, id: str) -> str:\n    ret auth\n",
     )
     .unwrap();
     std::fs::write(dir.join("ui.msd"), "@guard(staff)\npage GET \"/admin\" (auth) -> html:\n    p {auth}\n").unwrap();
-    let out = run_in(&dir, &["routes", "app.prvz"]);
+    let out = run_in(&dir, &["routes", "app.lmn"]);
     let map = text(&out.stdout);
     assert!(out.status.success(), "{}", text(&out.stderr));
     for want in [
@@ -1737,14 +1737,14 @@ fn deny_by_default_and_access_map() {
         "PUBLIC (load balancer health probe)",
         "POST    /users/{id}",
         "guard staff",
-        "app.prvz:7",
+        "app.lmn:7",
         "/admin",
         "ui.msd:2",
         "/healthz",
     ] {
         assert!(map.contains(want), "{want}\n{map}");
     }
-    let json: serde_json::Value = serde_json::from_slice(&run_in(&dir, &["routes", "app.prvz", "--json"]).stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&run_in(&dir, &["routes", "app.lmn", "--json"]).stdout).unwrap();
     let admin = json.as_array().unwrap().iter().find(|r| r["path"] == "/admin").unwrap();
     assert_eq!(admin["kind"], "page");
     assert_eq!(admin["guards"][0], "staff");
@@ -1755,19 +1755,19 @@ fn deny_by_default_and_access_map() {
 #[test]
 fn secret_type_never_leaks() {
     let dir = scratch("secret0101");
-    for f in ["app.prvz", "bad.prvz", "bad2.prvz"] {
+    for f in ["app.lmn", "bad.lmn", "bad2.lmn"] {
         std::fs::copy(format!("tests/fixtures/secret/{f}"), dir.join(f)).unwrap();
     }
-    let out = run_in(&dir, &["check", "bad.prvz"]);
+    let out = run_in(&dir, &["check", "bad.lmn"]);
     let err = text(&out.stderr);
-    for want in ["bad.prvz:5: security[secret-type]", "bad.prvz:6: security[hardcoded-secret]", "bad.prvz:10: security[secret-exposure]",
-        "bad.prvz:11: security[secret-exposure]", "bad.prvz:12: security[secret-exposure]", "bad.prvz:13: security[secret-exposure]"] {
+    for want in ["bad.lmn:5: security[secret-type]", "bad.lmn:6: security[hardcoded-secret]", "bad.lmn:10: security[secret-exposure]",
+        "bad.lmn:11: security[secret-exposure]", "bad.lmn:12: security[secret-exposure]", "bad.lmn:13: security[secret-exposure]"] {
         assert!(err.contains(want), "{want}\n{err}");
     }
-    let err = text(&run_in(&dir, &["check", "bad2.prvz"]).stderr);
-    assert!(err.contains("bad2.prvz:5: POST /echo returns `Login`, which holds a Secret"), "{err}");
+    let err = text(&run_in(&dir, &["check", "bad2.lmn"]).stderr);
+    assert!(err.contains("bad2.lmn:5: POST /echo returns `Login`, which holds a Secret"), "{err}");
 
-    let out = run_in(&dir, &["build", "app.prvz"]);
+    let out = run_in(&dir, &["build", "app.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let missing = Command::new(dir.join("app")).env("PORT", "0").env_remove("APP_ADMIN_TOKEN").output().unwrap();
     assert!(!missing.status.success() && text(&missing.stderr).contains("environment variable APP_ADMIN_TOKEN is not set"));
@@ -1803,26 +1803,26 @@ fn lint_reports_standards_and_sarif() {
     let dir = scratch("lint012");
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "import sub.store\n\n@public(\"demo\")\nroute GET \"/u/{name}\" (name: str) -> str:\n    db.execute(\"DELETE FROM u WHERE n = '{name}'\")\n    ret \"ok\"\n\n@allow_insecure(\"admin tool, input is a fixed enum\")\n@public(\"demo\")\nroute GET \"/r/{name}\" (name: str) -> str!:\n    ret std::fs::read_to_string(name)?\n",
     )
     .unwrap();
-    std::fs::write(dir.join("sub/store.prvz"), "fn key() -> str:\n    api_key = \"sk_live_abcdefghijklmnop1234\"\n    ret api_key\n").unwrap();
+    std::fs::write(dir.join("sub/store.lmn"), "fn key() -> str:\n    api_key = \"sk_live_abcdefghijklmnop1234\"\n    ret api_key\n").unwrap();
     // plain: findings with fix + standards, exit 1
-    let out = run_in(&dir, &["lint", "app.prvz"]);
+    let out = run_in(&dir, &["lint", "app.lmn"]);
     let (so, se) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(1), "{so}{se}");
-    assert!(so.contains("app.prvz:5: security[sql-injection]") && so.contains("= see: CWE-89, OWASP A03:2021 Injection, ASVS 5.3.4"), "{so}");
-    assert!(so.contains("sub/store.prvz:2: security[hardcoded-secret]") && so.contains("CWE-798"), "{so}");
-    assert!(!so.contains("app.prvz:11"), "waived finding printed: {so}");
-    assert!(se.contains("app.prvz:10: @allow_insecure: admin tool") && se.contains("1 finding(s) waived") && se.contains("2 security finding(s)"), "{se}");
+    assert!(so.contains("app.lmn:5: security[sql-injection]") && so.contains("= see: CWE-89, OWASP A03:2021 Injection, ASVS 5.3.4"), "{so}");
+    assert!(so.contains("sub/store.lmn:2: security[hardcoded-secret]") && so.contains("CWE-798"), "{so}");
+    assert!(!so.contains("app.lmn:11"), "waived finding printed: {so}");
+    assert!(se.contains("app.lmn:10: @allow_insecure: admin tool") && se.contains("1 finding(s) waived") && se.contains("2 security finding(s)"), "{se}");
     // SARIF 2.1.0 file for code scanning
-    let out = run_in(&dir, &["lint", "app.prvz", "--sarif", "-o", "out.sarif"]);
+    let out = run_in(&dir, &["lint", "app.lmn", "--sarif", "-o", "out.sarif"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("out.sarif")).unwrap()).unwrap();
     assert_eq!(doc["version"], "2.1.0");
     let run = &doc["runs"][0];
-    assert_eq!(run["tool"]["driver"]["name"], "parvez");
+    assert_eq!(run["tool"]["driver"]["name"], "limen");
     let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
     let sql = rules.iter().find(|r| r["id"] == "sql-injection").unwrap();
     assert_eq!(sql["properties"]["security-severity"], "9.8");
@@ -1849,15 +1849,15 @@ fn lint_reports_standards_and_sarif() {
     assert_eq!(
         got,
         [
-            ("sql-injection".into(), rel("app.prvz"), 5, false),
-            ("hardcoded-secret".into(), rel("sub/store.prvz"), 2, false),
-            ("path-traversal".into(), rel("app.prvz"), 11, true),
+            ("sql-injection".into(), rel("app.lmn"), 5, false),
+            ("hardcoded-secret".into(), rel("sub/store.lmn"), 2, false),
+            ("path-traversal".into(), rel("app.lmn"), 11, true),
         ]
     );
     assert!(!std::fs::read_to_string(dir.join("out.sarif")).unwrap().contains(&*dir.canonicalize().unwrap().to_string_lossy()), "absolute path leaked");
     // clean program: exit 0; rule catalog
-    std::fs::write(dir.join("ok.prvz"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
-    let out = run_in(&dir, &["lint", "ok.prvz"]);
+    std::fs::write(dir.join("ok.lmn"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
+    let out = run_in(&dir, &["lint", "ok.lmn"]);
     assert!(out.status.success() && text(&out.stderr).contains("no security findings"), "{}", text(&out.stderr));
     let out = run_in(&dir, &["lint", "--rules"]);
     let cat = text(&out.stdout);
@@ -1871,30 +1871,30 @@ fn taint_crosses_modules_and_functions() {
     let dir = scratch("taint013");
     std::fs::create_dir_all(dir.join("lib")).unwrap();
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "import lib.files\n\nfn staff(req) -> str!:\n    who = req.header(\"x-user\").unwrap_or_default()\n    ret std::fs::read_to_string(\"/etc/staff/{who}\")?\n\n@guard(staff)\nroute GET \"/a/{name}\" (name: str) -> str!:\n    ret files::load(name)?\n\n@public(\"demo\")\nroute GET \"/b\" (req) -> str!:\n    f = req.param(\"f\").unwrap_or_default()\n    ret std::fs::read_to_string(f)?\n\n@public(\"demo\")\nroute POST \"/c\" (body: Job) -> str!:\n    files::run_tool(&body.tool)\n    ret \"ok\"\n\n@public(\"demo\")\nroute GET \"/safe/{name}\" (name: str) -> str!:\n    ret files::load_safe(name)?\n\n@json\ntype Job: tool: str\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("lib/files.prvz"),
+        dir.join("lib/files.lmn"),
         "fn load(name: str) -> str!:\n    ret inner(name)\n\nfn inner(n: str) -> str!:\n    path = \"/srv/data/{n}\"\n    ret std::fs::read_to_string(&path)?\n\nfn load_safe(name: str) -> str!:\n    ret std::fs::read_to_string(safe_join(\"/srv/data\", &name)?)?\n\nfn run_tool(t: &str):\n    std::process::Command::new(t).status()\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["lint", "app.prvz"]);
+    let out = run_in(&dir, &["lint", "app.lmn"]);
     let so = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{so}{}", text(&out.stderr));
     for want in [
-        "app.prvz:5: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized",
-        "app.prvz:9: security[path-traversal]: request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.prvz:6 unsanitized",
-        "app.prvz:14: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized",
-        "app.prvz:18: security[command-injection]: request input passed to `files::run_tool(..)` reaches `Command::new(..)` at lib/files.prvz:12 unsanitized",
+        "app.lmn:5: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized",
+        "app.lmn:9: security[path-traversal]: request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.lmn:6 unsanitized",
+        "app.lmn:14: security[path-traversal]: request input reaches `std::fs::read_to_string(..)` unsanitized",
+        "app.lmn:18: security[command-injection]: request input passed to `files::run_tool(..)` reaches `Command::new(..)` at lib/files.lmn:12 unsanitized",
     ] {
         assert!(so.contains(want), "missing: {want}\n{so}");
     }
-    assert!(!so.contains("app.prvz:23") && so.matches("security[").count() == 4, "{so}");
+    assert!(!so.contains("app.lmn:23") && so.matches("security[").count() == 4, "{so}");
     // the build gate reports the same findings
-    let err = text(&run_in(&dir, &["check", "app.prvz"]).stderr);
-    assert!(err.contains("app.prvz:9: security[path-traversal]") && err.contains("4 security error(s)"), "{err}");
+    let err = text(&run_in(&dir, &["check", "app.lmn"]).stderr);
+    assert!(err.contains("app.lmn:9: security[path-traversal]") && err.contains("4 security error(s)"), "{err}");
 }
 
 /// Adversarial corpus: every `# expect: rule` line must be reported, every
@@ -1912,7 +1912,7 @@ fn security_corpus() {
                 stack.push(p);
                 continue;
             }
-            if p.extension().and_then(|x| x.to_str()) != Some("prvz") {
+            if p.extension().and_then(|x| x.to_str()) != Some("lmn") {
                 continue;
             }
             let rel = p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
@@ -1929,13 +1929,13 @@ fn security_corpus() {
     let mut found = std::collections::BTreeSet::new();
     let mut entries: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()).collect();
     entries.sort();
-    for main in entries.iter().filter(|p| p.extension().and_then(|x| x.to_str()) == Some("prvz")) {
+    for main in entries.iter().filter(|p| p.extension().and_then(|x| x.to_str()) == Some("lmn")) {
         let name = main.file_name().unwrap().to_str().unwrap();
-        let out = parvez().current_dir(&root).args(["lint", name]).output().unwrap();
+        let out = limen().current_dir(&root).args(["lint", name]).output().unwrap();
         let (so, se) = (text(&out.stdout), text(&out.stderr));
         assert!(se.contains("security finding") || out.status.success(), "{name} failed to lint:\n{se}");
         for line in so.lines() {
-            // "file.prvz:12: security[rule]: ..."
+            // "file.lmn:12: security[rule]: ..."
             let Some((loc, rest)) = line.split_once(": security[") else { continue };
             let (file, n) = loc.rsplit_once(':').unwrap();
             let rule = rest.split(']').next().unwrap();
@@ -1953,13 +1953,13 @@ fn security_corpus() {
 #[test]
 fn security_header_overrides() {
     let dir = scratch("headers013");
-    std::fs::write(dir.join("app.prvz"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
-    let out = run_in(&dir, &["build", "app.prvz"]);
+    std::fs::write(dir.join("app.lmn"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
+    let out = run_in(&dir, &["build", "app.lmn"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let serve = |env: &[(&str, &str)]| -> (String, String) {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let mut cmd = Command::new(dir.join("app"));
-        cmd.env("PORT", port.to_string()).env("PARVEZ_LOG", "on").env_remove("PARVEZ_CSP").env_remove("PARVEZ_HSTS");
+        cmd.env("PORT", port.to_string()).env("LIMEN_LOG", "on").env_remove("LIMEN_CSP").env_remove("LIMEN_HSTS");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -1980,14 +1980,14 @@ fn security_header_overrides() {
     let (r, _) = serve(&[]);
     assert!(r.contains("content-security-policy: default-src 'none'; frame-ancestors 'none'") && r.contains("strict-transport-security: max-age=31536000\r\n"), "{r}");
     // overrides
-    let (r, _) = serve(&[("PARVEZ_HSTS", "max-age=63072000; includeSubDomains; preload")]);
+    let (r, _) = serve(&[("LIMEN_HSTS", "max-age=63072000; includeSubDomains; preload")]);
     assert!(r.contains("strict-transport-security: max-age=63072000; includesubdomains; preload"), "{r}");
-    let (r, _) = serve(&[("PARVEZ_CSP", "off"), ("PARVEZ_HSTS", "off")]);
+    let (r, _) = serve(&[("LIMEN_CSP", "off"), ("LIMEN_HSTS", "off")]);
     assert!(!r.contains("content-security-policy") && !r.contains("strict-transport-security"), "{r}");
     // an invalid override keeps the default and says so at startup
-    let (r, err) = serve(&[("PARVEZ_HSTS", "bad\u{1}value")]);
+    let (r, err) = serve(&[("LIMEN_HSTS", "bad\u{1}value")]);
     assert!(r.contains("strict-transport-security: max-age=31536000\r\n"), "{r}");
-    assert!(err.contains("PARVEZ_HSTS is not a valid header value; using the default"), "{err}");
+    assert!(err.contains("LIMEN_HSTS is not a valid header value; using the default"), "{err}");
 }
 
 /// A tiny release server: `/latest` redirects to the tag, `/dl/<tag>/<file>` serves files.
@@ -2038,9 +2038,9 @@ fn upgrade_verifies_before_replacing() {
     };
     let dir = scratch("upgrade017");
     // a fake v9.9.9 release whose "binary" is a script
-    let name = format!("parvez-v9.9.9-{target}");
+    let name = format!("limen-v9.9.9-{target}");
     std::fs::create_dir_all(dir.join("rel").join(&name)).unwrap();
-    std::fs::write(dir.join("rel").join(&name).join("parvez"), "#!/bin/sh\necho parvez 9.9.9\n").unwrap();
+    std::fs::write(dir.join("rel").join(&name).join("limen"), "#!/bin/sh\necho limen 9.9.9\n").unwrap();
     let tgz = dir.join(format!("{name}.tar.gz"));
     assert!(Command::new("tar").arg("-czf").arg(&tgz).arg("-C").arg(dir.join("rel")).arg(&name).status().unwrap().success());
     let archive = std::fs::read(&tgz).unwrap();
@@ -2052,8 +2052,8 @@ fn upgrade_verifies_before_replacing() {
     let port = release_server(files.clone());
     // the installed copy, and a PATH with only curl and tar (no `gh`: the fake has no attestation)
     std::fs::create_dir_all(dir.join("bin")).unwrap();
-    let exe = dir.join("bin/parvez");
-    std::fs::copy(env!("CARGO_BIN_EXE_parvez"), &exe).unwrap();
+    let exe = dir.join("bin/limen");
+    std::fs::copy(env!("CARGO_BIN_EXE_limen"), &exe).unwrap();
     std::fs::create_dir_all(dir.join("tools")).unwrap();
     for tool in ["curl", "tar", "gzip"] {
         let found = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|d| d.join(tool)).find(|p| p.is_file()).unwrap();
@@ -2063,8 +2063,8 @@ fn upgrade_verifies_before_replacing() {
         Command::new(&exe)
             .args(args)
             .env("PATH", dir.join("tools"))
-            .env("PARVEZ_DOWNLOAD_BASE", format!("http://127.0.0.1:{port}/dl"))
-            .env("PARVEZ_LATEST_URL", format!("http://127.0.0.1:{port}/latest"))
+            .env("LIMEN_DOWNLOAD_BASE", format!("http://127.0.0.1:{port}/dl"))
+            .env("LIMEN_LATEST_URL", format!("http://127.0.0.1:{port}/latest"))
             .output()
             .unwrap()
     };
@@ -2080,15 +2080,15 @@ fn upgrade_verifies_before_replacing() {
     let out = run(&["upgrade"]);
     assert!(out.status.success() && text(&out.stderr).contains("checksum OK"), "{}", text(&out.stderr));
     let v = Command::new(&exe).arg("--version").output().unwrap();
-    assert_eq!(text(&v.stdout).trim(), "parvez 9.9.9");
+    assert_eq!(text(&v.stdout).trim(), "limen 9.9.9");
     // bad version strings never reach the network
-    let out = Command::new(env!("CARGO_BIN_EXE_parvez")).args(["upgrade", "--version", "v1.0.0/../../x"]).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_limen")).args(["upgrade", "--version", "v1.0.0/../../x"]).output().unwrap();
     assert!(text(&out.stderr).contains("isn't a release version"), "{}", text(&out.stderr));
 }
 
 #[test]
 fn doctor_reports_the_toolchain() {
-    let out = parvez().arg("doctor").output().unwrap();
+    let out = limen().arg("doctor").output().unwrap();
     let so = text(&out.stdout);
     assert!(so.contains("ok    rustc ") && so.contains("ok    cargo ") && so.contains("ok    git version"), "{so}");
     assert!(
@@ -2097,7 +2097,7 @@ fn doctor_reports_the_toolchain() {
     );
     // without Rust on PATH it fails with the fix
     let empty = scratch("doctor017");
-    let out = parvez().arg("doctor").env("PATH", &empty).output().unwrap();
+    let out = limen().arg("doctor").env("PATH", &empty).output().unwrap();
     let so = text(&out.stdout);
     assert!(!out.status.success() && so.contains("FAIL  Rust isn't installed") && so.contains("sh.rustup.rs"), "{so}");
     if cfg!(target_os = "linux") {
@@ -2108,29 +2108,29 @@ fn doctor_reports_the_toolchain() {
 #[test]
 fn openapi_describes_routes_types_and_access() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/tasks");
-    let out = parvez().current_dir(&root).args(["types", "--openapi", "main.prvz"]).output().unwrap();
+    let out = limen().current_dir(&root).args(["types", "--openapi", "main.lmn"]).output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     let d: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(d["openapi"], "3.1.0");
     // SQL coverage is printed on every check of a program with a schema
-    let lint = parvez().current_dir(&root).args(["lint", "main.prvz"]).output().unwrap();
-    assert!(text(&lint.stderr).contains("parvez: SQL: 4 of 4 queries checked against schema.sql"), "{}", text(&lint.stderr));
+    let lint = limen().current_dir(&root).args(["lint", "main.lmn"]).output().unwrap();
+    assert!(text(&lint.stderr).contains("limen: SQL: 4 of 4 queries checked against schema.sql"), "{}", text(&lint.stderr));
     let create = &d["paths"]["/api/tasks"]["post"];
     assert!(create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/Task", "{create}");
     assert_eq!(create["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/NewTask");
     assert_eq!(create["security"][0]["bearer"], serde_json::json!([]));
-    assert_eq!(create["x-parvez-access"]["guards"][0], "tasks::me");
+    assert_eq!(create["x-limen-access"]["guards"][0], "tasks::me");
     assert!(d["paths"]["/api/tasks/{id}"]["delete"]["responses"]["204"].is_object());
     assert_eq!(d["paths"]["/api/tasks/{id}"]["patch"]["parameters"][0]["schema"]["type"], "integer");
     assert_eq!(d["components"]["schemas"]["Task"]["required"], serde_json::json!(["id", "title", "done"]));
     assert_eq!(d["components"]["securitySchemes"]["bearer"]["scheme"], "bearer");
     // public routes say why, and need no credentials
-    let svc = parvez().current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")).args(["types", "--openapi", "service.prvz"]).output().unwrap();
+    let svc = limen().current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")).args(["types", "--openapi", "service.lmn"]).output().unwrap();
     let s: serde_json::Value = serde_json::from_slice(&svc.stdout).unwrap();
-    let health = s["paths"].as_object().unwrap().values().flat_map(|ops| ops.as_object().unwrap().values()).find(|o| o["x-parvez-access"]["public"].is_string()).expect("a public route");
+    let health = s["paths"].as_object().unwrap().values().flat_map(|ops| ops.as_object().unwrap().values()).find(|o| o["x-limen-access"]["public"].is_string()).expect("a public route");
     assert_eq!(health["security"], serde_json::json!([]));
     // exactly one format at a time
-    let both = parvez().args(["types", "--ts", "--openapi"]).output().unwrap();
+    let both = limen().args(["types", "--ts", "--openapi"]).output().unwrap();
     assert!(text(&both.stderr).contains("choose one"), "{}", text(&both.stderr));
 }
 
@@ -2138,25 +2138,25 @@ fn openapi_describes_routes_types_and_access() {
 fn project_rules_and_dependency_policy() {
     let dir = scratch("policy020");
     std::fs::write(
-        dir.join("parvez.toml"),
-        "[security]\ndisallow = [{ call = \"std::env::set_var\", reason = \"configuration comes from parvez.toml\" }]\nlicenses = [\"MIT\"]\nban = [\"serde\"]\n\n[security.sinks]\ncommand = [\"duct::cmd\"]\n",
+        dir.join("limen.toml"),
+        "[security]\ndisallow = [{ call = \"std::env::set_var\", reason = \"configuration comes from limen.toml\" }]\nlicenses = [\"MIT\"]\nban = [\"serde\"]\n\n[security.sinks]\ncommand = [\"duct::cmd\"]\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("app.prvz"),
+        dir.join("app.lmn"),
         "@public(\"demo\")\nroute GET \"/run/{tool}\" (tool: str) -> str!:\n    duct::cmd(&tool, [\"--version\"]).run()?\n    ret \"ok\"\n\nfn main_tool():\n    std::env::set_var(\"X\", \"1\")\n",
     )
     .unwrap();
-    let out = run_in(&dir, &["lint", "app.prvz"]);
+    let out = run_in(&dir, &["lint", "app.lmn"]);
     let so = text(&out.stdout);
-    assert!(so.contains("app.prvz:3: security[command-injection]: request input reaches `duct::cmd(..)`"), "{so}");
-    assert!(so.contains("app.prvz:7: security[disallowed-call]: `std::env::set_var(..)` is disallowed by parvez.toml: configuration comes from parvez.toml"), "{so}");
+    assert!(so.contains("app.lmn:3: security[command-injection]: request input reaches `duct::cmd(..)`"), "{so}");
+    assert!(so.contains("app.lmn:7: security[disallowed-call]: `std::env::set_var(..)` is disallowed by limen.toml: configuration comes from limen.toml"), "{so}");
     // the dependency policy is checked on build, against what's actually compiled
-    std::fs::write(dir.join("ok.prvz"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
-    let out = run_in(&dir, &["build", "ok.prvz"]);
+    std::fs::write(dir.join("ok.lmn"), "@public(\"demo\")\nroute GET \"/\" -> str:\n    ret \"hi\"\n").unwrap();
+    let out = run_in(&dir, &["build", "ok.lmn"]);
     let err = text(&out.stderr);
     assert!(!out.status.success() && err.contains("dependency policy violation(s)"), "{err}");
-    assert!(err.contains("serde 1.") && err.contains("banned in parvez.toml"), "{err}");
+    assert!(err.contains("serde 1.") && err.contains("banned in limen.toml"), "{err}");
     assert!(err.contains("isn't in [security] licenses"), "{err}");
     assert!(!exe(&dir, "ok").exists(), "no binary is shipped when the policy fails");
 }

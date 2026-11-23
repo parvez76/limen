@@ -1,6 +1,6 @@
-# Agent benchmark: Parvez vs Rust
+# Agent benchmark: Limen vs Rust
 
-Does an AI agent write secure services more reliably in Parvez than in Rust with good tooling? This is a pilot: 8 tasks, each with one security trap, run by the same agent in both languages, scored by black-box probes.
+Does an AI agent write secure services more reliably in Limen than in Rust with good tooling? This is a pilot: 8 tasks, each with one security trap, run by the same agent in both languages, scored by black-box probes.
 
 ## Tasks
 
@@ -19,14 +19,14 @@ Each task is in `tasks/<name>/TASK.md` plus `tasks/COMMON.md` (port, database, b
 
 ## The two arms
 
-- **Parvez:** `SPEC.md` in the directory; done when `parvez check main.prvz` passes.
+- **Limen:** `SPEC.md` in the directory; done when `limen check main.lmn` passes.
 - **Rust, tooled:** a Cargo project with axum, sqlx (compile-time checked `query!`), `secrecy`, `hmac`/`subtle`; Clippy with `disallowed_methods` banning non-macro `sqlx::query` (warnings are errors); `cargo-deny` for advisories, bans and licenses. Done when `./check.sh` passes. See `templates/rust/`.
 
 Both get a live PostgreSQL with the schema applied, the same tools (Bash, Read, Write, Edit, Glob, Grep), the same model, effort and turn limit, and the same prompt apart from the language line (`PROMPT` in `bench.py`).
 
 ## Scoring
 
-After the agent stops, the harness builds the program itself (Parvez: `parvez check` + `parvez build`; Rust: `./check.sh` + `cargo build --release`), starts it against a fresh database and runs the task's probe (`probes.py`): functional checks (does it do the job) and security checks (does the trap hold). A run **passes** only if it builds, and every functional and security check passes. A service that refuses everything isn't secure, it's broken: it fails the functional checks.
+After the agent stops, the harness builds the program itself (Limen: `limen check` + `limen build`; Rust: `./check.sh` + `cargo build --release`), starts it against a fresh database and runs the task's probe (`probes.py`): functional checks (does it do the job) and security checks (does the trap hold). A run **passes** only if it builds, and every functional and security check passes. A service that refuses everything isn't secure, it's broken: it fails the functional checks.
 
 The probes are validated without any AI: `reference/ref.py` has a correct and a deliberately vulnerable implementation of each task, and `bench.py validate` checks that every correct one passes and every vulnerable one is caught.
 
@@ -38,7 +38,7 @@ python3 bench.py run --trials 3 --model sonnet  # 8 tasks x 2 languages x 3 tria
 python3 bench.py summary --model sonnet         # results-sonnet.jsonl -> results-sonnet.md
 ```
 
-Needs docker (a throwaway `postgres:16-alpine` named `parvez-bench-pg` on port 55432), Claude Code signed in, `parvez`, and cargo with clippy and cargo-deny. Agents run with `claude -p` in `~/parvez-bench-runs/<model>-<task>-<lang>-<trial>/` with permissions bypassed, so run it on a machine where that's acceptable. Runs are resumable, and the harness stops cleanly if a usage limit is hit. Every transcript (`transcript.jsonl`) is kept for publication.
+Needs docker (a throwaway `postgres:16-alpine` named `limen-bench-pg` on port 55432), Claude Code signed in, `limen`, and cargo with clippy and cargo-deny. Agents run with `claude -p` in `~/limen-bench-runs/<model>-<task>-<lang>-<trial>/` with permissions bypassed, so run it on a machine where that's acceptable. Runs are resumable, and the harness stops cleanly if a usage limit is hit. Every transcript (`transcript.jsonl`) is kept for publication.
 
 ## Results so far
 
@@ -48,5 +48,5 @@ Both arms passed every run, with Sonnet 5.5 and with Haiku 5.5 (24 of 24 each): 
 
 - 8 tasks and 3 trials is a pilot, not a statistically strong result. Differences of one or two runs mean little.
 - One model at a time. Results for one model don't carry over to others.
-- The traps are known vulnerability classes Parvez was designed around; this measures whether that design helps an agent, not general code quality.
+- The traps are known vulnerability classes Limen was designed around; this measures whether that design helps an agent, not general code quality.
 - The Rust arm's tooling is what a careful team would set up, but a different team might choose differently.

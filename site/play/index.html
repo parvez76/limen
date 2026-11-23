@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Parvez playground: watch the compiler refuse insecure code</title>
-<meta name="description" content="Write Parvez in your browser. The real compiler, compiled to WebAssembly, runs the security checks and shows the generated Rust. Nothing leaves your machine.">
+<title>Limen playground: watch the compiler refuse insecure code</title>
+<meta name="description" content="Write Limen in your browser. The real compiler, compiled to WebAssembly, runs the security checks and shows the generated Rust. Nothing leaves your machine.">
 <link rel="stylesheet" href="play.css">
 </head>
 <body>
 <header>
-  <a class="brand" href="../">Parvez</a>
+  <a class="brand" href="../">Limen</a>
   <span class="sub">playground</span>
   <label class="pick">Example
     <select id="preset" aria-label="Load an example"></select>
@@ -19,9 +19,9 @@
 </header>
 
 <main>
-  <section class="editor" aria-label="Parvez source">
+  <section class="editor" aria-label="Limen source">
     <div class="gutter" id="gutter" aria-hidden="true"></div>
-    <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Parvez code"></textarea>
+    <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Limen code"></textarea>
   </section>
 
   <section class="output" aria-label="Compiler output">
@@ -35,9 +35,9 @@
 </main>
 
 <footer>
-  <p><strong>What runs here:</strong> the real Parvez parser, its security checks and its Rust generator, compiled to WebAssembly. Your code never leaves this page.
-  <strong>What doesn't:</strong> Rust's type and borrow checks need <code>rustc</code>; run <code>parvez check</code> after <a href="../">installing</a>. One file at a time: imports need the CLI.</p>
-  <p>Found a way to sneak request data, SQL or a secret past the checks? That's the most useful report there is: <a href="https://github.com/parvez76/parvez/blob/main/tests/security_corpus/README.md">add it to the corpus</a>. Known blind spots are in the <em>known_miss</em> example.</p>
+  <p><strong>What runs here:</strong> the real Limen parser, its security checks and its Rust generator, compiled to WebAssembly. Your code never leaves this page.
+  <strong>What doesn't:</strong> Rust's type and borrow checks need <code>rustc</code>; run <code>limen check</code> after <a href="../">installing</a>. One file at a time: imports need the CLI.</p>
+  <p>Found a way to sneak request data, SQL or a secret past the checks? That's the most useful report there is: <a href="https://github.com/parvez76/limen/blob/main/tests/security_corpus/README.md">add it to the corpus</a>. Known blind spots are in the <em>known_miss</em> example.</p>
 </footer>
 <script type="module" src="play.js"></script>
 </body>

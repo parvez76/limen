@@ -1,22 +1,22 @@
-//! `parvez fmt`: one canonical layout for `.prvz` and `.msd` files.
+//! `limen fmt`: one canonical layout for `.lmn` and `.msd` files.
 //!
 //! Formatting is line-based so comments survive: indentation becomes 4 spaces
 //! per block level, spacing around `,` `:` `=` `->` and brackets is normalized,
 //! blank lines are collapsed, and top-level items are separated by one blank
-//! line. Every change is verified: the token stream (`.prvz`) or the parsed
+//! line. Every change is verified: the token stream (`.lmn`) or the parsed
 //! pages (`.msd`) must be identical before and after, otherwise the file is
 //! left untouched and an error is reported.
 use crate::lexer::lex;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-/// Formats `path` (a file, or every .prvz/.msd under a directory). Returns the
+/// Formats `path` (a file, or every .lmn/.msd under a directory). Returns the
 /// files that changed (or would change, with `check`).
 pub fn run(path: &Path, check: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect(path, &mut files)?;
     if files.is_empty() {
-        bail!("no .prvz or .msd files under {}", path.display());
+        bail!("no .lmn or .msd files under {}", path.display());
     }
     let mut changed = Vec::new();
     for f in files {
@@ -29,7 +29,7 @@ pub fn run(path: &Path, check: bool) -> Result<Vec<PathBuf>> {
         if out != src {
             if !check {
                 std::fs::write(&f, &out)?;
-                eprintln!("parvez: formatted {}", f.display());
+                eprintln!("limen: formatted {}", f.display());
             }
             changed.push(f);
         }
@@ -40,7 +40,7 @@ pub fn run(path: &Path, check: bool) -> Result<Vec<PathBuf>> {
 fn collect(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("{}", path.display()))?;
     if meta.is_file() {
-        if matches!(path.extension().and_then(|e| e.to_str()), Some("prvz" | "msd")) {
+        if matches!(path.extension().and_then(|e| e.to_str()), Some("lmn" | "msd")) {
             out.push(path.to_path_buf());
         }
         return Ok(());
@@ -67,7 +67,7 @@ pub fn format_file(path: &Path, src: &str) -> Result<String> {
     Ok(out)
 }
 
-/// Same program before and after: identical tokens (.prvz) or pages (.msd).
+/// Same program before and after: identical tokens (.lmn) or pages (.msd).
 fn verify(before: &str, after: &str, masud: bool) -> Result<()> {
     if masud {
         let a = crate::masud::parse(before, 1).map(|i| strip_lines(&format!("{i:?}")));
@@ -418,10 +418,10 @@ mod tests {
     fn formats_layout_spacing_and_keeps_comments() {
         let src = "import store\n# models\n@json\ntype Item:  id:i64,name : str\nfn f(a:i64,b :i64)->i64:\n  # body\n  x=a+b   # sum\n  if x>=3 :ret x\n  m = { \"a\":1 , \"b\" :2 }\n  q = sqlx::query(\"\"\"\n      SELECT 1\n        FROM t\n      \"\"\")\n      .bind(x)\n  ret x\n@public\nroute GET \"/x\" -> str:\n      ret \"a,b:c=d\"\n\n\n\ntest \"t\":\n  assert(f(1,2)==3)\n";
         let want = "import store\n# models\n@json\ntype Item: id: i64, name: str\nfn f(a: i64, b: i64) -> i64:\n    # body\n    x = a+b  # sum\n    if x >= 3: ret x\n    m = {\"a\": 1, \"b\": 2}\n    q = sqlx::query(\"\"\"\n        SELECT 1\n          FROM t\n        \"\"\")\n        .bind(x)\n    ret x\n\n@public\nroute GET \"/x\" -> str:\n    ret \"a,b:c=d\"\n\ntest \"t\":\n    assert(f(1, 2) == 3)\n";
-        let out = format_file(Path::new("a.prvz"), src).unwrap();
+        let out = format_file(Path::new("a.lmn"), src).unwrap();
         assert_eq!(out, want, "\n{out}");
         // idempotent
-        assert_eq!(format_file(Path::new("a.prvz"), &out).unwrap(), out);
+        assert_eq!(format_file(Path::new("a.lmn"), &out).unwrap(), out);
     }
 
     #[test]

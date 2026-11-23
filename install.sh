@@ -1,11 +1,11 @@
 #!/bin/sh
-# Parvez installer.
+# Limen installer.
 #
-#   curl -fsSL https://parvez76.github.io/parvez/install.sh | sh
+#   curl -fsSL https://parvez76.github.io/limen/install.sh | sh
 #
 # Downloads the release for this OS and CPU, checks it against the release's
 # SHA256SUMS (and its GitHub build attestation when the `gh` CLI is installed),
-# installs `parvez` to ~/.parvez/bin and adds that to PATH. Parvez builds your
+# installs `limen` to ~/.limen/bin and adds that to PATH. Limen builds your
 # programs with the Rust toolchain; if it's missing, the installer offers to
 # set it up with the official rustup installer.
 #
@@ -14,21 +14,21 @@
 #   --no-rust          never install Rust
 #   --no-modify-path   don't edit shell profiles
 # Environment:
-#   PARVEZ_VERSION     a release tag such as v0.17.0 (default: the latest)
-#   PARVEZ_HOME        install location (default: ~/.parvez)
+#   LIMEN_VERSION     a release tag such as v0.17.0 (default: the latest)
+#   LIMEN_HOME        install location (default: ~/.limen)
 set -eu
 
-REPO="parvez76/parvez"
+REPO="parvez76/limen"
 LEGACY_REPO="parvez76/project-parvez"
-DOWNLOAD_BASE="${PARVEZ_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
-LATEST_URL="${PARVEZ_LATEST_URL:-https://github.com/$REPO/releases/latest}"
-PARVEZ_HOME="${PARVEZ_HOME:-$HOME/.parvez}"
+DOWNLOAD_BASE="${LIMEN_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
+LATEST_URL="${LIMEN_LATEST_URL:-https://github.com/$REPO/releases/latest}"
+LIMEN_HOME="${LIMEN_HOME:-$HOME/.limen}"
 YES=0
 RUST=ask
 MODIFY_PATH=1
 
-say() { printf 'parvez-install: %s\n' "$*"; }
-die() { printf 'parvez-install: error: %s\n' "$*" >&2; exit 1; }
+say() { printf 'limen-install: %s\n' "$*"; }
+die() { printf 'limen-install: error: %s\n' "$*" >&2; exit 1; }
 
 for arg in "$@"; do
     case "$arg" in
@@ -53,12 +53,12 @@ case "$os/$arch" in
     Linux/x86_64|Linux/amd64) target=x86_64-unknown-linux-musl ;;
     Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-musl ;;
     Darwin/arm64|Darwin/aarch64) target=aarch64-apple-darwin ;;
-    *) die "no prebuilt Parvez for $os/$arch yet. Build it from source:
+    *) die "no prebuilt Limen for $os/$arch yet. Build it from source:
     cargo install --git https://github.com/$REPO --locked" ;;
 esac
 
 # ---- version --------------------------------------------------------------
-version="${PARVEZ_VERSION:-}"
+version="${LIMEN_VERSION:-}"
 if [ -z "$version" ]; then
     # /releases/latest redirects to /releases/tag/<tag>
     url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$LATEST_URL") || die "could not reach GitHub to find the latest release"
@@ -72,8 +72,8 @@ esac
 # ---- download and verify ---------------------------------------------------
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
-archive="parvez-$version-$target.tar.gz"
-say "downloading Parvez $version for $target"
+archive="limen-$version-$target.tar.gz"
+say "downloading Limen $version for $target"
 curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$archive" "$DOWNLOAD_BASE/$version/$archive" 2>/dev/null \
     || curl -fsSL -o "$tmp/$archive" "$DOWNLOAD_BASE/$version/$archive" \
     || die "download failed: $DOWNLOAD_BASE/$version/$archive"
@@ -103,23 +103,23 @@ fi
 
 # ---- install ----------------------------------------------------------------
 tar -xzf "$tmp/$archive" -C "$tmp"
-src="$tmp/parvez-$version-$target/parvez"
-[ -f "$src" ] || die "the archive has no parvez binary"
-mkdir -p "$PARVEZ_HOME/bin"
-cp "$src" "$PARVEZ_HOME/bin/parvez.new"
-chmod 755 "$PARVEZ_HOME/bin/parvez.new"
-mv -f "$PARVEZ_HOME/bin/parvez.new" "$PARVEZ_HOME/bin/parvez"
-say "installed $("$PARVEZ_HOME/bin/parvez" --version) to $PARVEZ_HOME/bin"
+src="$tmp/limen-$version-$target/limen"
+[ -f "$src" ] || die "the archive has no limen binary"
+mkdir -p "$LIMEN_HOME/bin"
+cp "$src" "$LIMEN_HOME/bin/limen.new"
+chmod 755 "$LIMEN_HOME/bin/limen.new"
+mv -f "$LIMEN_HOME/bin/limen.new" "$LIMEN_HOME/bin/limen"
+say "installed $("$LIMEN_HOME/bin/limen" --version) to $LIMEN_HOME/bin"
 
 # ---- PATH -------------------------------------------------------------------
-cat > "$PARVEZ_HOME/env" <<EOF
-# Added by the Parvez installer
+cat > "$LIMEN_HOME/env" <<EOF
+# Added by the Limen installer
 case ":\${PATH}:" in
-    *:"$PARVEZ_HOME/bin":*) ;;
-    *) export PATH="$PARVEZ_HOME/bin:\$PATH" ;;
+    *:"$LIMEN_HOME/bin":*) ;;
+    *) export PATH="$LIMEN_HOME/bin:\$PATH" ;;
 esac
 EOF
-line=". \"$PARVEZ_HOME/env\""
+line=". \"$LIMEN_HOME/env\""
 if [ "$MODIFY_PATH" = 1 ]; then
     for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
         case "$rc" in
@@ -132,17 +132,17 @@ if [ "$MODIFY_PATH" = 1 ]; then
     done
     if [ -d "$HOME/.config/fish" ]; then
         mkdir -p "$HOME/.config/fish/conf.d"
-        printf 'fish_add_path -g "%s/bin"\n' "$PARVEZ_HOME" > "$HOME/.config/fish/conf.d/parvez.fish"
+        printf 'fish_add_path -g "%s/bin"\n' "$LIMEN_HOME" > "$HOME/.config/fish/conf.d/limen.fish"
     fi
 fi
 
 # ---- Rust -------------------------------------------------------------------
 have_cargo() { command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; }
 if ! have_cargo; then
-    say "Parvez builds your programs with the Rust toolchain, which isn't installed."
+    say "Limen builds your programs with the Rust toolchain, which isn't installed."
     if [ "$RUST" = ask ] && [ "$YES" = 0 ]; then
         if (: </dev/tty) 2>/dev/null; then    # a terminal we can really open, even when piped
-            printf 'parvez-install: install Rust now with the official installer (rustup.rs)? [Y/n] ' > /dev/tty
+            printf 'limen-install: install Rust now with the official installer (rustup.rs)? [Y/n] ' > /dev/tty
             read -r answer < /dev/tty || answer=n
             case "$answer" in [nN]*) RUST=no ;; *) RUST=yes ;; esac
         else
@@ -181,7 +181,7 @@ if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! comm
 fi
 
 echo
-say "done. Open a new terminal (or run: . \"$PARVEZ_HOME/env\"), then:"
-echo "    parvez doctor          # check the setup"
-echo "    parvez new hello       # start a project"
-echo "    parvez upgrade         # later: update to the newest release"
+say "done. Open a new terminal (or run: . \"$LIMEN_HOME/env\"), then:"
+echo "    limen doctor          # check the setup"
+echo "    limen new hello       # start a project"
+echo "    limen upgrade         # later: update to the newest release"

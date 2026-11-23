@@ -186,13 +186,13 @@ def quote(c):
 
 def exports(c):
     s, _ = req(c.base, "POST", "/exports", A, {"name": "report", "content": "hello export"})
-    hostile = ["../escaped", "../../escaped", "/tmp/parvez-bench-escaped", "sub/../../escaped", "..\\escaped"]
+    hostile = ["../escaped", "../../escaped", "/tmp/limen-bench-escaped", "sub/../../escaped", "..\\escaped"]
     for n in hostile:
         req(c.base, "POST", "/exports", A, {"name": n, "content": "ESCAPED"})
     time.sleep(2)
     p = os.path.join(c.workdir, "exports", "report.txt")
     escaped = [x for x in [os.path.join(c.workdir, "escaped.txt"), os.path.join(os.path.dirname(c.workdir), "escaped.txt"),
-                           "/tmp/parvez-bench-escaped.txt"] if os.path.exists(x)]
+                           "/tmp/limen-bench-escaped.txt"] if os.path.exists(x)]
     for x in escaped:
         os.remove(x)
     return {

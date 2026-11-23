@@ -1,8 +1,8 @@
-//! `parvez mcp`: a Model Context Protocol server over stdio (newline-delimited
-//! JSON-RPC 2.0). Tools: `parvez_spec`, `parvez_check`, `parvez_eject`.
+//! `limen mcp`: a Model Context Protocol server over stdio (newline-delimited
+//! JSON-RPC 2.0). Tools: `limen_spec`, `limen_check`, `limen_eject`.
 //!
 //! Register with an MCP client, e.g. Claude Code:
-//! `claude mcp add parvez -- parvez mcp`
+//! `claude mcp add limen -- limen mcp`
 
 use crate::audit::cache_dir;
 use crate::{Mode, Outcome, codegen, compile_at, transpile};
@@ -24,11 +24,11 @@ const TOPICS: &[(&str, &str, &str)] = &[
     ("oidc", "## OIDC", "validating bearer tokens from Keycloak, Entra ID, Auth0"),
     ("browser", "## Browser sign-in", "sign-in and sessions for Masud pages"),
     ("modules", "## Files and modules", "multi-file programs and `import`"),
-    ("crates", "## Crates", "using Rust crates and `parvez.toml`"),
+    ("crates", "## Crates", "using Rust crates and `limen.toml`"),
     ("generics", "## Generics, traits", "generics, traits, `dyn`, `priv`"),
     ("frontend", "## Embedded frontend", "serving a built frontend and exporting TypeScript types"),
     ("observability", "## Observability", "logs, metrics and health checks every service gets"),
-    ("cli", "## CLI", "every `parvez` command"),
+    ("cli", "## CLI", "every `limen` command"),
 ];
 
 /// SPEC.md split at `## ` headings: (heading line, whole section).
@@ -47,7 +47,7 @@ fn spec_sections() -> (&'static str, Vec<(&'static str, &'static str)>) {
     (preamble, sections)
 }
 
-/// `parvez_spec`: the core by default, one topic, or `all`.
+/// `limen_spec`: the core by default, one topic, or `all`.
 fn spec(topic: Option<&str>) -> Result<String, String> {
     let (preamble, sections) = spec_sections();
     match topic.map(str::trim).filter(|t| !t.is_empty()) {
@@ -66,7 +66,7 @@ fn spec(topic: Option<&str>) -> Result<String, String> {
                     out.push_str(body);
                 }
             }
-            out.push_str("\n## More topics (call parvez_spec with `topic`)\nWriting a web service? Fetch `http` and `security` first.\n");
+            out.push_str("\n## More topics (call limen_spec with `topic`)\nWriting a web service? Fetch `http` and `security` first.\n");
             for (name, _, what) in TOPICS {
                 out.push_str(&format!("- `{name}`: {what}\n"));
             }
@@ -114,11 +114,11 @@ pub fn handle(req: &Value) -> Option<Value> {
         "initialize" => Ok(json!({
             "protocolVersion": req["params"]["protocolVersion"].as_str().unwrap_or(PROTOCOL),
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "parvez", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Parvez (.prvz) is a token-dense language that compiles to Rust. \
-                Call parvez_spec to learn the core syntax (and parvez_spec with a topic, e.g. `http` or `security`, \
-                for the parts your program needs), write code, then loop on parvez_check \
-                until it returns ok. Errors point at .prvz lines."
+            "serverInfo": { "name": "limen", "version": env!("CARGO_PKG_VERSION") },
+            "instructions": "Limen (.lmn) is a token-dense language that compiles to Rust. \
+                Call limen_spec to learn the core syntax (and limen_spec with a topic, e.g. `http` or `security`, \
+                for the parts your program needs), write code, then loop on limen_check \
+                until it returns ok. Errors point at .lmn lines."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
@@ -135,25 +135,25 @@ pub fn handle(req: &Value) -> Option<Value> {
 
 fn tools() -> Value {
     let source = json!({
-        "code": { "type": "string", "description": "Full .prvz program source (needs `fn main` or `route`s)" },
-        "path": { "type": "string", "description": "Path to a .prvz file (alternative to `code`)" }
+        "code": { "type": "string", "description": "Full .lmn program source (needs `fn main` or `route`s)" },
+        "path": { "type": "string", "description": "Path to a .lmn file (alternative to `code`)" }
     });
     let mut eject_props = source.clone();
-    eject_props["map"] = json!({ "type": "boolean", "description": "Append `// @prvz:N` source-line comments" });
+    eject_props["map"] = json!({ "type": "boolean", "description": "Append `// @lmn:N` source-line comments" });
     json!([
         {
-            "name": "parvez_spec",
-            "description": "Returns the Parvez language spec. With no topic: the core language and an index of topics (http, security, tests, masud, oidc, browser, modules, crates, generics, frontend, observability, cli). With a topic: that section. `all`: the whole spec.",
+            "name": "limen_spec",
+            "description": "Returns the Limen language spec. With no topic: the core language and an index of topics (http, security, tests, masud, oidc, browser, modules, crates, generics, frontend, observability, cli). With a topic: that section. `all`: the whole spec.",
             "inputSchema": { "type": "object", "properties": { "topic": { "type": "string", "description": "a topic from the index, or `all`" } } }
         },
         {
-            "name": "parvez_check",
-            "description": "Type- and borrow-checks .prvz code with rustc (cargo check). Returns `ok` or errors mapped to .prvz lines, e.g. `snippet.prvz:6: error[E0308]: mismatched types`.",
+            "name": "limen_check",
+            "description": "Type- and borrow-checks .lmn code with rustc (cargo check). Returns `ok` or errors mapped to .lmn lines, e.g. `snippet.lmn:6: error[E0308]: mismatched types`.",
             "inputSchema": { "type": "object", "properties": source }
         },
         {
-            "name": "parvez_eject",
-            "description": "Returns the Rust code generated from .prvz code (plain Rust, no runtime).",
+            "name": "limen_eject",
+            "description": "Returns the Rust code generated from .lmn code (plain Rust, no runtime).",
             "inputSchema": { "type": "object", "properties": eject_props }
         }
     ])
@@ -163,15 +163,15 @@ fn text(t: impl Into<String>, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }], "isError": is_error })
 }
 
-/// Resolve the tool's `code` / `path` args to a .prvz file on disk plus the
+/// Resolve the tool's `code` / `path` args to a .lmn file on disk plus the
 /// name to show in messages. Inline code is written to the MCP cache dir.
 fn source_file(args: &Value) -> Result<(PathBuf, PathBuf, String), String> {
     if let Some(code) = args["code"].as_str() {
         let dir = cache_dir().join("mcp");
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        let file = dir.join("snippet.prvz");
+        let file = dir.join("snippet.lmn");
         std::fs::write(&file, code).map_err(|e| format!("writing {}: {e}", file.display()))?;
-        return Ok((file, dir, "snippet.prvz".into()));
+        return Ok((file, dir, "snippet.lmn".into()));
     }
     if let Some(p) = args["path"].as_str() {
         let file = PathBuf::from(p);
@@ -179,7 +179,7 @@ fn source_file(args: &Value) -> Result<(PathBuf, PathBuf, String), String> {
         std::fs::create_dir_all(&root).map_err(|e| format!("creating {}: {e}", root.display()))?;
         return Ok((file, root, p.to_string()));
     }
-    Err("pass `code` (program source) or `path` (a .prvz file)".into())
+    Err("pass `code` (program source) or `path` (a .lmn file)".into())
 }
 
 /// Messages mention the real file path; show the name the caller used.
@@ -193,11 +193,11 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
     match name {
-        "parvez_spec" => Ok(match spec(args["topic"].as_str()) {
+        "limen_spec" => Ok(match spec(args["topic"].as_str()) {
             Ok(t) => text(&t, false),
             Err(e) => text(&e, true),
         }),
-        "parvez_check" => {
+        "limen_check" => {
             let (file, root, shown) = match source_file(args) {
                 Ok(x) => x,
                 Err(e) => return Ok(text(e, true)),
@@ -205,7 +205,7 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
             // Checking compiles dependencies, and their build scripts run on this
             // machine: never fetch crates the caller merely named in a `use`.
             if let Ok((_, g)) = transpile(&file) {
-                let allowed: Vec<String> = std::env::var("PARVEZ_MCP_ALLOW_CRATES")
+                let allowed: Vec<String> = std::env::var("LIMEN_MCP_ALLOW_CRATES")
                     .unwrap_or_default()
                     .split(',')
                     .map(|c| c.trim().replace('-', "_"))
@@ -218,7 +218,7 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
                     return Ok(text(
                         format!(
                             "refused: unknown crate(s) {} would be downloaded and their build scripts run. \
-                             Use known crates, or allow these with PARVEZ_MCP_ALLOW_CRATES={}",
+                             Use known crates, or allow these with LIMEN_MCP_ALLOW_CRATES={}",
                             names.join(", "),
                             names.join(",")
                         ),
@@ -235,7 +235,7 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
                 Err(e) => text(rename(&format!("{e:#}"), &file, &shown), true),
             })
         }
-        "parvez_eject" => {
+        "limen_eject" => {
             let (file, _, shown) = match source_file(args) {
                 Ok(x) => x,
                 Err(e) => return Ok(text(e, true)),
@@ -257,11 +257,11 @@ mod tests {
     fn initialize_list_and_errors() {
         let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(r["result"]["serverInfo"]["name"], "parvez");
+        assert_eq!(r["result"]["serverInfo"]["name"], "limen");
         assert!(handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
         let r = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
         let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["parvez_spec", "parvez_check", "parvez_eject"]);
+        assert_eq!(names, ["limen_spec", "limen_check", "limen_eject"]);
         let r = handle(&json!({"jsonrpc":"2.0","id":3,"method":"nope"})).unwrap();
         assert_eq!(r["error"]["code"], -32601);
         let r = handle(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"zzz"}})).unwrap();
@@ -270,9 +270,9 @@ mod tests {
 
     #[test]
     fn spec_tool_returns_spec() {
-        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parvez_spec","arguments":{}}})).unwrap();
+        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"limen_spec","arguments":{}}})).unwrap();
         let t = r["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(t.starts_with("# PARVEZ"));
+        assert!(t.starts_with("# LIMEN"));
         assert_eq!(r["result"]["isError"], false);
         // the core leaves out topic chapters but lists them
         assert!(t.contains("## Statements") && !t.contains("## HTTP services") && t.contains("- `http`:"), "{t}");
@@ -292,17 +292,17 @@ mod tests {
         assert_eq!(core.len() - index_len + topics, SPEC.len());
         assert_eq!(spec(Some("all")).unwrap(), SPEC);
         assert!(spec(Some("nope")).unwrap_err().contains("topics: http"));
-        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parvez_spec","arguments":{"topic":"security"}}})).unwrap();
+        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"limen_spec","arguments":{"topic":"security"}}})).unwrap();
         assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with("## Security"));
     }
 
     #[test]
     fn eject_parse_error_uses_shown_name() {
-        let dir = std::env::temp_dir().join("parvez-mcp-unit");
-        unsafe { std::env::set_var("PARVEZ_CACHE_DIR", &dir) };
-        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parvez_eject","arguments":{"code":"fn main():\n    x = (1 +\n"}}})).unwrap();
+        let dir = std::env::temp_dir().join("limen-mcp-unit");
+        unsafe { std::env::set_var("LIMEN_CACHE_DIR", &dir) };
+        let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"limen_eject","arguments":{"code":"fn main():\n    x = (1 +\n"}}})).unwrap();
         let t = r["result"]["content"][0]["text"].as_str().unwrap();
         assert_eq!(r["result"]["isError"], true);
-        assert!(t.starts_with("snippet.prvz:2: unclosed"), "{t}");
+        assert!(t.starts_with("snippet.lmn:2: unclosed"), "{t}");
     }
 }

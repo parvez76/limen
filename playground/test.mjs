@@ -1,29 +1,29 @@
-// The playground must report exactly what `parvez lint` reports: run every
+// The playground must report exactly what `limen lint` reports: run every
 // single-file case of the adversarial corpus through the WebAssembly build and
 // compare with its `# expect:` / `# known-miss:` annotations. The deep-chain
 // cases double as the stack test (WebAssembly's stack is much smaller than the CLI's).
-//   node playground/test.mjs <parvez_playground.wasm>
+//   node playground/test.mjs <limen_playground.wasm>
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const wasmPath = process.argv[2] ?? join(here, "target/wasm32-unknown-unknown/release/parvez_playground.wasm");
+const wasmPath = process.argv[2] ?? join(here, "target/wasm32-unknown-unknown/release/limen_playground.wasm");
 const corpus = join(here, "..", "tests", "security_corpus");
 const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath));
 const pz = instance.exports;
 
 function check(src) {
   const bytes = new TextEncoder().encode(src);
-  const ptr = pz.pz_alloc(bytes.length);
+  const ptr = pz.lm_alloc(bytes.length);
   new Uint8Array(pz.memory.buffer, ptr, bytes.length).set(bytes);
-  const out = pz.pz_check(ptr, bytes.length);
-  pz.pz_free(ptr, bytes.length);
-  return JSON.parse(new TextDecoder().decode(new Uint8Array(pz.memory.buffer, out, pz.pz_result_len())));
+  const out = pz.lm_check(ptr, bytes.length);
+  pz.lm_free(ptr, bytes.length);
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(pz.memory.buffer, out, pz.lm_result_len())));
 }
 
 let failures = 0, files = 0, expected = 0;
-for (const file of readdirSync(corpus).filter((f) => f.endsWith(".prvz")).sort()) {
+for (const file of readdirSync(corpus).filter((f) => f.endsWith(".lmn")).sort()) {
   const src = readFileSync(join(corpus, file), "utf8");
   if (/^import /m.test(src)) continue; // multi-file cases need the CLI
   files++;

@@ -1,5 +1,5 @@
 # Publishes site/ (plus the installers, and the playground's compiler built from
-# this repository) to https://parvez76.github.io/parvez/ on every push to main.
+# this repository) to https://parvez76.github.io/limen/ on every push to main.
 name: pages
 on:
   push:
@@ -35,16 +35,16 @@ jobs:
       - name: Build the playground compiler
         run: cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
       - name: The playground must match the CLI on the adversarial corpus
-        run: node playground/test.mjs playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm
+        run: node playground/test.mjs playground/target/wasm32-unknown-unknown/release/limen_playground.wasm
       - name: Assemble
         run: |
           set -eu
           mkdir -p _site
           cp -r site/. _site/
-          cp playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm _site/play/parvez.wasm
+          cp playground/target/wasm32-unknown-unknown/release/limen_playground.wasm _site/play/limen.wasm
           mkdir -p _site/play/presets
           for c in flows sql secrets traits stores channels objects_db deep_chain state_chain known_miss; do
-            cp "tests/security_corpus/$c.prvz" _site/play/presets/
+            cp "tests/security_corpus/$c.lmn" _site/play/presets/
           done
           cp install.sh install.ps1 _site/
           (cd _site && sha256sum install.sh > install.sh.sha256 && sha256sum install.ps1 > install.ps1.sha256)

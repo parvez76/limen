@@ -1,4 +1,4 @@
-//! `parvez new <name>`: a project that builds, serves a page and passes its tests.
+//! `limen new <name>`: a project that builds, serves a page and passes its tests.
 use anyhow::{Result, bail};
 use std::path::Path;
 
@@ -16,8 +16,8 @@ pub fn new_project(parent: &Path, name: &str) -> Result<()> {
     }
     std::fs::create_dir_all(dir.join("ui"))?;
     let files: [(&str, String); 5] = [
-        ("parvez.toml", PARVEZ_TOML.to_string()),
-        ("main.prvz", MAIN.replace("__NAME__", name)),
+        ("limen.toml", LIMEN_TOML.to_string()),
+        ("main.lmn", MAIN.replace("__NAME__", name)),
         ("ui/home.msd", HOME.replace("__NAME__", name)),
         (".gitignore", GITIGNORE.to_string()),
         ("README.md", README.replace("__NAME__", name)),
@@ -25,26 +25,26 @@ pub fn new_project(parent: &Path, name: &str) -> Result<()> {
     for (path, body) in files {
         std::fs::write(dir.join(path), body)?;
     }
-    eprintln!("parvez: created {}/", dir.display());
+    eprintln!("limen: created {}/", dir.display());
     eprintln!("  cd {name}");
-    eprintln!("  parvez test main.prvz     # run the tests");
-    eprintln!("  parvez run main.prvz      # serve on :8080 (PORT=...)");
+    eprintln!("  limen test main.lmn     # run the tests");
+    eprintln!("  limen run main.lmn      # serve on :8080 (PORT=...)");
     Ok(())
 }
 
-const PARVEZ_TOML: &str = r#"# Pin or extend crates here; Parvez detects the rest from your code.
+const LIMEN_TOML: &str = r#"# Pin or extend crates here; Limen detects the rest from your code.
 # [dependencies]
 # chrono = "0.4"
 
 [security]
-# deny: known-vulnerable dependencies fail `parvez build` (warn | off to relax)
+# deny: known-vulnerable dependencies fail `limen build` (warn | off to relax)
 audit = "deny"
 "#;
 
-const MAIN: &str = r#"# __NAME__: a Parvez service.
-#   parvez test main.prvz    run the tests below
-#   parvez run main.prvz     serve on :8080
-#   parvez fmt               format every .prvz/.msd file
+const MAIN: &str = r#"# __NAME__: a Limen service.
+#   limen test main.lmn    run the tests below
+#   limen run main.lmn     serve on :8080
+#   limen fmt               format every .lmn/.msd file
 import ui.home
 
 @json
@@ -82,19 +82,19 @@ page GET "/" (query: HomeQuery) -> html:
         body:
             main:
                 h1 Hello, {who}!
-                p Edit ui/home.msd and main.prvz, then run parvez run main.prvz.
+                p Edit ui/home.msd and main.lmn, then run limen run main.lmn.
 "#;
 
-const GITIGNORE: &str = ".parvez_build/\n/main\n/main.exe\n/main-*\n*.sha256\n*.sbom.json\n.*.parvez-old*\n";
+const GITIGNORE: &str = ".limen_build/\n/main\n/main.exe\n/main-*\n*.sha256\n*.sbom.json\n.*.limen-old*\n";
 
 const README: &str = r#"# __NAME__
 
-A [Parvez](https://github.com/parvez76/parvez) service.
+A [Limen](https://github.com/parvez76/limen) service.
 
 ```bash
-parvez test main.prvz              # tests
-parvez run main.prvz               # http://localhost:8080
-parvez build main.prvz             # ./main + main.sha256
-parvez build main.prvz --target x86_64-unknown-linux-musl   # static ./main-x86_64-unknown-linux-musl
+limen test main.lmn              # tests
+limen run main.lmn               # http://localhost:8080
+limen build main.lmn             # ./main + main.sha256
+limen build main.lmn --target x86_64-unknown-linux-musl   # static ./main-x86_64-unknown-linux-musl
 ```
 "#;

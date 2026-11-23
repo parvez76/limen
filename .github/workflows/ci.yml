@@ -43,7 +43,7 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo build --release --locked --target wasm32-unknown-unknown --manifest-path playground/Cargo.toml
-          node playground/test.mjs playground/target/wasm32-unknown-unknown/release/parvez_playground.wasm
+          node playground/test.mjs playground/target/wasm32-unknown-unknown/release/limen_playground.wasm
 
   macos:
     runs-on: macos-latest
@@ -105,7 +105,7 @@ jobs:
           (cd "rel/$ver" && sha256sum *.tar.gz > SHA256SUMS)
           mkdir -p "bad/$ver" && cp rel/$ver/*.tar.gz "bad/$ver/"
           (cd "bad/$ver" && printf '%064d  %s\n' 0 *.tar.gz > SHA256SUMS)
-          echo "PARVEZ_TEST_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "LIMEN_TEST_VERSION=$ver" >> "$GITHUB_ENV"
       - name: install.ps1, doctor, new, test, upgrade on Windows
         shell: pwsh
         run: |
@@ -116,49 +116,49 @@ jobs:
           $good = Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','rel' -PassThru -WindowStyle Hidden
           $bad = Start-Process python -ArgumentList '-m','http.server','8766','--bind','127.0.0.1','--directory','bad' -PassThru -WindowStyle Hidden
           Start-Sleep 3
-          $env:PARVEZ_VERSION = $env:PARVEZ_TEST_VERSION
-          $env:PARVEZ_NO_MODIFY_PATH = '1'
+          $env:LIMEN_VERSION = $env:LIMEN_TEST_VERSION
+          $env:LIMEN_NO_MODIFY_PATH = '1'
 
           Stage 'servers started'
           # a tampered checksum installs nothing
-          $env:PARVEZ_DOWNLOAD_BASE = 'http://127.0.0.1:8766'
-          $env:PARVEZ_HOME = "$env:RUNNER_TEMP\pz-bad"
+          $env:LIMEN_DOWNLOAD_BASE = 'http://127.0.0.1:8766'
+          $env:LIMEN_HOME = "$env:RUNNER_TEMP\pz-bad"
           $refused = $false
           try { Get-Content install.ps1 -Raw | Invoke-Expression } catch { $refused = $_.Exception.Message -match 'checksum mismatch' }
-          if (-not $refused -or (Test-Path "$env:PARVEZ_HOME\bin\parvez.exe")) { throw 'a tampered download was installed' }
+          if (-not $refused -or (Test-Path "$env:LIMEN_HOME\bin\limen.exe")) { throw 'a tampered download was installed' }
 
           Stage 'tampered download refused'
           # with the GitHub CLI present, a build that wasn't attested by the release workflow
           # (like this CI build) is refused too
-          $env:PARVEZ_DOWNLOAD_BASE = 'http://127.0.0.1:8765'
-          $env:PARVEZ_HOME = "$env:RUNNER_TEMP\pz-unattested"
+          $env:LIMEN_DOWNLOAD_BASE = 'http://127.0.0.1:8765'
+          $env:LIMEN_HOME = "$env:RUNNER_TEMP\pz-unattested"
           $refused = $false
           try { Get-Content install.ps1 -Raw | Invoke-Expression } catch { $refused = $_.Exception.Message -match 'attestation .* did not verify' }
-          if (-not $refused -or (Test-Path "$env:PARVEZ_HOME\bin\parvez.exe")) { throw 'an unattested build was installed while gh was available' }
+          if (-not $refused -or (Test-Path "$env:LIMEN_HOME\bin\limen.exe")) { throw 'an unattested build was installed while gh was available' }
           Stage 'unattested build refused (gh present)'
 
           # the rest runs without gh, as on a machine without the GitHub CLI: checksums only
           $env:Path = ($env:Path -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'gh.exe')) }) -join ';'
           if (Get-Command gh -ErrorAction SilentlyContinue) { throw 'could not hide gh' }
-          $env:PARVEZ_HOME = "$env:RUNNER_TEMP\pz"
+          $env:LIMEN_HOME = "$env:RUNNER_TEMP\pz"
           Get-Content install.ps1 -Raw | Invoke-Expression
-          $pz = "$env:RUNNER_TEMP\pz\bin\parvez.exe"
+          $pz = "$env:RUNNER_TEMP\pz\bin\limen.exe"
           Stage 'installed'
           & $pz --version
           & $pz doctor
-          if ($LASTEXITCODE -ne 0) { throw 'parvez doctor failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'limen doctor failed' }
 
           Stage 'doctor ok'
           Set-Location $env:RUNNER_TEMP
           & $pz new hello
           Set-Location hello
-          & $pz test main.prvz
-          if ($LASTEXITCODE -ne 0) { throw 'parvez test failed' }
+          & $pz test main.lmn
+          if ($LASTEXITCODE -ne 0) { throw 'limen test failed' }
 
           Stage 'new + test ok'
-          # upgrade replaces the running parvez.exe (renamed aside, then swapped)
-          & $pz upgrade --version $env:PARVEZ_TEST_VERSION --force
-          if ($LASTEXITCODE -ne 0) { throw 'parvez upgrade failed' }
+          # upgrade replaces the running limen.exe (renamed aside, then swapped)
+          & $pz upgrade --version $env:LIMEN_TEST_VERSION --force
+          if ($LASTEXITCODE -ne 0) { throw 'limen upgrade failed' }
           & $pz --version
           Stage 'upgrade ok'
           Stop-Process -Id $good.Id, $bad.Id

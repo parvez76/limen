@@ -400,7 +400,7 @@ fn analyze(schema: &Schema, text: &str) -> Option<Analysis> {
     Some(a)
 }
 
-/// The Parvez types a SQL column type accepts.
+/// The Limen types a SQL column type accepts.
 fn fits(sql_ty: &str, ty: &Type) -> Option<bool> {
     let base = match ty {
         Type::Ref(t, _) => return fits(sql_ty, t),
@@ -502,11 +502,11 @@ fn unescape(s: &str) -> String {
     out
 }
 
-/// One literal query, for checking against a live database (`parvez check --db`).
+/// One literal query, for checking against a live database (`limen check --db`).
 pub struct Site {
     pub line: usize,
     pub sql: String,
-    /// the Parvez type of each bound value, where known
+    /// the Limen type of each bound value, where known
     binds: Vec<Option<Type>>,
     /// `query_as` row type: (struct name, fields)
     row: Option<(String, Vec<(String, Type)>)>,
@@ -795,7 +795,7 @@ pub fn check(prog: &Program, schema: &Schema) -> (Vec<(usize, String)>, Coverage
     (errors, cov)
 }
 
-/// Every literal query in the program, for `parvez check --db`.
+/// Every literal query in the program, for `limen check --db`.
 pub fn sites(prog: &Program) -> Vec<Site> {
     scan(prog, &Schema::default()).1
 }

@@ -5,7 +5,7 @@
 #  3. a second, independent build of the Linux binary must match byte for byte;
 #  4. each archive gets a GitHub build attestation (signed, keyless: "built from
 #     this commit by this workflow"), and the release lists SHA256SUMS.
-# Verify a download:  gh attestation verify <file> --repo parvez76/parvez
+# Verify a download:  gh attestation verify <file> --repo parvez76/limen
 name: release
 on:
   push:
@@ -91,14 +91,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-          path: elsewhere/parvez
+          path: elsewhere/limen
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - name: Rebuild
         shell: bash
-        working-directory: elsewhere/parvez
+        working-directory: elsewhere/limen
         run: .github/release-build.sh x86_64-unknown-linux-musl "$GITHUB_WORKSPACE/rebuild"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -134,12 +134,12 @@ jobs:
           cd dist
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Parvez $TAG" \
-            --notes "Prebuilt \`parvez\` binaries for $TAG. Parvez builds your programs with the Rust toolchain, so install it from https://rustup.rs first.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Limen $TAG" \
+            --notes "Prebuilt \`limen\` binaries for $TAG. Limen builds your programs with the Rust toolchain, so install it from https://rustup.rs first.
 
           Verify before use (see SECURITY.md, Verifying a release):
           \`\`\`
           sha256sum -c SHA256SUMS --ignore-missing
-          gh attestation verify parvez-$TAG-<target>.tar.gz --repo $GITHUB_REPOSITORY
+          gh attestation verify limen-$TAG-<target>.tar.gz --repo $GITHUB_REPOSITORY
           \`\`\`" \
             *.tar.gz SHA256SUMS

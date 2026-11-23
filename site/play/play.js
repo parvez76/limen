@@ -1,4 +1,4 @@
-// Parvez playground. No third-party code: the compiler is parvez.wasm (built from
+// Limen playground. No third-party code: the compiler is limen.wasm (built from
 // this repository's sources by the Pages workflow), the editor is a textarea.
 import { PRESETS } from "./presets.js";
 
@@ -9,22 +9,22 @@ const CORPUS = ["flows", "sql", "secrets", "traits", "stores", "channels", "obje
 // ---- the compiler ----------------------------------------------------------------
 let pz = null;
 async function load() {
-  const res = fetch("parvez.wasm");
+  const res = fetch("limen.wasm");
   const { instance } = WebAssembly.instantiateStreaming
-    ? await WebAssembly.instantiateStreaming(res).catch(async () => WebAssembly.instantiate(await (await fetch("parvez.wasm")).arrayBuffer()))
+    ? await WebAssembly.instantiateStreaming(res).catch(async () => WebAssembly.instantiate(await (await fetch("limen.wasm")).arrayBuffer()))
     : await WebAssembly.instantiate(await (await res).arrayBuffer());
   pz = instance.exports;
 }
 
 function check(code) {
   const bytes = new TextEncoder().encode(code);
-  const ptr = pz.pz_alloc(bytes.length);
+  const ptr = pz.lm_alloc(bytes.length);
   new Uint8Array(pz.memory.buffer, ptr, bytes.length).set(bytes);
   try {
-    const out = pz.pz_check(ptr, bytes.length);
-    return JSON.parse(new TextDecoder().decode(new Uint8Array(pz.memory.buffer, out, pz.pz_result_len())));
+    const out = pz.lm_check(ptr, bytes.length);
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(pz.memory.buffer, out, pz.lm_result_len())));
   } finally {
-    try { pz.pz_free(ptr, bytes.length); } catch { /* the instance may be gone after a trap */ }
+    try { pz.lm_free(ptr, bytes.length); } catch { /* the instance may be gone after a trap */ }
   }
 }
 
@@ -64,11 +64,11 @@ function render(r) {
       html += `<div class="f${f.waived ? " waived" : ""}"><div class="head"><span class="line" data-line="${f.line}">line ${f.line}</span> · <span class="rule">security[${esc(f.rule)}]</span>${f.waived ? ` · waived: ${esc(f.waived)}` : ""}</div>
         <p class="msg">${esc(f.message)}</p><p class="fix">fix: ${esc(f.fix)}</p>${f.see ? `<p class="see">see: ${esc(f.see)}</p>` : ""}</div>`;
     }
-    if (!r.findings.length) html += `<p class="note">Open the <strong>Rust</strong> tab to see what this compiles to. Type and borrow checks run when you build locally with <code>parvez check</code>.</p>`;
+    if (!r.findings.length) html += `<p class="note">Open the <strong>Rust</strong> tab to see what this compiles to. Type and borrow checks run when you build locally with <code>limen check</code>.</p>`;
   }
   findingsEl.innerHTML = html;
   rustEl.textContent = r.rust ?? (r.errors.length || r.findings.some((f) => !f.waived)
-    ? "// Parvez doesn't generate code for a program it refuses. Fix the findings first."
+    ? "// Limen doesn't generate code for a program it refuses. Fix the findings first."
     : "// A program needs `fn main()` or a `route` to generate code.");
   renderGutter(hits);
 }
@@ -83,7 +83,7 @@ function run() {
     statusEl.textContent = `checked in ${(performance.now() - t0).toFixed(0)} ms`;
   } catch (e) {
     statusEl.textContent = "";
-    findingsEl.innerHTML = `<p class="verdict bad">Internal compiler error</p><p>The compiler crashed on this input. That's a bug: please <a href="https://github.com/parvez76/parvez/issues/new">report it</a> with the code (the Share link has it).</p>`;
+    findingsEl.innerHTML = `<p class="verdict bad">Internal compiler error</p><p>The compiler crashed on this input. That's a bug: please <a href="https://github.com/parvez76/limen/issues/new">report it</a> with the code (the Share link has it).</p>`;
     load().catch(() => {}); // a trapped instance can't be reused
   }
 }
@@ -127,7 +127,7 @@ select.appendChild(group);
 async function loadPreset(value) {
   const [kind, id] = value.split(":");
   if (kind === "builtin") src.value = PRESETS.find((p) => p.id === id).src;
-  else src.value = await (await fetch(`presets/${id}.prvz`)).text();
+  else src.value = await (await fetch(`presets/${id}.lmn`)).text();
   history.replaceState(null, "", location.pathname);
   src.scrollTop = 0;
   run();

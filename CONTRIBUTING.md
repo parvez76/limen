@@ -1,28 +1,28 @@
-# Contributing to Parvez
+# Contributing to Limen
 
 Thanks for looking. The most valuable contribution is the simplest one:
 
 ## 1. Break a security check (the best report there is)
 
-Find a way to get request data into a file path or shell command, SQL built from strings, or a `Secret` into a log, without Parvez stopping it. Then:
+Find a way to get request data into a file path or shell command, SQL built from strings, or a `Secret` into a log, without Limen stopping it. Then:
 
-1. Reproduce it in the [playground](https://parvez76.github.io/parvez/play/) and press **Share** for a link, or write it as a small `.prvz` file.
-2. Open a [check bypass issue](https://github.com/parvez76/parvez/issues/new?template=check-bypass.yml), or a pull request that adds the case to [`tests/security_corpus/`](tests/security_corpus/) with a `# expect: rule` comment on the line that should be caught.
+1. Reproduce it in the [playground](https://parvez76.github.io/limen/play/) and press **Share** for a link, or write it as a small `.lmn` file.
+2. Open a [check bypass issue](https://github.com/parvez76/limen/issues/new?template=check-bypass.yml), or a pull request that adds the case to [`tests/security_corpus/`](tests/security_corpus/) with a `# expect: rule` comment on the line that should be caught.
 
 Every release must pass the corpus, so your case becomes a permanent guarantee. Bypasses are credited in the [changelog](docs/CHANGELOG.md).
 
-A false alarm (safe code that Parvez refuses) is just as useful: [report it](https://github.com/parvez76/parvez/issues/new?template=false-alarm.yml), or add it to `tests/security_corpus/safe.prvz`.
+A false alarm (safe code that Limen refuses) is just as useful: [report it](https://github.com/parvez76/limen/issues/new?template=false-alarm.yml), or add it to `tests/security_corpus/safe.lmn`.
 
-**A vulnerability in Parvez itself** (the compiler, the generated services, the installers, the release process) is different from a missed check: report it privately as described in [SECURITY.md](SECURITY.md).
+**A vulnerability in Limen itself** (the compiler, the generated services, the installers, the release process) is different from a missed check: report it privately as described in [SECURITY.md](SECURITY.md).
 
 ## 2. Build and test
 
 You need Rust (via [rustup](https://rustup.rs)) and a C linker.
 
 ```bash
-git clone https://github.com/parvez76/parvez && cd parvez
+git clone https://github.com/parvez76/limen && cd limen
 cargo test --release        # unit tests, then integration tests that compile real programs (a few minutes)
-cargo run --release -- lint tests/security_corpus/flows.prvz
+cargo run --release -- lint tests/security_corpus/flows.lmn
 ```
 
 The playground builds from the same sources:
@@ -33,7 +33,7 @@ cargo build --release --target wasm32-unknown-unknown --manifest-path playground
 node playground/test.mjs    # must report exactly what the CLI reports on the corpus
 ```
 
-Where things are: `src/lexer.rs` → `src/parser.rs` → `src/security.rs` (the checks) → `src/codegen.rs` (Rust generation); `src/main.rs` is the CLI. [docs/REFERENCE.md](docs/REFERENCE.md#working-on-parvez-itself) has the full layout.
+Where things are: `src/lexer.rs` → `src/parser.rs` → `src/security.rs` (the checks) → `src/codegen.rs` (Rust generation); `src/main.rs` is the CLI. [docs/REFERENCE.md](docs/REFERENCE.md#working-on-limen-itself) has the full layout.
 
 ## 3. Pull requests
 

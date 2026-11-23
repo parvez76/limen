@@ -1,6 +1,6 @@
-# PARVEZ v0.21.0 SPEC (AI system prompt)
+# LIMEN v0.22.0 SPEC (AI system prompt)
 
-You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
+You write Limen (`.lmn`). It transpiles 1:1 to Rust and is compiled by rustc, so Rust's type, ownership and borrow rules all apply. Syntax is Python-like and indentation-based. Write only the constructs listed here.
 
 ## Lexical
 - Indent with spaces only (tabs are an error). A block opens with `:` and either a NEWLINE plus an indented body or one statement on the same line: `if x: ret 1`.
@@ -14,10 +14,10 @@ You write Parvez (`.prvz`). It transpiles 1:1 to Rust and is compiled by rustc, 
 - `'a'`, `'\n'` and `'\u{1F600}'` are char literals. `\u{..}` escapes work inside interpolated strings.
 - `"""` starts a multi-line string, ideal for SQL and templates. Common indentation and the first and last blank lines are removed, `"` needs no escaping, and `{x}` still interpolates.
 - Keywords: `fn type enum impl match use async if elif else for in while ret break continue true false and or not` (`route`, `state`, `loop`, `spawn` and `move` act as keywords only in their positions, so they still work as names).
-- Keywords can be field names (`e.type`, `Event(type: "x")`, `type E: type: str`). Rust keywords such as `gen`, `move` and `loop` work as any name; Parvez escapes them (`r#gen`), and JSON still sees `"type"`.
+- Keywords can be field names (`e.type`, `Event(type: "x")`, `type E: type: str`). Rust keywords such as `gen`, `move` and `loop` work as any name; Limen escapes them (`r#gen`), and JSON still sees `"type"`.
 
 ## Files and modules
-`import store` loads `store.prvz`, and `import auth.tokens` loads `auth/tokens.prvz` (paths are relative to the main file). Refer to a module's items as `store::find(id)` or `store::Item`. Inside a module, its own names come first, then the main file's. An import can also resolve to a Masud `.msd` module. A module path must resolve to a single file. Modules may hold `const`, `fn`, `type`, `enum`, `impl`, `use`, `route` and `socket`; `state:` and `fn main` stay in the main file. Errors name the file: `auth/tokens.prvz:12: ...`.
+`import store` loads `store.lmn`, and `import auth.tokens` loads `auth/tokens.lmn` (paths are relative to the main file). Refer to a module's items as `store::find(id)` or `store::Item`. Inside a module, its own names come first, then the main file's. An import can also resolve to a Masud `.msd` module. A module path must resolve to a single file. Modules may hold `const`, `fn`, `type`, `enum`, `impl`, `use`, `route` and `socket`; `state:` and `fn main` stay in the main file. Errors name the file: `auth/tokens.lmn:12: ...`.
 
 ## Top level
 ```
@@ -42,7 +42,7 @@ async fn fetch(u: &str) -> str!:       # async; `async fn main` runs on tokio
 Every `type` and `enum` derives `Debug, Clone, PartialEq`. Decorators go on the line(s) above: `@json` adds serde `Serialize, Deserialize`; `@derive(Hash, Eq)` adds more derives.
 Field decorators on a `@json` type (block form, on the line above the field): `@rename("type")` sets the JSON name, `@default` makes a missing field take its default, and `@omit_none` leaves out a `T?` field that is `None`.
 
-Rust checks constant initializers at compile time. A `str` constant stores static string data. Parvez converts it to an owned string in typed value positions.
+Rust checks constant initializers at compile time. A `str` constant stores static string data. Limen converts it to an owned string in typed value positions.
 
 ```
 fn label(count: i32?) -> str:
@@ -54,19 +54,19 @@ fn label(count: i32?) -> str:
 An `if` expression evaluates one branch and requires an `else` and compatible branch types. Statement conditions support `if let PATTERN = expr`, including `Some(v)` and `Ok(v)`. Pattern variables are scoped to the matching branch.
 
 ## Crates
-`use serde::{Serialize, Deserialize}`, `use std::collections::HashMap`, `use reqwest` (declares the dependency only). Dependencies are detected from `use` lines and from known crate paths such as `reqwest::get(u)` or `tokio::time::sleep(d)`, and written into Cargo.toml automatically. Known crates: tokio axum serde serde_json reqwest chrono uuid regex rand tracing tracing_subscriber tower_http futures clap base64 sha2 hmac hex ed25519_dalek subtle jsonwebtoken redis thiserror sqlx (postgres + chrono/uuid/json/derive/migrate). Other crates resolve to the latest version. To pin a crate or add features, put them in `parvez.toml` next to the `.prvz` file:
+`use serde::{Serialize, Deserialize}`, `use std::collections::HashMap`, `use reqwest` (declares the dependency only). Dependencies are detected from `use` lines and from known crate paths such as `reqwest::get(u)` or `tokio::time::sleep(d)`, and written into Cargo.toml automatically. Known crates: tokio axum serde serde_json reqwest chrono uuid regex rand tracing tracing_subscriber tower_http futures clap base64 sha2 hmac hex ed25519_dalek subtle jsonwebtoken redis thiserror sqlx (postgres + chrono/uuid/json/derive/migrate). Other crates resolve to the latest version. To pin a crate or add features, put them in `limen.toml` next to the `.lmn` file:
 ```
 [dependencies]
 chrono = "=0.4.38"
 ```
 
 ## HTTP services (axum + tokio, generated)
-A file with `route`s needs no `fn main`: Parvez generates the server on `0.0.0.0:$PORT` (default 8080).
+A file with `route`s needs no `fn main`: Limen generates the server on `0.0.0.0:$PORT` (default 8080).
 
 **Access is denied by default.** Every `route`, `socket` and Masud `page` must say who may call it, or it doesn't compile:
 - `@guard(fn)`: the guard runs first and must succeed (sign-in, roles, ownership: see below);
 - `@public` or `@public("why anyone may call it")`: deliberately open (health checks, sign-up, public pages).
-Both on one endpoint is an error. `parvez routes app.prvz [--json]` prints the access map: every endpoint, its guards or public reason, and its file:line, plus the built-ins (`/healthz`, `/readyz`, `/metrics`, `/auth/*`).
+Both on one endpoint is an error. `limen routes app.lmn [--json]` prints the access map: every endpoint, its guards or public reason, and its file:line, plus the built-ins (`/healthz`, `/readyz`, `/metrics`, `/auth/*`).
 ```
 @json
 type Event: id: str, count: i32
@@ -99,7 +99,7 @@ route POST "/hb" (state, req, auth, body: Beat)!:  # auth = the last guard's ret
     status(204)
 ```
 - `req` methods: `header(name) -> str?`, `raw_body() -> &[u8]` (exact bytes, e.g. for signatures), `text_body() -> str`, `client_ip() -> str`, `method()`, `path()`, `query_string()`.
-- Set `PARVEZ_TRUST_PROXY=1` behind a reverse proxy so `client_ip()` uses `X-Real-IP` / `X-Forwarded-For`.
+- Set `LIMEN_TRUST_PROXY=1` behind a reverse proxy so `client_ip()` uses `X-Real-IP` / `X-Forwarded-For`.
 - A route with `req` still accepts `body: T`: it's parsed from the raw bytes, and invalid JSON gives 422. `@body_error(400, code: "bad_request", "invalid JSON body")` on a route sets that response instead.
 - `req.param("id")` reads a path parameter, so ownership/tenancy checks live in a reusable guard instead of every handler:
 ```
@@ -129,7 +129,7 @@ socket "/ws/{room}" (state, auth, room: str, conn):
 - On `conn`: `recv()`, `recv_json<T>()`, `send_text(s)`, `send_bytes(b)` and `send_json(&v)` (these wait for queue space), plus `sender()`, `protocol()` and `close(code, reason)`.
 - On `WsSender`: `text(s)`, `bytes(b)`, `send(&msg)` and `json(&v)` never block. If the client is slow (queue of 64 full) or gone, the frame is dropped and they return `false`. Also `close(code, reason)` and `same(&other)`.
 - On `WsMsg`: `is_text()`, `len()`, `text()`, `bytes()`.
-- Pings every 20 s (`PARVEZ_WS_PING_SECS`) are automatic. When the handler returns, the socket closes with 1000.
+- Pings every 20 s (`LIMEN_WS_PING_SECS`) are automatic. When the handler returns, the socket closes with 1000.
 - Every error is JSON `{"error": ...}`: a missing field is 422, broken JSON 400, wrong content-type 415, an unknown route 404, a wrong method 405.
 
 ### Shared state
@@ -165,7 +165,7 @@ every 1h (state):                        # `(state)` is optional
     deleted = sqlx::query("DELETE FROM events WHERE at < now() - interval '30 days'").execute(&state.db).await?
     log_info("cleanup", rows: deleted.rows_affected())
 ```
-The first run is one period after start. Runs never overlap; an error or panic is logged (`every 1h failed` in `/metrics`) and the next period runs again. Workers don't run under `parvez test` (call the logic as a function there).
+The first run is one period after start. Runs never overlap; an error or panic is logged (`every 1h failed` in `/metrics`) and the next period runs again. Workers don't run under `limen test` (call the logic as a function there).
 
 Run futures concurrently with `parallel`: `a, b = parallel(fetch_a(), fetch_b())` waits for all (`tokio::join!`); `a, b = parallel(x(), y())?` requires every result to be `Ok` and returns the first error otherwise (`tokio::try_join!`). Pass the futures without `.await`.
 
@@ -175,13 +175,13 @@ Place `@embed_dir("web/dist")` on its own line in the entry file. The directory 
 
 Explicit routes and pages take precedence. GET and HEAD serve assets with extension-based MIME types, directory indexes and extensionless HTML exports. Unmatched extensionless paths serve the root index for SPA navigation, but only to browser navigations (`Accept: text/html`). An API client calling a wrong path gets the JSON 404. Missing file-like paths return 404, and methods other than GET/HEAD on unmatched paths return 404 too.
 
-`parvez types --ts [entry.prvz] [--out types.ts]` follows transitive imports from `main.prvz` by default. It works before the frontend build exists. Without `--out` it writes to stdout. It exports each `@json` model, a corresponding `Input` type that accounts for serde defaults, and `Routes` indexed by method and path. For example, `Routes["POST /events/{id}"]["body"]` is the JSON request type. Path parameters live in `params`, query parameters in `query`, and the success payload in `response`. Unit enum variants become string literals and variants with payloads become externally tagged unions.
+`limen types --ts [entry.lmn] [--out types.ts]` follows transitive imports from `main.lmn` by default. It works before the frontend build exists. Without `--out` it writes to stdout. It exports each `@json` model, a corresponding `Input` type that accounts for serde defaults, and `Routes` indexed by method and path. For example, `Routes["POST /events/{id}"]["body"]` is the JSON request type. Path parameters live in `params`, query parameters in `query`, and the success payload in `response`. Unit enum variants become string literals and variants with payloads become externally tagged unions.
 
-`parvez types --openapi [entry.prvz] [--out api.json]` writes an OpenAPI 3.1 description instead: every route's path and query parameters, JSON request and response schemas (serde's wire format, as above), the success status set by `status(N)`, the shared `{"error", "code"}` error shape, a bearer-token security scheme for routes whose guard calls `oidc`/`oidc_session`, and each operation's guards or `@public` reason in `x-parvez-access`. WebSockets and the built-in endpoints aren't listed.
+`limen types --openapi [entry.lmn] [--out api.json]` writes an OpenAPI 3.1 description instead: every route's path and query parameters, JSON request and response schemas (serde's wire format, as above), the success status set by `status(N)`, the shared `{"error", "code"}` error shape, a bearer-token security scheme for routes whose guard calls `oidc`/`oidc_session`, and each operation's guards or `@public` reason in `x-limen-access`. WebSockets and the built-in endpoints aren't listed.
 
 ## Masud v0.1
 
-Import a page module with `import ui.dashboard`. In `ui/dashboard.msd`, import backend modules just as in Parvez. Page headers accept the route parameter syntax. The renderer supports local `let` bindings, Parvez expressions, and serializable values. Control lines work like Parvez blocks: `for item in &items:`, `if cond:`, `elif cond:` and `else:`, each with indented markup underneath. Interpolated values inside them are escaped the same way. Strings render as text, other values use their JSON representation.
+Import a page module with `import ui.dashboard`. In `ui/dashboard.msd`, import backend modules just as in Limen. Page headers accept the route parameter syntax. The renderer supports local `let` bindings, Limen expressions, and serializable values. Control lines work like Limen blocks: `for item in &items:`, `if cond:`, `elif cond:` and `else:`, each with indented markup underneath. Interpolated values inside them are escaped the same way. Strings render as text, other values use their JSON representation.
 
 ```
 import models
@@ -215,7 +215,7 @@ svg(viewBox="0 0 100 8" width="60" height="8"):
 - `canvas(id="chart" width="300" height="80" data-series="{json}")` for a chart drawn by an external script; `data-*` attributes (lower-case names) accept interpolation on any element.
 
 ## Types
-| Parvez | Rust |
+| Limen | Rust |
 |---|---|
 | `i8..i64 u8..u64 usize f32 f64 bool` | same |
 | `str` / `&str` | `String` / `&str` |
@@ -226,7 +226,7 @@ svg(viewBox="0 0 100 8" width="60" height="8"):
 | `fn(A, B) -> R` | `impl Fn(A, B) -> R` (fn params and returns) |
 | `Self`, `Name<A, B>`, `a::B` | same (passed through) |
 
-Reserved type names: a `type`, `enum` or `trait` can't be named after a Rust prelude item (`Result`, `Option`, `String`, `Vec`, `Box`, `Ok`, `Some`, `Clone`, `Iterator`, ...) or a Parvez runtime type (`AppError`, `Req`, `Secret`, `AppState`, ...): the generated code uses those names, so `parvez check` rejects them. Pick a domain name such as `LoginResult`.
+Reserved type names: a `type`, `enum` or `trait` can't be named after a Rust prelude item (`Result`, `Option`, `String`, `Vec`, `Box`, `Ok`, `Some`, `Clone`, `Iterator`, ...) or a Limen runtime type (`AppError`, `Req`, `Secret`, `AppState`, ...): the generated code uses those names, so `limen check` rejects them. Pick a domain name such as `LoginResult`.
 
 ## Generics, traits and visibility
 ```
@@ -253,7 +253,7 @@ state:
     repo: Arc<dyn Store> = Arc::new(Postgres(...))   # swap in a fake Store in tests
 ```
 - Use a trait either generically (`fn f<S: Store>(s: &S)`) or as `dyn Store` (`&dyn Store`, `Arc<dyn Store>`). Async trait methods are supported through `async-trait`.
-- `parvez types --ts` exports generic `@json` types as `export type Page<T> = {...}`.
+- `limen types --ts` exports generic `@json` types as `export type Page<T> = {...}`.
 - `priv fn helper()` / `priv type` / `priv enum` / `priv trait` / `priv const` (and `priv fn` inside `impl`) are visible only inside their own file; everything else in a module is public. Calling a `priv` item from another file is a compile error at that line.
 
 ## Statements
@@ -314,7 +314,7 @@ port = env("PORT").parse<i32>()? catch: 8080   # `?` and fail(..) inside the lef
 
 ## Strings
 - `"text {expr} {expr:?} {x:.2}"` interpolates any expression, with an optional Rust format spec after `:`. Write `{{` and `}}` for literal braces. A string literal can't appear inside `{...}`; assign it to a variable first.
-- A literal becomes `String` or `&str` to match the declared param, field, variant or return type. Don't add `.to_string()` for Parvez-declared types.
+- A literal becomes `String` or `&str` to match the declared param, field, variant or return type. Don't add `.to_string()` for Limen-declared types.
 - Calls into Rust/crate code have no declared types here, so a plain `"lit"` passes as `&str` (e.g. `sqlx::query("...")`, `Path::new("/x")`) and an interpolated `"..{x}.."` as `String`. `Some("x")`, `Ok(..)`, `Arc::new(..)` and similar constructors get an owned `String`. Write `.to_string()` when an API needs ownership, e.g. `map.insert("k".to_string(), v)`.
 - `print(a, b, ...)` prints its arguments separated by spaces (`println!`); `eprint(...)` does the same on stderr. `fail("msg {x}")` returns an error immediately (`anyhow::bail!`, only in `!` functions).
 
@@ -323,10 +323,10 @@ port = env("PORT").parse<i32>()? catch: 8080   # `?` and fail(..) inside the lef
 - Integer literals default to `i32`. Annotate when you need another type: `x: u64 = 5`.
 - A fallible call in a non-`!` fn needs explicit handling, e.g. `.unwrap_or(0)` or `.is_err()`.
 - `as` casts numbers (truncating like Rust); use `.try_into()?` when a value may not fit.
-- Not supported: Rust macros (`vec!` - use `[..]`; `json!` - use `json({..})`), lifetimes, `unsafe`. For those, run `parvez show f.prvz -o f.rs` and continue in Rust.
+- Not supported: Rust macros (`vec!` - use `[..]`; `json!` - use `json({..})`), lifetimes, `unsafe`. For those, run `limen show f.lmn -o f.rs` and continue in Rust.
 
 ## Security (enforced at compile time)
-Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `= fix: ...` and `= see: CWE-..., OWASP ..., ASVS ...`). Write the safe form from the start:
+Insecure patterns are compile errors (`file.lmn:N: security[rule]: ...` plus `= fix: ...` and `= see: CWE-..., OWASP ..., ASVS ...`). Write the safe form from the start:
 | rule | CWE | rejected | write instead |
 |---|---|---|---|
 | sql-injection | 89 | `query("... {x}")`, `query("..." + x)`, or a variable holding either | `sqlx::query("... WHERE id = $1").bind(x)` |
@@ -336,19 +336,19 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 | secret-type | 312, 316 | a `state:` field named like a secret (`token`, `password`, `api_key`, ...) typed `str` | `api_key: Secret = env_secret("API_KEY")?` |
 | secret-exposure | 532, 200 | `s.expose()` inside `print`, `log_*`, `fail`, `assert`, `json`, `metric_inc`, an interpolated string, or a page | pass `s.expose()` only to the API that needs it: `.bind(s.expose())`, an HMAC key, a header |
 - `safe_join(base, name)?` rejects `..`, absolute paths, separators and empty names: 400 in routes, an error elsewhere.
-- Request input is followed into the functions and methods it is passed to, across modules, helper chains and recursion. The finding is on the route's call line and names the sink: "request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.prvz:6 unsanitized". Sanitize at either end with `safe_join`. A helper that only ever receives constants isn't flagged. SQL and secret checks apply everywhere.
+- Request input is followed into the functions and methods it is passed to, across modules, helper chains and recursion. The finding is on the route's call line and names the sink: "request input passed to `files::load(..)` reaches `std::fs::read_to_string(..)` at lib/files.lmn:6 unsanitized". Sanitize at either end with `safe_join`. A helper that only ever receives constants isn't flagged. SQL and secret checks apply everywhere.
 - Parameters typed as numbers, `bool` or `char` aren't untrusted text: `/files/{id}` with `id: i64` can go into a path.
 - Method calls follow the receiver's type: a known type (`Disk(..)`, a typed parameter or `state:` field, `Disk::new(..)`) goes to its `impl`; a `dyn Trait`, `Arc<dyn Trait>` or generic `S: Trait` goes to every implementation. When the type isn't known locally, the call is followed only if exactly one `impl` defines that method name.
 - Types for method dispatch are also inferred from list elements (`[Disk(..)]`, `Vec<Box<dyn Store>>`, loops over them) and the declared return types of your functions and methods.
 - A method that stores its argument in its object (`self.path = p`, `self.items.push(p)`) makes the receiver hold request data: after `job.set_path(name)`, `job.path` is untrusted.
 - Database reads (`fetch_one`, `fetch_all`, `fetch_optional`, `query_as`/`query_scalar` results) are untrusted for file paths and commands (second-order injection): "data read from the database (an earlier request may have stored it) reaches ...". Declare numeric results with their type (`n: i64 = ...`), which is never treated as text.
-- Channels: request data sent on a `state:` sender (`Sender<T>`, `UnboundedSender<T>`, `SyncSender<T>`) taints reads from every `state:` receiver of the same element type, and `tx, rx = mpsc::channel()` links the two ends inside a function: "request input stored in `state.rx` (at app.prvz:13, sent through `state.tx`)".
-- Request data stored in a `state:` field (`*state.f.lock().unwrap() = x`, `state.f.lock().unwrap().push(x)`, a lock guard, or a helper that stores its argument) taints every later read of that field, in any route, `every` worker or function. The finding names where it was stored: "request input stored in `state.last` (at app.prvz:14) reaches ...".
-- SQL against the schema: when `schema.sql` (or `migrations/*.sql`, in name order) sits next to the main file, every query whose SQL is a literal is checked on every build: tables and columns exist, the number of `$n` placeholders equals the `.bind()` calls, bound values fit their columns' types, and a `query_as` row type has every field selected with a fitting type and `?` where the column can be NULL. Every query is found wherever it is (match arms, closures, `spawn`, tests, workers), and each build prints `SQL: N of M queries checked`; literal SQL the parser can't read is skipped with a warning naming its line. `parvez check --db` also asks the database at `DATABASE_URL` to describe each query (nothing is executed) and checks the same things against its answer.
-- Project rules in `parvez.toml`:
+- Channels: request data sent on a `state:` sender (`Sender<T>`, `UnboundedSender<T>`, `SyncSender<T>`) taints reads from every `state:` receiver of the same element type, and `tx, rx = mpsc::channel()` links the two ends inside a function: "request input stored in `state.rx` (at app.lmn:13, sent through `state.tx`)".
+- Request data stored in a `state:` field (`*state.f.lock().unwrap() = x`, `state.f.lock().unwrap().push(x)`, a lock guard, or a helper that stores its argument) taints every later read of that field, in any route, `every` worker or function. The finding names where it was stored: "request input stored in `state.last` (at app.lmn:14) reaches ...".
+- SQL against the schema: when `schema.sql` (or `migrations/*.sql`, in name order) sits next to the main file, every query whose SQL is a literal is checked on every build: tables and columns exist, the number of `$n` placeholders equals the `.bind()` calls, bound values fit their columns' types, and a `query_as` row type has every field selected with a fitting type and `?` where the column can be NULL. Every query is found wherever it is (match arms, closures, `spawn`, tests, workers), and each build prints `SQL: N of M queries checked`; literal SQL the parser can't read is skipped with a warning naming its line. `limen check --db` also asks the database at `DATABASE_URL` to describe each query (nothing is executed) and checks the same things against its answer.
+- Project rules in `limen.toml`:
   ```toml
   [security]
-  disallow = [{ call = "std::env::set_var", reason = "configuration comes from parvez.toml" }]  # also ".method"
+  disallow = [{ call = "std::env::set_var", reason = "configuration comes from limen.toml" }]  # also ".method"
   licenses = ["MIT", "Apache-2.0"]   # every compiled crate's license must be allowed (checked on build)
   ban = ["openssl"]                  # crates that must not be compiled in
   [security.sinks]                   # third-party calls treated like std::fs / Command / SQL calls
@@ -360,14 +360,14 @@ Insecure patterns are compile errors (`file.prvz:N: security[rule]: ...` plus `=
 
 Services are hardened automatically (nothing to write):
 - An unexpected error or panic returns 500 `{"error":"internal server error"}`. Details go to stderr only, and the server keeps running.
-- Limits: body 2 MB (413), timeout 30 s (503), max 512 concurrent requests (then queue, then 503). Change the defaults in `parvez.toml` with `[service] body_limit_bytes`, `timeout_secs` and `max_concurrency`, or at runtime with `PARVEZ_BODY_LIMIT_BYTES`, `PARVEZ_TIMEOUT_SECS` and `PARVEZ_MAX_CONCURRENCY`.
+- Limits: body 2 MB (413), timeout 30 s (503), max 512 concurrent requests (then queue, then 503). Change the defaults in `limen.toml` with `[service] body_limit_bytes`, `timeout_secs` and `max_concurrency`, or at runtime with `LIMEN_BODY_LIMIT_BYTES`, `LIMEN_TIMEOUT_SECS` and `LIMEN_MAX_CONCURRENCY`.
 - Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and `Strict-Transport-Security: max-age=31536000`.
 - HTML responses (pages, embedded `.html` files) carry `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self' <identity provider>; frame-ancestors 'none'`. Put scripts in files under `@embed_dir` (e.g. `/assets/app.js`), not inline `<script>` blocks or `onclick=` attributes. htmx works as is. Other responses get `default-src 'none'; frame-ancestors 'none'`.
-- `PARVEZ_CSP` replaces the page policy and `PARVEZ_HSTS` the HSTS value (e.g. `max-age=63072000; includeSubDomains; preload`); `off` drops the header. An invalid value is reported at startup and the default is kept.
+- `LIMEN_CSP` replaces the page policy and `LIMEN_HSTS` the HSTS value (e.g. `max-age=63072000; includeSubDomains; preload`); `off` drops the header. An invalid value is reported at startup and the default is kept.
 - SIGINT and SIGTERM trigger a graceful shutdown: in-flight requests finish, then the process exits 0.
 
-Supply chain (on `parvez build` and `parvez run`):
-- The crates actually compiled into the binary are checked against the RustSec advisory DB (cached, refreshed daily). Optional dependencies of disabled features are ignored. A known vulnerability fails the build. Set `PARVEZ_AUDIT=warn|off` or `[security] audit` in parvez.toml to relax this.
+Supply chain (on `limen build` and `limen run`):
+- The crates actually compiled into the binary are checked against the RustSec advisory DB (cached, refreshed daily). Optional dependencies of disabled features are ignored. A known vulnerability fails the build. Set `LIMEN_AUDIT=warn|off` or `[security] audit` in limen.toml to relax this.
 - `<name>.sbom.json` (CycloneDX 1.5: every compiled crate with its version, license and purl) is written next to the binary.
 
 
@@ -393,7 +393,7 @@ fn admin(state, req) -> str!:
 - The memory is zeroed when the value is dropped (the `zeroize` crate). `Secret<Vec<u8>>` holds binary keys.
 - Limits: copies you make from `s.expose()` (a `.to_string()`, a formatted header) are ordinary values and aren't wiped, so pass `s.expose()` straight to the API that needs it. Memory freed when a value grew (a `String` that reallocated before it became a Secret) isn't wiped either; load secrets with `env_secret` or `secret(..)` so they're wrapped once. Constant time is best effort, as in every language: the compiler and CPU give no hard guarantee.
 ## Tests
-Put `test "what it checks":` blocks in any file. They compile only for `parvez test` and may use `.await` and `?`.
+Put `test "what it checks":` blocks in any file. They compile only for `limen test` and may use `.await` and `?`.
 ```
 test "orders need an api key":
     app = test_app().await?                       # the whole service in-process (state, guards, middleware), no port
@@ -403,21 +403,21 @@ test "orders need an api key":
     r: Receipt = res.json()?
     assert(res.header("x-request-id").is_some(), "every response has a request id")
 ```
-- `assert(cond)` and `assert(cond, "msg {x}")` fail with `file.prvz:LINE: ...`, as does `assert_eq(a, b)`.
+- `assert(cond)` and `assert(cond, "msg {x}")` fail with `file.lmn:LINE: ...`, as does `assert_eq(a, b)`.
 - A response has `.status`, `.text()`, `.json<T>()` and `.header(name)`. Besides `get` and `post`, `app.request(method, path)` takes `.header(k, v)`, `.json(&v)` and `.body(b)`, then `.send()`.
-- `parvez test f.prvz [name-filter]` runs every test in the program, including imported modules, and exits non-zero on failure. Failures point at `.prvz` lines (`panicked at tests.prvz:42:`).
-- **Test-only code:** `@test_only` before a `fn`, `type`, `enum`, `impl`, `trait`, `const` or `use` (or `@test_only import testkit` for a whole module of helpers, fakes and fixtures) compiles it only for `parvez test` and `parvez check`. `parvez build` strips it, crates it alone uses become `[dev-dependencies]`, and it isn't security-linted as production code (fixture keys are fine). A guard, route or `every` worker can't be test-only.
+- `limen test f.lmn [name-filter]` runs every test in the program, including imported modules, and exits non-zero on failure. Failures point at `.lmn` lines (`panicked at tests.lmn:42:`).
+- **Test-only code:** `@test_only` before a `fn`, `type`, `enum`, `impl`, `trait`, `const` or `use` (or `@test_only import testkit` for a whole module of helpers, fakes and fixtures) compiles it only for `limen test` and `limen check`. `limen build` strips it, crates it alone uses become `[dev-dependencies]`, and it isn't security-linted as production code (fixture keys are fine). A guard, route or `every` worker can't be test-only.
 
 ## Observability (every service, automatic)
 - **Request id:** a valid incoming `x-request-id` is propagated; otherwise one is generated. It's returned on every response and attached to every log line.
-- **Logs:** JSON lines on stderr, including an access log (method, path, route template, status, duration_ms, request_id), errors and panics. Health checks aren't logged, and `PARVEZ_LOG=off` silences logging. Add your own with `log_info("order placed", user: id, qty: n)`, `log_warn(..)` or `log_error(..)`; these also work in CLI programs.
+- **Logs:** JSON lines on stderr, including an access log (method, path, route template, status, duration_ms, request_id), errors and panics. Health checks aren't logged, and `LIMEN_LOG=off` silences logging. Add your own with `log_info("order placed", user: id, qty: n)`, `log_warn(..)` or `log_error(..)`; these also work in CLI programs.
 - **Metrics:** `GET /metrics` serves Prometheus text:
-  - `parvez_http_requests_total{method,route,status}`, labelled by route **template**, with unknown paths as `unmatched`
-  - the histogram `parvez_http_request_duration_seconds`
-  - `parvez_http_requests_in_flight`
-  - `parvez_events_total{event}` from `metric_inc("name")`
+  - `limen_http_requests_total{method,route,status}`, labelled by route **template**, with unknown paths as `unmatched`
+  - the histogram `limen_http_request_duration_seconds`
+  - `limen_http_requests_in_flight`
+  - `limen_events_total{event}` from `metric_inc("name")`
 
-  Set `PARVEZ_METRICS_TOKEN` to require `Authorization: Bearer <token>`.
+  Set `LIMEN_METRICS_TOKEN` to require `Authorization: Bearer <token>`.
 - **Health:** `GET /healthz` returns `ok`, and `GET /readyz` returns `{"status":"ready"}` once `state:` is initialized. A route of your own with the same path replaces the built-in one.
 
 ## OIDC sign-in (Keycloak, Entra ID, Auth0...)
@@ -431,11 +431,11 @@ route GET "/admin/devices" (auth) -> str:
     ret auth.email.clone()
 ```
 - **Configuration:**
-  - `PARVEZ_OIDC_ISSUER`: the issuer URL. It must be `https://`, except localhost for development.
-  - `PARVEZ_OIDC_AUDIENCE`: the expected `aud`. **Required:** when it's unset every request fails closed with 401, because another client's token from the same realm would otherwise pass.
-  - `PARVEZ_OIDC_JWKS_URL`: optional; by default it's taken from discovery.
+  - `LIMEN_OIDC_ISSUER`: the issuer URL. It must be `https://`, except localhost for development.
+  - `LIMEN_OIDC_AUDIENCE`: the expected `aud`. **Required:** when it's unset every request fails closed with 401, because another client's token from the same realm would otherwise pass.
+  - `LIMEN_OIDC_JWKS_URL`: optional; by default it's taken from discovery.
 - **Checks:** the signature, using asymmetric algorithms only (`none` and HMAC are rejected), plus issuer, audience, `exp` and `nbf` with 60 s leeway, a non-empty `sub`, and `typ`: when `typ` is present it must be `Bearer`, so Keycloak ID and refresh tokens (same signing key) are rejected. Signing keys are cached for 10 minutes, and an unknown key ID triggers one refetch to handle key rotation. Any failure returns 401 `{"code":"unauthenticated"}`.
-- `PARVEZ_OIDC_LEEWAY_SECS` (default 60) is the allowed clock skew. If the signing keys can't be fetched and none are cached, the answer is 503 `idp_unavailable` (an outage, not a bad token).
+- `LIMEN_OIDC_LEEWAY_SECS` (default 60) is the allowed clock skew. If the signing keys can't be fetched and none are cached, the answer is 503 `idp_unavailable` (an outage, not a bad token).
 - **`Claims`:** `sub`, `email`, `name`, `username` and `roles` (merged from `realm_access.roles`, `resource_access.<audience>.roles` (only this API's own client) and `roles`). `email` falls back to `preferred_username`, and `name` falls back to `email`, plus `has_role(r)`, `claim(name)` and `raw`.
 
 ## Browser sign-in (Masud pages)
@@ -454,44 +454,44 @@ page GET "/dash" (auth) -> html:
         button(type="submit") Sign out
 ```
 - Using `oidc_session` adds `GET /auth/login?next=/path`, `GET /auth/callback` and `POST /auth/logout`. Sign-in is the authorization code flow with PKCE (S256), a random `state`, and an encrypted 10-minute login cookie; `next` only accepts local paths.
-- The session (access + refresh token) is an AES-256-GCM encrypted cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, plus `Secure` and the `__Host-` prefix on https. Large sessions are split over several cookies. An expired access token is refreshed transparently; the session ends after `PARVEZ_SESSION_MAX_AGE_SECS` (default 8 h) or when refresh fails.
+- The session (access + refresh token) is an AES-256-GCM encrypted cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, plus `Secure` and the `__Host-` prefix on https. Large sessions are split over several cookies. An expired access token is refreshed transparently; the session ends after `LIMEN_SESSION_MAX_AGE_SECS` (default 8 h) or when refresh fails.
 - Not signed in: a browser navigation is redirected to `/auth/login`, an htmx request gets `HX-Redirect`, an API client gets 401 `{"code":"unauthenticated"}`.
 - CSRF: a cookie-authenticated request other than GET/HEAD must carry this site's `Origin` (or `Sec-Fetch-Site: same-origin`), otherwise 403 `csrf`.
-- Logout clears the cookies and redirects to the IdP's `end_session_endpoint` (register `PARVEZ_PUBLIC_URL/` as a post-logout redirect URI).
+- Logout clears the cookies and redirects to the IdP's `end_session_endpoint` (register `LIMEN_PUBLIC_URL/` as a post-logout redirect URI).
 - **Revocation:**
-  - `POST /auth/backchannel-logout` implements OIDC Back-Channel Logout. Set the client's back-channel logout URL to `PARVEZ_PUBLIC_URL/auth/backchannel-logout` (Keycloak: "Backchannel logout URL", session required). A verified logout token (signature, issuer, `aud` = the client id, logout event, no `nonce`, recent `iat`) ends that session at once; a token with only `sub` ends all of the user's sessions. Bearer tokens of a revoked session or user (issued before the logout) are refused too. The revocation list lives in memory, per instance.
-  - Every `PARVEZ_SESSION_RECHECK_SECS` (default 60) a browser session is re-confirmed with the IdP through a refresh, even while its access token is valid. A disabled or deleted user, or an ended IdP session, is therefore signed out within that interval on every instance, with or without back-channel calls.
+  - `POST /auth/backchannel-logout` implements OIDC Back-Channel Logout. Set the client's back-channel logout URL to `LIMEN_PUBLIC_URL/auth/backchannel-logout` (Keycloak: "Backchannel logout URL", session required). A verified logout token (signature, issuer, `aud` = the client id, logout event, no `nonce`, recent `iat`) ends that session at once; a token with only `sub` ends all of the user's sessions. Bearer tokens of a revoked session or user (issued before the logout) are refused too. The revocation list lives in memory, per instance.
+  - Every `LIMEN_SESSION_RECHECK_SECS` (default 60) a browser session is re-confirmed with the IdP through a refresh, even while its access token is valid. A disabled or deleted user, or an ended IdP session, is therefore signed out within that interval on every instance, with or without back-channel calls.
   - Bearer tokens without a back-channel logout stay valid until they expire (as with any locally validated JWT); keep access-token lifetimes short.
 - CSRF: `Origin: null` (sent by browsers for form posts under `Referrer-Policy: no-referrer`) defers to `Sec-Fetch-Site: same-origin`.
-- Environment: `PARVEZ_OIDC_CLIENT_ID` (the browser client, e.g. `my-dashboard`), `PARVEZ_OIDC_CLIENT_SECRET` (confidential clients), `PARVEZ_PUBLIC_URL` (what users open; https, or http://localhost for development; the redirect URI is `PARVEZ_PUBLIC_URL/auth/callback`), `PARVEZ_SESSION_KEY` (64 hex characters: `openssl rand -hex 32`), plus the `PARVEZ_OIDC_*` settings above. Without them nobody can sign in, and the `/auth` routes log why.
+- Environment: `LIMEN_OIDC_CLIENT_ID` (the browser client, e.g. `my-dashboard`), `LIMEN_OIDC_CLIENT_SECRET` (confidential clients), `LIMEN_PUBLIC_URL` (what users open; https, or http://localhost for development; the redirect URI is `LIMEN_PUBLIC_URL/auth/callback`), `LIMEN_SESSION_KEY` (64 hex characters: `openssl rand -hex 32`), plus the `LIMEN_OIDC_*` settings above. Without them nobody can sign in, and the `/auth` routes log why.
 - Every service with Masud pages answers failing browser navigations with a small HTML error page instead of JSON.
 
 ## Errors (fix loop)
-Syntax and rustc errors both point at `.prvz` lines:
+Syntax and rustc errors both point at `.lmn` lines:
 ```
-app.prvz:6: error[E0308]: mismatched types
+app.lmn:6: error[E0308]: mismatched types
    6 |     ret raw.len()
      = expected `i32`, found `usize`
      = rust: raw.len()
 ```
-`= rust:` shows the generated Rust line. Fix the `.prvz` line it names. `parvez show --map f.prvz` prints the Rust with `// @prvz:N` comments.
+`= rust:` shows the generated Rust line. Fix the `.lmn` line it names. `limen show --map f.lmn` prints the Rust with `// @lmn:N` comments.
 
 ## CLI
-- `parvez test f.prvz [filter]`: runs the `test` blocks.
-- `parvez doctor`: checks the setup (Rust 1.88+, cargo, a C linker or, on Windows, the Visual Studio C++ build tools, git, the advisory database, cross targets, PATH) and prints the fix for anything missing; exits 1 if building can't work.
-- `parvez upgrade [--version vX.Y.Z] [--check] [--force]`: replaces parvez with a newer release after checking it against the release's SHA256SUMS (and its build attestation when `gh` is installed). A cargo-installed parvez is told to update with cargo instead.
-- `parvez lint f.prvz [--sarif [-o out.sarif]]`: the security rules only, no build. Exits 1 on findings. `--sarif` writes SARIF 2.1.0 for GitHub code scanning and similar tools (CWE tags, severity, `@allow_insecure` waivers as suppressed results). `parvez lint --rules` lists the rules with their CWE / OWASP / ASVS references.
-- `parvez routes f.prvz [--json]`: the access map for security review (every endpoint with its guards or `@public` reason).
-- `parvez check f.prvz`: fast type and borrow check with mapped errors and no binary, including `test` blocks and `@test_only` code. Use it in edit loops.
-- `parvez run f.prvz [-- args]`: builds and executes.
-- `parvez build f.prvz [--target <triple>]`: produces `./f`, a release binary, and `./f.sha256` (`sha256sum -c f.sha256` verifies it). `--target x86_64-unknown-linux-musl` builds a static Linux binary, `--target aarch64-unknown-linux-gnu` an ARM one; the output is `./f-<triple>`. A missing target says which `rustup target add` to run; another CPU architecture needs its cross linker (or `cargo-zigbuild`, which Parvez uses automatically when installed).
-- `parvez new <name>`: creates `<name>/` with `parvez.toml`, `main.prvz` (a route and two tests), `ui/home.msd`, `.gitignore` and a README. `parvez test main.prvz` passes immediately.
-- `parvez fmt [paths...]`: formats `.prvz` and `.msd` files in place (directories recursively): 4-space indentation, canonical spacing, one blank line between top-level items, comments kept. Each change is verified to leave the program identical. `--check` lists files that would change and exits 1 (for CI).
-- `parvez show f.prvz [-o f.rs] [--map]`: prints or writes the Rust.
-- `parvez heal f.prvz`: updates dependencies to the newest compatible versions, then re-scans and re-checks. It reports advisories that need a major upgrade (pin those in parvez.toml).
-- `parvez fuzz f.prvz`: builds and starts the service, then sends type-aware malformed and edge-case requests (bad types, boundary numbers, 100 KB strings, traversal and SQL payloads, 3 MB and 50k-deep bodies, wrong methods) to every route. It fails on a crash, a hang, or a leak of internals (panic text, `.rs:` paths, OS errors).
+- `limen test f.lmn [filter]`: runs the `test` blocks.
+- `limen doctor`: checks the setup (Rust 1.88+, cargo, a C linker or, on Windows, the Visual Studio C++ build tools, git, the advisory database, cross targets, PATH) and prints the fix for anything missing; exits 1 if building can't work.
+- `limen upgrade [--version vX.Y.Z] [--check] [--force]`: replaces limen with a newer release after checking it against the release's SHA256SUMS (and its build attestation when `gh` is installed). A cargo-installed limen is told to update with cargo instead.
+- `limen lint f.lmn [--sarif [-o out.sarif]]`: the security rules only, no build. Exits 1 on findings. `--sarif` writes SARIF 2.1.0 for GitHub code scanning and similar tools (CWE tags, severity, `@allow_insecure` waivers as suppressed results). `limen lint --rules` lists the rules with their CWE / OWASP / ASVS references.
+- `limen routes f.lmn [--json]`: the access map for security review (every endpoint with its guards or `@public` reason).
+- `limen check f.lmn`: fast type and borrow check with mapped errors and no binary, including `test` blocks and `@test_only` code. Use it in edit loops.
+- `limen run f.lmn [-- args]`: builds and executes.
+- `limen build f.lmn [--target <triple>]`: produces `./f`, a release binary, and `./f.sha256` (`sha256sum -c f.sha256` verifies it). `--target x86_64-unknown-linux-musl` builds a static Linux binary, `--target aarch64-unknown-linux-gnu` an ARM one; the output is `./f-<triple>`. A missing target says which `rustup target add` to run; another CPU architecture needs its cross linker (or `cargo-zigbuild`, which Limen uses automatically when installed).
+- `limen new <name>`: creates `<name>/` with `limen.toml`, `main.lmn` (a route and two tests), `ui/home.msd`, `.gitignore` and a README. `limen test main.lmn` passes immediately.
+- `limen fmt [paths...]`: formats `.lmn` and `.msd` files in place (directories recursively): 4-space indentation, canonical spacing, one blank line between top-level items, comments kept. Each change is verified to leave the program identical. `--check` lists files that would change and exits 1 (for CI).
+- `limen show f.lmn [-o f.rs] [--map]`: prints or writes the Rust.
+- `limen heal f.lmn`: updates dependencies to the newest compatible versions, then re-scans and re-checks. It reports advisories that need a major upgrade (pin those in limen.toml).
+- `limen fuzz f.lmn`: builds and starts the service, then sends type-aware malformed and edge-case requests (bad types, boundary numbers, 100 KB strings, traversal and SQL payloads, 3 MB and 50k-deep bodies, wrong methods) to every route. It fails on a crash, a hang, or a leak of internals (panic text, `.rs:` paths, OS errors).
   - It reports per-route **coverage**: how many requests got past validation and guards into the handler.
   - To reach handlers, put `fuzz.toml` next to the file. `[params]` gives path or query values (e.g. a real UUID), `[body]` sets JSON body fields, and `[headers]` is sent with every request. `[sign] command = ["python3", "sign.py"]` signs each request: it gets `FUZZ_METHOD`, `FUZZ_PATH` and `FUZZ_QUERY` in env and the body on stdin, and prints `Header: value` lines. Each route also gets one `no-auth` request. A route that decodes its own body with `json_decode<T>(&req.text_body())` is fuzzed with `T`-shaped bodies.
 - Compiler limits: nesting deeper than 256 levels, or more than 2000 operators in one expression, is a clean error.
-- `parvez mcp`: an MCP server on stdio. Each request is isolated (a compiler bug returns an error). `parvez_check` **refuses unknown crates** because their build scripts would run; allow specific ones with `PARVEZ_MCP_ALLOW_CRATES=a,b`.
-- `parvez mcp` tools: `parvez_spec`, `parvez_check` (code or path in, mapped errors or `ok` out) and `parvez_eject`. Register it with `claude mcp add parvez -- parvez mcp`.
+- `limen mcp`: an MCP server on stdio. Each request is isolated (a compiler bug returns an error). `limen_check` **refuses unknown crates** because their build scripts would run; allow specific ones with `LIMEN_MCP_ALLOW_CRATES=a,b`.
+- `limen mcp` tools: `limen_spec`, `limen_check` (code or path in, mapped errors or `ok` out) and `limen_eject`. Register it with `claude mcp add limen -- limen mcp`.

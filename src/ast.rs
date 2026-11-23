@@ -1,4 +1,4 @@
-//! Parvez abstract syntax tree.
+//! Limen abstract syntax tree.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -29,7 +29,7 @@ impl Program {
         imports.into_iter().filter(|(_, t)| *t).map(|(p, _)| p).collect()
     }
 
-    /// Items that exist only in `parvez test` builds: `test` blocks, `@test_only`
+    /// Items that exist only in `limen test` builds: `test` blocks, `@test_only`
     /// items and everything in a test-only module.
     pub fn is_test_scope(&self, module: &[String], item: &Item, test_mods: &std::collections::BTreeSet<Vec<String>>) -> bool {
         let flagged = match item {
@@ -102,7 +102,7 @@ pub enum Item {
     Route(RouteDef),
     State(StateDef),
     Import(ImportDef),
-    /// `test "name":` block (compiled only for `parvez test`)
+    /// `test "name":` block (compiled only for `limen test`)
     Test(TestDef),
     /// `trait Name:` with method signatures and optional default bodies
     Trait(TraitDef),
@@ -110,7 +110,7 @@ pub enum Item {
     Every(EveryDef),
 }
 
-/// `priv` (module-private) and `@test_only` (built only for `parvez test` / `check`).
+/// `priv` (module-private) and `@test_only` (built only for `limen test` / `check`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Flags {
     pub private: bool,
@@ -343,7 +343,7 @@ pub enum Type {
 
 pub type Block = Vec<Located>;
 
-/// A statement plus the `.prvz` line it starts on (drives the source map).
+/// A statement plus the `.lmn` line it starts on (drives the source map).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Located {
     pub line: usize,

@@ -1,4 +1,4 @@
-//! `parvez fuzz`: builds the service, starts it, and fires edge-case and
+//! `limen fuzz`: builds the service, starts it, and fires edge-case and
 //! malformed requests at every route, derived from the route's declared
 //! types. A run fails if the server crashes, hangs, drops a connection, or
 //! leaks internals (panic text, source paths, OS errors) in a response.
@@ -45,7 +45,7 @@ pub struct Case {
     pub unauthenticated: bool,
 }
 
-/// `fuzz.toml` beside the .prvz file: realistic values so requests get past
+/// `fuzz.toml` beside the .lmn file: realistic values so requests get past
 /// validation and auth into the handlers.
 ///
 /// ```toml
@@ -65,8 +65,8 @@ pub struct FuzzConfig {
 }
 
 impl FuzzConfig {
-    pub fn load(prvz: &Path) -> Result<FuzzConfig> {
-        let file = prvz.parent().unwrap_or(Path::new(".")).join("fuzz.toml");
+    pub fn load(lmn: &Path) -> Result<FuzzConfig> {
+        let file = lmn.parent().unwrap_or(Path::new(".")).join("fuzz.toml");
         let mut cfg = FuzzConfig::default();
         if !file.exists() {
             return Ok(cfg);
@@ -140,7 +140,7 @@ impl Ctx<'_> {
         })
     }
 
-    /// A valid JSON value for a Parvez type.
+    /// A valid JSON value for a Limen type.
     fn sample(&self, t: &Type, depth: usize) -> Value {
         match t {
             Type::Named(n, _) if is_uuid(n) => json!(SAMPLE_UUID),
@@ -456,7 +456,7 @@ fn send(port: u16, c: &Case, extra: &[(String, String)]) -> std::io::Result<(u16
     let text = String::from_utf8_lossy(&raw).to_string();
     let status = text.get(9..12).and_then(|x| x.parse().ok()).ok_or_else(|| std::io::Error::other("no HTTP status line"))?;
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-    let rejected = head.to_ascii_lowercase().contains("\r\nx-parvez-rejected:");
+    let rejected = head.to_ascii_lowercase().contains("\r\nx-limen-rejected:");
     Ok((status, body.to_string(), rejected))
 }
 
@@ -476,11 +476,11 @@ pub fn run(prog: &Program, bin: &Path, cfg: &FuzzConfig) -> Result<()> {
         bail!("no `route`s to fuzz");
     }
     let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
-    let log = std::env::temp_dir().join(format!("parvez-fuzz-{}.log", std::process::id()));
+    let log = std::env::temp_dir().join(format!("limen-fuzz-{}.log", std::process::id()));
     let mut server = Server(
         Command::new(bin)
             .env("PORT", port.to_string())
-            .env("PARVEZ_FUZZ", "1")
+            .env("LIMEN_FUZZ", "1")
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log)?)
             .spawn()
@@ -541,24 +541,24 @@ pub fn run(prog: &Program, bin: &Path, cfg: &FuzzConfig) -> Result<()> {
     let _ = std::fs::remove_file(&log);
 
     for w in warns.iter().take(25) {
-        eprintln!("parvez: fuzz: warning: {w}");
+        eprintln!("limen: fuzz: warning: {w}");
     }
     if warns.len() > 25 {
-        eprintln!("parvez: fuzz: ... {} more 5xx warnings", warns.len() - 25);
+        eprintln!("limen: fuzz: ... {} more 5xx warnings", warns.len() - 25);
     }
     for f in &fails {
-        eprintln!("parvez: fuzz: FAIL {f}");
+        eprintln!("limen: fuzz: FAIL {f}");
     }
     for (route, (n, hit)) in &reach {
-        eprintln!("parvez: fuzz: coverage: {route}: {hit}/{n} request(s) got past validation into the handler");
+        eprintln!("limen: fuzz: coverage: {route}: {hit}/{n} request(s) got past validation into the handler");
         if *hit == 0 {
             eprintln!(
-                "parvez: fuzz: warning: {route} was never reached; add realistic values in fuzz.toml ([params], [body], [headers], [sign])"
+                "limen: fuzz: warning: {route} was never reached; add realistic values in fuzz.toml ([params], [body], [headers], [sign])"
             );
         }
     }
     eprintln!(
-        "parvez: fuzz: {} requests across {} route(s): {ok} ok, {} 5xx (no leak), {} failure(s); {panics} handler panic(s) contained",
+        "limen: fuzz: {} requests across {} route(s): {ok} ok, {} 5xx (no leak), {} failure(s); {panics} handler panic(s) contained",
         cases.len(),
         routes.len(),
         warns.len(),

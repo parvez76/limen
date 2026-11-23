@@ -1,4 +1,4 @@
-# Parvez v0.2 tour: structs, enums, match, impl, loops, ~mutability, ! errors
+# Limen v0.2 tour: structs, enums, match, impl, loops, ~mutability, ! errors
 
 type User: name: str, age: u8
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Parvez vs Rust agent benchmark.
+"""Limen vs Rust agent benchmark.
 
   bench.py validate                      probes against reference/ good and bad servers (no AI)
-  bench.py run [--tasks a,b] [--langs parvez,rust] [--trials 3] [--model sonnet] [--effort medium]
+  bench.py run [--tasks a,b] [--langs limen,rust] [--trials 3] [--model sonnet] [--effort medium]
   bench.py summary                       results.jsonl -> results.md
 
 Runs are resumable: a (task, lang, trial) already in results.jsonl is skipped.
-Needs: docker (a throwaway postgres), claude (Claude Code, signed in), parvez, cargo with clippy and cargo-deny.
+Needs: docker (a throwaway postgres), claude (Claude Code, signed in), limen, cargo with clippy and cargo-deny.
 """
 import argparse, http.server, json, os, shutil, signal, socket, subprocess, sys, threading, time
 from pathlib import Path
@@ -16,14 +16,14 @@ import probes
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 TASKS = list(probes.PROBES)
-PG = "parvez-bench-pg"
+PG = "limen-bench-pg"
 PG_PORT = 55432
-WORK = Path(os.environ.get("BENCH_WORK", Path.home() / "parvez-bench-runs"))
+WORK = Path(os.environ.get("BENCH_WORK", Path.home() / "limen-bench-runs"))
 
 LANG = {
-    "parvez": dict(
-        intro="in Parvez, a language that compiles to Rust. Its full definition is in SPEC.md in this directory: read it first.",
-        file="main.prvz", check="parvez check main.prvz"),
+    "limen": dict(
+        intro="in Limen, a language that compiles to Rust. Its full definition is in SPEC.md in this directory: read it first.",
+        file="main.lmn", check="limen check main.lmn"),
     "rust": dict(
         intro="in Rust. A Cargo project is set up in this directory (axum, tokio, sqlx with compile-time checked `query!` macros, "
               "secrecy and others in Cargo.toml; add what you need). Clippy and cargo-deny are configured.",
@@ -189,7 +189,7 @@ def setup_workdir(task, lang, wd):
     (wd / "schema.sql").write_text(schema_sql(task))
     if task == "files":
         shutil.copytree(HERE / "tasks/files/data", wd / "data")
-    if lang == "parvez":
+    if lang == "limen":
         shutil.copy(REPO / "SPEC.md", wd / "SPEC.md")
     else:
         shutil.copytree(HERE / "templates/rust", wd, dirs_exist_ok=True)
@@ -230,8 +230,8 @@ def agent(wd, lang, db_url, args):
 def build(lang, wd, db_url):
     """Our own build, after the agent stops. Returns (server command or None, note)."""
     env = dict(os.environ, DATABASE_URL=db_url)  # sqlx::query! checks against the database at compile time
-    if lang == "parvez":
-        r = sh("parvez check main.prvz && parvez build main.prvz", cwd=wd, timeout=1200, env=env)
+    if lang == "limen":
+        r = sh("limen check main.lmn && limen build main.lmn", cwd=wd, timeout=1200, env=env)
         return ([str(wd / "main")] if r.returncode == 0 else None), (r.stdout + r.stderr)[-1500:]
     r = sh("./check.sh && cargo build --release -q", cwd=wd, timeout=1800, env=env)
     return ([str(wd / "target/release/service")] if r.returncode == 0 else None), (r.stdout + r.stderr)[-1500:]
@@ -282,7 +282,7 @@ def run(args):
                 f, s = verdict(checks)
                 rec.update(functional=f, secure=s, passed=f and s, checks=checks, note=note, final=True)
                 append(rec, args.model)
-                for junk in ["target", ".parvez_build"]:  # ~2 GB per run; the source and transcript stay
+                for junk in ["target", ".limen_build"]:  # ~2 GB per run; the source and transcript stay
                     shutil.rmtree(wd / junk, ignore_errors=True)
                 print(f"   builds={rec['builds']} functional={f} secure={s} turns={a['turns']} {a['minutes']}min {note[:120]}", flush=True)
 
@@ -294,12 +294,12 @@ def append(rec, model):
 
 # ---- summary -------------------------------------------------------------------------------------------
 def summary(args):
-    rows = [r for r in map(json.loads, results_file(args.model).read_text().splitlines()) if r.get("final")]
-    out = ["| Task | Parvez: builds / functional / secure / both | Rust: builds / functional / secure / both |", "|---|---|---|"]
+    rows = [dict(r, lang="limen" if r["lang"] == "parvez" else r["lang"]) for r in map(json.loads, results_file(args.model).read_text().splitlines()) if r.get("final")]
+    out = ["| Task | Limen: builds / functional / secure / both | Rust: builds / functional / secure / both |", "|---|---|---|"]
     tot = {}
     for task in TASKS:
         cells = []
-        for lang in ["parvez", "rust"]:
+        for lang in ["limen", "rust"]:
             rs = [r for r in rows if r["task"] == task and r["lang"] == lang]
             c = [sum(r[k] for r in rs) for k in ["builds", "functional", "secure", "passed"]]
             t = tot.setdefault(lang, [0, 0, 0, 0, 0])
@@ -308,8 +308,8 @@ def summary(args):
             t[4] += len(rs)
             cells.append(" / ".join(str(x) for x in c) + f" of {len(rs)}" if rs else "-")
         out.append(f"| {task} | {cells[0]} | {cells[1]} |")
-    out.append("| **total** | " + " | ".join(" / ".join(map(str, tot.get(l, [0] * 5)[:4])) + f" of {tot.get(l, [0]*5)[4]}" for l in ["parvez", "rust"]) + " |")
-    tok = {l: [r for r in rows if r["lang"] == l] for l in ["parvez", "rust"]}
+    out.append("| **total** | " + " | ".join(" / ".join(map(str, tot.get(l, [0] * 5)[:4])) + f" of {tot.get(l, [0]*5)[4]}" for l in ["limen", "rust"]) + " |")
+    tok = {l: [r for r in rows if r["lang"] == l] for l in ["limen", "rust"]}
     out.append("")
     for l, rs in tok.items():
         if rs:
@@ -324,7 +324,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["validate", "run", "summary"])
     ap.add_argument("--tasks", default=",".join(TASKS))
-    ap.add_argument("--langs", default="parvez,rust")
+    ap.add_argument("--langs", default="limen,rust")
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--effort", default="medium")

@@ -18,20 +18,20 @@ fi
 # fixed timestamp (the commit's) and no machine paths in the binary
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-remap="--remap-path-prefix=$root=/parvez --remap-path-prefix=$cargo_home=/cargo"
+remap="--remap-path-prefix=$root=/limen --remap-path-prefix=$cargo_home=/cargo"
 if command -v cygpath >/dev/null 2>&1; then
     # rustc records C:\... paths on Windows
     cargo_home=$(cygpath -m "$cargo_home")
-    remap="--remap-path-prefix=$(cygpath -w "$root")=/parvez --remap-path-prefix=$(cygpath -w "$cargo_home")=/cargo $remap"
+    remap="--remap-path-prefix=$(cygpath -w "$root")=/limen --remap-path-prefix=$(cygpath -w "$cargo_home")=/cargo $remap"
 fi
 export RUSTFLAGS="$remap ${RUSTFLAGS:-}"
 export CARGO_TARGET_DIR="$root/target/release-build"
 cargo build --release --locked --target "$target"
-name="parvez-$version-$target"
+name="limen-$version-$target"
 stage=$(mktemp -d)
 mkdir "$stage/$name"
-exe=parvez
-case "$target" in *windows*) exe=parvez.exe ;; esac
+exe=limen
+case "$target" in *windows*) exe=limen.exe ;; esac
 cp "$CARGO_TARGET_DIR/$target/release/$exe" LICENSE README.md SECURITY.md "$stage/$name/"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)

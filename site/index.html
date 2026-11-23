@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Parvez language: a small language that compiles to Rust, with built-in security checks</title>
-<meta name="description" content="Parvez is a small, experimental language for HTTP services and CLI tools. It compiles to Rust, and its compiler always checks access policies, SQL built from strings, request data reaching files and processes, and secrets reaching logs.">
+<title>Limen language: a small language that compiles to Rust, with built-in security checks</title>
+<meta name="description" content="Limen is a small, experimental language for HTTP services and CLI tools. It compiles to Rust, and its compiler always checks access policies, SQL built from strings, request data reaching files and processes, and secrets reaching logs.">
 <style>
   :root { color-scheme: light dark; --fg: #1d1f23; --bg: #fbfbfa; --muted: #5d6470; --code: #f0f1f3; --accent: #1a7f37; }
   @media (prefers-color-scheme: dark) { :root { --fg: #e6e8eb; --bg: #15171a; --muted: #9aa3ad; --code: #22262b; --accent: #4ac26b; } }
@@ -22,41 +22,41 @@
 </head>
 <body>
 <main>
-  <h1>Parvez</h1>
+  <h1>Limen</h1>
   <p class="tag">A small language for HTTP services and command-line tools. It compiles to plain Rust.</p>
   <p>Its compiler always runs a fixed set of security checks: a route without an access policy, SQL built from strings, request data reaching the filesystem or a process, and secrets reaching logs are build errors. Each check has documented limits.</p>
   <p class="muted"><strong>Status:</strong> experimental and pre-1.0. One maintainer, not independently audited.</p>
 
-  <p><img src="https://raw.githubusercontent.com/parvez76/parvez/main/docs/demo/demo.svg" alt="An admin route without an access policy is refused by parvez check; adding a guard makes it compile" style="max-width:100%;height:auto;border-radius:8px"></p>
+  <p><img src="https://raw.githubusercontent.com/parvez76/limen/main/docs/demo/demo.svg" alt="An admin route without an access policy is refused by limen check; adding a guard makes it compile" style="max-width:100%;height:auto;border-radius:8px"></p>
   <p><a href="play/"><strong>Try it in your browser →</strong></a> The real compiler, running here: write a route, watch it refuse the insecure version. No install.</p>
-  <p class="muted">Why a language, and not a Rust crate? <a href="https://github.com/parvez76/parvez/blob/main/docs/WHY-A-LANGUAGE.md">The honest answer</a>, starting with what Rust tools already do well.</p>
+  <p class="muted">Why a language, and not a Rust crate? <a href="https://github.com/parvez76/limen/blob/main/docs/WHY-A-LANGUAGE.md">The honest answer</a>, starting with what Rust tools already do well.</p>
 
   <h2>Install</h2>
   <p>Linux (x86_64, ARM64) and macOS (Apple silicon):</p>
-  <pre><code>curl -fsSL https://parvez76.github.io/parvez/install.sh | sh</code></pre>
+  <pre><code>curl -fsSL https://parvez76.github.io/limen/install.sh | sh</code></pre>
   <p>Windows (beta), in PowerShell:</p>
-  <pre><code>irm https://parvez76.github.io/parvez/install.ps1 | iex</code></pre>
-  <p class="muted">The installer checks the download against the release's SHA256SUMS (and its signed build attestation when the <code>gh</code> CLI is installed), puts <code>parvez</code> in <code>~/.parvez/bin</code>, and offers to set up the Rust toolchain if it's missing. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
+  <pre><code>irm https://parvez76.github.io/limen/install.ps1 | iex</code></pre>
+  <p class="muted">The installer checks the download against the release's SHA256SUMS (and its signed build attestation when the <code>gh</code> CLI is installed), puts <code>limen</code> in <code>~/.limen/bin</code>, and offers to set up the Rust toolchain if it's missing. Read them first: <a href="install.sh">install.sh</a>, <a href="install.ps1">install.ps1</a>.</p>
 
   <h2>Start</h2>
-  <pre><code>parvez doctor              # check the setup
-parvez new hello && cd hello
-parvez test main.prvz      # tests
-parvez run main.prvz       # http://localhost:8080</code></pre>
-  <p>Later, <code>parvez upgrade</code> moves to the newest release, verified the same way.</p>
+  <pre><code>limen doctor              # check the setup
+limen new hello && cd hello
+limen test main.lmn      # tests
+limen run main.lmn       # http://localhost:8080</code></pre>
+  <p>Later, <code>limen upgrade</code> moves to the newest release, verified the same way.</p>
 
   <h2>What it is</h2>
   <ul>
-    <li><strong>Checks on every build, no off switch:</strong> access policy on every route, SQL built from strings, request data reaching <code>std::fs</code> or <code>Command</code> (followed through functions, modules, traits and stored state), and secrets reaching logs. The only waiver is <code>@allow_insecure("reason")</code>, which is printed on every build. <a href="https://github.com/parvez76/parvez#what-the-compiler-checks">What each check catches, and its limits</a>.</li>
-    <li><strong>Compact:</strong> a JSON service is 9 lines, where the equivalent hand-written axum service is 48 (<a href="https://github.com/parvez76/parvez/tree/main/docs/comparison">both versions</a>).</li>
-    <li><strong>Written for agents:</strong> the spec is one file meant for an AI agent's context, and errors point at <code>.prvz</code> lines. Whether agents do better with it than with Rust hasn't been measured yet.</li>
-    <li><strong>No lock-in:</strong> it compiles to readable Rust; <code>parvez show</code> prints it.</li>
+    <li><strong>Checks on every build, no off switch:</strong> access policy on every route, SQL built from strings, request data reaching <code>std::fs</code> or <code>Command</code> (followed through functions, modules, traits and stored state), and secrets reaching logs. The only waiver is <code>@allow_insecure("reason")</code>, which is printed on every build. <a href="https://github.com/parvez76/limen#what-the-compiler-checks">What each check catches, and its limits</a>.</li>
+    <li><strong>Compact:</strong> a JSON service is 9 lines, where the equivalent hand-written axum service is 48 (<a href="https://github.com/parvez76/limen/tree/main/docs/comparison">both versions</a>).</li>
+    <li><strong>Written for agents:</strong> the spec is one file meant for an AI agent's context, and errors point at <code>.lmn</code> lines. Whether agents do better with it than with Rust hasn't been measured yet.</li>
+    <li><strong>No lock-in:</strong> it compiles to readable Rust; <code>limen show</code> prints it.</li>
   </ul>
 
   <h2>What it won't do</h2>
-  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Parvez enforces the wrong answer. It runs on top of Rust, covers Linux, Apple-silicon Macs and Windows (beta), and is pre-1.0. <a href="https://github.com/parvez76/parvez#what-parvez-wont-do">The full list</a>.</p>
+  <p>It won't catch your logic mistakes: if a guard returns the wrong answer, Limen enforces the wrong answer. It runs on top of Rust, covers Linux, Apple-silicon Macs and Windows (beta), and is pre-1.0. <a href="https://github.com/parvez76/limen#what-limen-wont-do">The full list</a>.</p>
 
-  <p class="muted"><a href="https://github.com/parvez76/parvez">Source on GitHub</a> · <a href="https://github.com/parvez76/parvez/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/parvez/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
+  <p class="muted"><a href="https://github.com/parvez76/limen">Source on GitHub</a> · <a href="https://github.com/parvez76/limen/blob/main/SPEC.md">Language spec</a> · <a href="https://github.com/parvez76/limen/blob/main/SECURITY.md">Security policy</a> · MIT license</p>
 </main>
 </body>
 </html>

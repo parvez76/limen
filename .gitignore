@@ -1,12 +1,12 @@
 /target
-/.parvez_build
-# binaries produced by `parvez build`
+/.limen_build
+# binaries produced by `limen build`
 /hello
 /service
-# SBOMs written by `parvez build`
+# SBOMs written by `limen build`
 /*.sbom.json
 /playground/target
-.parvez_build/
+.limen_build/
 /examples/tasks/main
 /examples/tasks/main.exe
 /examples/tasks/main.sha256

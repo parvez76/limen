@@ -1,4 +1,4 @@
-# A stateful JSON REST microservice. `parvez run examples/service.prvz` -> :8080 (PORT env overrides)
+# A stateful JSON REST microservice. `limen run examples/service.lmn` -> :8080 (PORT env overrides)
 use std::sync::Mutex
 use std::sync::atomic::{AtomicU64, Ordering}
 

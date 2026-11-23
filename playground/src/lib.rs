@@ -1,9 +1,9 @@
-//! Parvez in the browser: parse, validate, run the security checks and generate
-//! Rust for one `.prvz` file, entirely in memory. The modules are the compiler's
-//! own files, so results match `parvez lint` / `parvez show` exactly.
+//! Limen in the browser: parse, validate, run the security checks and generate
+//! Rust for one `.lmn` file, entirely in memory. The modules are the compiler's
+//! own files, so results match `limen lint` / `limen show` exactly.
 //!
 //! Interface (no wasm-bindgen): the host writes UTF-8 source into memory from
-//! `pz_alloc`, calls `pz_check(ptr, len)`, and reads `pz_result_len()` bytes of
+//! `lm_alloc`, calls `lm_check(ptr, len)`, and reads `lm_result_len()` bytes of
 //! JSON at the returned pointer.
 #![allow(dead_code)]
 
@@ -50,7 +50,7 @@ pub fn check(name: &str, src: &str) -> Value {
         Err(e) => return error(e),
     };
     if items.iter().any(|i| matches!(i, ast::Item::Import(_) | ast::Item::Embed { .. })) {
-        return json!({ "ok": false, "errors": [{ "line": null, "message": "imports and @embed_dir need files on disk; the playground checks one file at a time (use `parvez lint` locally)" }], "findings": [], "rust": null });
+        return json!({ "ok": false, "errors": [{ "line": null, "message": "imports and @embed_dir need files on disk; the playground checks one file at a time (use `limen lint` locally)" }], "findings": [], "rust": null });
     }
     let prog = ast::Program { items, modules: vec![], files: vec![(name.to_string(), src.to_string())] };
     if let Err(e) = parser::validate(&prog) {
@@ -83,13 +83,13 @@ pub fn check(name: &str, src: &str) -> Value {
     } else {
         None
     };
-    json!({ "ok": report.findings.is_empty(), "errors": [], "findings": findings, "rust": rust, "version": env!("PARVEZ_VERSION") })
+    json!({ "ok": report.findings.is_empty(), "errors": [], "findings": findings, "rust": rust, "version": env!("LIMEN_VERSION") })
 }
 
 static mut RESULT: Vec<u8> = Vec::new();
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pz_alloc(len: usize) -> *mut u8 {
+pub extern "C" fn lm_alloc(len: usize) -> *mut u8 {
     let mut v = Vec::<u8>::with_capacity(len.max(1));
     let p = v.as_mut_ptr();
     std::mem::forget(v);
@@ -97,19 +97,19 @@ pub extern "C" fn pz_alloc(len: usize) -> *mut u8 {
 }
 
 /// # Safety
-/// `ptr` must come from `pz_alloc(len)`.
+/// `ptr` must come from `lm_alloc(len)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pz_free(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn lm_free(ptr: *mut u8, len: usize) {
     drop(unsafe { Vec::from_raw_parts(ptr, 0, len.max(1)) });
 }
 
 /// # Safety
-/// `ptr..ptr+len` must be the UTF-8 source written into memory from `pz_alloc`.
+/// `ptr..ptr+len` must be the UTF-8 source written into memory from `lm_alloc`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pz_check(ptr: *const u8, len: usize) -> *const u8 {
+pub unsafe extern "C" fn lm_check(ptr: *const u8, len: usize) -> *const u8 {
     let src = unsafe { std::slice::from_raw_parts(ptr, len) };
     let out = match std::str::from_utf8(src) {
-        Ok(s) => check("playground.prvz", s),
+        Ok(s) => check("playground.lmn", s),
         Err(_) => json!({ "ok": false, "errors": [{ "line": null, "message": "the source isn't valid UTF-8" }], "findings": [], "rust": null }),
     };
     let bytes = out.to_string().into_bytes();
@@ -120,6 +120,6 @@ pub unsafe extern "C" fn pz_check(ptr: *const u8, len: usize) -> *const u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pz_result_len() -> usize {
+pub extern "C" fn lm_result_len() -> usize {
     unsafe { (*std::ptr::addr_of!(RESULT)).len() }
 }
